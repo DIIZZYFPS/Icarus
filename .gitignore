@@ -1,0 +1,34 @@
+# Project Icarus Git Ignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# Models & Large Binaries
+models/
+*.gguf
+*.bin
+*.pt
+vllm_cache/
+
+# Workspace & IPC
+workspace/memory/
+workspace/ipc/
+workspace/projects/
+
+# Logs & Debugging
+*.log
+error_*.txt
+.gemini/
+self_docs/
+
+# Docker
+.docker_compose_cache/
+
+# OS
+.DS_Store
+Thumbs.db
