@@ -1,0 +1,22 @@
+FROM /models/gemma-3-12b-it-q4_0.gguf
+
+# Gemma-3 instruct chat template (Go template format for Ollama)
+TEMPLATE """{{ if .System }}<start_of_turn>user
+{{ .System }}<end_of_turn>
+<start_of_turn>model
+Understood.<end_of_turn>
+{{ end }}{{ range .Messages }}<start_of_turn>{{ if eq .Role "user" }}user
+{{ .Content }}<end_of_turn>
+{{ else }}model
+{{ .Content }}<end_of_turn>
+{{ end }}{{ end }}<start_of_turn>model
+"""
+
+# Stop generation at end-of-turn token
+PARAMETER stop <end_of_turn>
+
+# Match the context window used under vLLM
+PARAMETER num_ctx 4096
+
+# Reduce repetition (equivalent to vLLM's repetition_penalty)
+PARAMETER repeat_penalty 1.15

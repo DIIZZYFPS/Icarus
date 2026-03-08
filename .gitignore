@@ -14,6 +14,7 @@ models/
 *.bin
 *.pt
 vllm_cache/
+ollama_data/
 
 # Workspace & IPC
 workspace/memory/

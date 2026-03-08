@@ -42,10 +42,17 @@ def escalate_to_councilor(intent_description: str, target_files: List[str]) -> s
             json.dump(payload, f, indent=2)
 
         os.replace(tmp_path, file_path)
-            
+
+        msg = "Escalation successful. The Councilor has been summoned. The API container may restart momentarily as changes are applied. You will be notified when complete."
         logger.info(f"Dropped escalation payload to {file_path}")
-        return f"Escalation successful. The Councilor has been summoned. The API container may restart momentarily as changes are applied. You will be notified when complete."
-        
+
+        # Signal completion so before_model_callback short-circuits —
+        # prevents ADK from calling the model again after escalation fires.
+        # Lazy import avoids circular dependency (tools.py imports esc_tool.py).
+        from backend.agent.tools import _respond_ctx
+        _respond_ctx.set(msg)
+        return msg
+
     except Exception as e:
         error_msg = f"Failed to drop escalation payload: {e}"
         logger.error(error_msg)
