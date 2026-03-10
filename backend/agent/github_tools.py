@@ -54,6 +54,45 @@ async def github_list_issues(owner: str, repo: str, state: str = "open") -> str:
     except Exception as e:
         return f"Error listing issues: {str(e)}"
 
+async def github_read_issue(owner: str, repo: str, issue_number: int, include_comments: bool = True) -> str:
+    """Fetches details of a specific GitHub issue, including its body and optionally comments.
+    Useful for understanding the context of a bug or feature request."""
+    client = get_github_client()
+    try:
+        issue = await client.get_issue(owner, repo, issue_number)
+
+        issue_user = issue.get("user") or {}
+        issue_author = issue_user.get("login", "unknown")
+        issue_body = issue.get("body") or "No description provided."
+
+        response = [
+            f"Issue #{issue['number']}: {issue['title']}",
+            f"State: {issue['state']}",
+            f"Author: {issue_author}",
+            f"URL: {issue['html_url']}",
+            "\n--- Body ---",
+            issue_body,
+            "--- End Body ---\n"
+        ]
+
+        if include_comments:
+            comments = await client.get_issue_comments(owner, repo, issue_number)
+            if comments:
+                response.append(f"Comments ({len(comments)}):")
+                for c in comments:
+                    comment_user = c.get("user") or {}
+                    comment_author = comment_user.get("login", "unknown")
+                    comment_body = c.get("body") or ""
+                    truncated_body = comment_body[:200]
+                    ellipsis = "..." if len(comment_body) > 200 else ""
+                    response.append(f"- [{comment_author}]: {truncated_body}{ellipsis}")
+            else:
+                response.append("No comments found.")
+                
+        return "\n".join(response)
+    except Exception as e:
+        return f"Error reading issue: {str(e)}"
+
 async def github_create_issue(owner: str, repo: str, title: str, body: str) -> str:
     """Creates a new issue in a GitHub repository."""
     client = get_github_client()
@@ -109,6 +148,7 @@ GITHUB_TOOLS = [
     github_list_repos,
     github_read_file,
     github_list_issues,
+    github_read_issue,
     github_create_issue,
     github_create_branch,
     github_write_file,

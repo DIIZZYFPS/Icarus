@@ -17,7 +17,7 @@ from backend.agent.tools import (
 from backend.agent.esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from backend.agent.github_tools import (
     github_get_repo_info, github_list_repos, github_read_file,
-    github_list_issues, github_create_issue, github_write_file,
+    github_list_issues, github_read_issue, github_create_issue, github_write_file,
     github_create_pr, github_create_branch
 )
 
@@ -44,6 +44,7 @@ _TOOL_REGISTRY = {
     "github_list_repos":     (github_list_repos,      ["user"]),
     "github_read_file":      (github_read_file,       ["owner", "repo", "path", "branch"]),
     "github_list_issues":    (github_list_issues,     ["owner", "repo", "state"]),
+    "github_read_issue":     (github_read_issue,      ["owner", "repo", "issue_number", "include_comments"]),
     "github_create_issue":   (github_create_issue,    ["owner", "repo", "title", "body"]),
     "github_write_file":     (github_write_file,      ["owner", "repo", "path", "content", "message", "branch"]),
     "github_create_pr":      (github_create_pr,       ["owner", "repo", "title", "head", "base", "body"]),

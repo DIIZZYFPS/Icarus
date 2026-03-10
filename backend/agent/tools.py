@@ -136,6 +136,7 @@ from .github_tools import (
     github_list_repos,
     github_read_file,
     github_list_issues,
+    github_read_issue,
 )
 
 ICARUS_READONLY_TOOLS = [
@@ -148,4 +149,5 @@ ICARUS_READONLY_TOOLS = [
     github_list_repos,
     github_read_file,
     github_list_issues,
+    github_read_issue,
 ]
