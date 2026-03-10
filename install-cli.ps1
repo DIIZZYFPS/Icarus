@@ -38,5 +38,9 @@ if (!(Test-Path $PROFILE)) {
     New-Item -ItemType File -Path $PROFILE -Force | Out-Null
 }
 
-Add-Content -Path $PROFILE -Value $FunctionBlock
-Write-Host "Done. Run: . `$PROFILE"
+if (Select-String -Path $PROFILE -Pattern 'function icarus {' -SimpleMatch -Quiet) {
+    Write-Host "An 'icarus' function is already defined in your PowerShell profile. Skipping update."
+} else {
+    Add-Content -Path $PROFILE -Value $FunctionBlock
+    Write-Host "Done. Run: . `$PROFILE"
+}

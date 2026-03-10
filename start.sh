@@ -10,7 +10,7 @@ cleanup() {
     exit 0
 }
 
-trap cleanup INT TERM
+trap cleanup EXIT INT TERM
 
 echo "[Icarus] Starting Docker services..."
 docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d

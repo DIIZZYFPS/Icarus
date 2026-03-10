@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -79,23 +80,29 @@ def request_create_file(filepath: str, contents: str) -> str:
         logger.error(f"[tool:request_create_file] error: {e}")
         return f"Error creating file {filepath}: {str(e)}"
 
-def append_memory(entry: str) -> str:
+def append_memory(entry: str, visibility: str = "private") -> str:
     """Appends a timestamped entry to the persistent memory log at /workspace/memory/memory.log.
     Use this to record decisions made, operator preferences discovered, task outcomes,
     recurring errors, or any context worth retaining across sessions.
-    The log persists across container restarts."""
-    logger.info(f"[tool:append_memory] entry={entry!r}")
+    The log persists across container restarts.
+
+    Args:
+        entry: The memory entry to store.
+        visibility: 'public' to store as global (visible to all contexts),
+                    'private' to store scoped to the current platform/user (default).
+    """
+    logger.info(f"[tool:append_memory] entry={entry!r} visibility={visibility!r}")
     try:
         os.makedirs(os.path.dirname(MEMORY_LOG_PATH), exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        
+
         platform = current_platform.get()
         user_id = current_user_id.get()
-        
-        # If the entry explicitly contains [GLOBAL], tag it as global instead of user-specific.
-        if "[GLOBAL]" in entry.upper():
+
+        # Tag as global if visibility='public' or if the entry contains [GLOBAL] (any case).
+        if visibility == "public" or re.search(r'\[GLOBAL\]', entry, re.IGNORECASE):
             tag = "[GLOBAL]"
-            entry = entry.replace("[GLOBAL]", "").replace("[global]", "").strip()
+            entry = re.sub(r'\[GLOBAL\]', '', entry, flags=re.IGNORECASE).strip()
         else:
             tag = f"[{platform}:{user_id}]"
 

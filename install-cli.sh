@@ -2,6 +2,11 @@
 
 ICARUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+if grep -q "icarus()" ~/.bashrc 2>/dev/null; then
+    echo "icarus() is already defined in ~/.bashrc. Skipping."
+    exit 0
+fi
+
 cat >> ~/.bashrc << EOF
 
 icarus() {
