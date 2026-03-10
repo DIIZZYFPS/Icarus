@@ -33,12 +33,12 @@ def _load_env():
                 key, _, val = line.partition('=')
                 os.environ.setdefault(key.strip(), val.strip())
 
-def _send_telegram(message: str):
+def _send_telegram(message: str, chat_id: str = None):
     """Send a message to DIIZZY via the Telegram bot."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("ALLOWED_CHAT_ID")
+    chat_id = chat_id or os.getenv("ALLOWED_CHAT_ID")
     if not token or not chat_id:
-        logger.warning("TELEGRAM_BOT_TOKEN or ALLOWED_CHAT_ID not set — skipping Telegram notification")
+        logger.warning("TELEGRAM_BOT_TOKEN or chat_id not set — skipping Telegram notification")
         return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -48,6 +48,30 @@ def _send_telegram(message: str):
         logger.info("Telegram notification sent.")
     except Exception as e:
         logger.warning(f"Failed to send Telegram notification: {e}")
+
+def _send_discord(message: str, channel_id: str = None):
+    """Send a message to DIIZZY via the Discord bot API."""
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    channel_id = channel_id or os.getenv("DISCORD_ALLOWED_CHANNEL_ID")
+    if not token or not channel_id:
+        logger.warning("DISCORD_BOT_TOKEN or channel_id not set — skipping Discord notification")
+        return
+    try:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        data = json.dumps({"content": message}).encode()
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "Icarus-Councilor-v0.1.0",
+            }
+        )
+        urllib.request.urlopen(req, timeout=10)
+        logger.info("Discord notification sent.")
+    except Exception as e:
+        logger.warning(f"Failed to send Discord notification: {e}")
 
 def _get_repo_remote_info() -> tuple:
     """Parse owner and repo name from the git remote origin URL. Returns (owner, repo) or None."""
@@ -108,24 +132,32 @@ def ensure_directories():
     IPC_DIR.mkdir(parents=True, exist_ok=True)
     MAIL_DIR.mkdir(parents=True, exist_ok=True)
 
-def _write_response(timestamp: int, message: str, restart_performed: bool):
+def _write_response(timestamp: int, message: str, restart_performed: bool, platform: str = None, user_id: str = None, chat_id: str = None):
     """Atomically writes a response file to the mail directory for heartbeat to deliver."""
     response_path = MAIL_DIR / f"intent_{timestamp}.response.json"
     tmp_path = MAIL_DIR / f"intent_{timestamp}.response.tmp"
     payload = {
         "message": message,
-        "restart_performed": restart_performed
+        "restart_performed": restart_performed,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id
     }
     with open(tmp_path, 'w') as f:
         json.dump(payload, f, indent=2)
     os.replace(tmp_path, response_path)
     logger.info(f"Wrote Councilor response to {response_path.name}")
 
-def _write_consult_response(timestamp: int, message: str):
+def _write_consult_response(timestamp: int, message: str, platform: str = None, user_id: str = None, chat_id: str = None):
     """Atomically writes a consultation response file to the mail directory."""
     response_path = MAIL_DIR / f"consult_{timestamp}.response.json"
     tmp_path = MAIL_DIR / f"consult_{timestamp}.response.tmp"
-    payload = {"message": message}
+    payload = {
+        "message": message,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id
+    }
     with open(tmp_path, 'w') as f:
         json.dump(payload, f, indent=2)
     os.replace(tmp_path, response_path)
@@ -140,13 +172,16 @@ def process_consultation(file_path: Path):
 
         question = data.get("question")
         timestamp = data.get("timestamp", int(time.time()))
+        platform = data.get("platform")
+        user_id = data.get("user_id")
+        chat_id = data.get("chat_id")
 
         if not question:
             logger.error("No question found in consultation payload. Discarding.")
             file_path.unlink()
             return
 
-        logger.info(f"Consulting Gemini (read-only): {question[:200]}")
+        logger.info(f"Consulting Gemini (read-only) [platform={platform}]: {question[:200]}")
 
         # Advisory prefix instructs Gemini not to execute anything
         prompt = (
@@ -195,14 +230,14 @@ def process_consultation(file_path: Path):
                 + (f"\n\nstderr: {stderr}" if stderr else "")
             )
 
-        _write_consult_response(timestamp, message)
+        _write_consult_response(timestamp, message, platform, user_id, chat_id)
         file_path.rename(file_path.with_suffix(".completed"))
 
     except Exception as e:
         logger.error(f"Failed to process consultation {file_path.name}: {e}")
         try:
             timestamp = int(file_path.stem.split("_")[-1]) if "_" in file_path.stem else int(time.time())
-            _write_consult_response(timestamp, f"Councilor encountered an error during consultation: {e}")
+            _write_consult_response(timestamp, f"Councilor encountered an error during consultation: {e}", platform, user_id, chat_id)
             file_path.rename(file_path.with_suffix(".failed"))
         except Exception:
             pass
@@ -217,6 +252,9 @@ def process_escalation(file_path: Path):
         intent_description = data.get("intent")
         target_files = data.get("target_files", [])
         timestamp = data.get("timestamp", int(time.time()))
+        platform = data.get("platform")
+        user_id = data.get("user_id")
+        chat_id = data.get("chat_id")
 
         if not intent_description:
             logger.error("No intent description found in payload. Discarding.")
@@ -224,7 +262,7 @@ def process_escalation(file_path: Path):
             return
 
         logger.info(f"Target files: {target_files}")
-        logger.info(f"Executing L2 Intent:\n{intent_description}")
+        logger.info(f"Executing L2 Intent [platform={platform}]:\n{intent_description}")
 
         # Ensure we start from a clean main branch before letting Gemini work.
         # Stash any leftover uncommitted changes from a previous failed run, then
@@ -365,11 +403,15 @@ def process_escalation(file_path: Path):
             message = stdout or "(Councilor completed with no output)"
             if files_changed and pr_url:
                 message += f"\n\nPR: {pr_url}"
-            _write_response(timestamp, message, restart_performed=False)
+            _write_response(timestamp, message, False, platform, user_id, chat_id)
             file_path.rename(file_path.with_suffix(".completed"))
 
-            # Notify DIIZZY via Telegram — Icarus returned immediately and doesn't poll
-            _send_telegram(f"[Icarus Escalation Complete]\n\n{message}")
+            # Notify operator via the platform they used
+            notify_msg = f"[Icarus Escalation Complete]\n\n{message}"
+            if platform == "discord":
+                _send_discord(notify_msg, chat_id)
+            else:
+                _send_telegram(notify_msg, chat_id)
 
         else:
             logger.error(f"L2 execution failed (exit {returncode})")
@@ -379,20 +421,28 @@ def process_escalation(file_path: Path):
                 + (f"\n\n{stdout}" if stdout else "")
                 + (f"\n\nstderr: {stderr}" if stderr else "")
             )
-            _write_response(timestamp, error_message, restart_performed=False)
+            _write_response(timestamp, error_message, False, platform, user_id, chat_id)
             file_path.rename(file_path.with_suffix(".failed"))
-            _send_telegram(f"[Icarus Escalation Failed]\n\n{error_message}")
+            
+            fail_msg = f"[Icarus Escalation Failed]\n\n{error_message}"
+            if platform == "discord":
+                _send_discord(fail_msg, chat_id)
+            else:
+                _send_telegram(fail_msg, chat_id)
 
     except Exception as e:
         logger.error(f"Failed to process {file_path.name}: {e}")
         try:
             timestamp = int(file_path.stem.split("_")[-1]) if "_" in file_path.stem else int(time.time())
             error_msg = f"Councilor encountered an unexpected error: {e}"
-            _write_response(timestamp, error_msg, restart_performed=False)
+            _write_response(timestamp, error_msg, False, platform, user_id, chat_id)
             file_path.rename(file_path.with_suffix(".failed"))
-            _send_telegram(f"[Icarus Escalation Error]\n\n{error_msg}")
-        except Exception:
-            pass
+            
+            err_notify = f"[Icarus Escalation Error]\n\n{error_msg}"
+            if platform == "discord":
+                _send_discord(err_notify, chat_id)
+            else:
+                _send_telegram(err_notify, chat_id)
 
 def main():
     _load_env()

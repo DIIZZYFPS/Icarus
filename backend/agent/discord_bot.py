@@ -49,9 +49,10 @@ class IcarusBot(commands.Bot):
                     content = content.replace(f'<@{self.user.id}>', '').replace(f'<@!{self.user.id}>', '').strip()
                 # Prefix with author identity so the model knows who is speaking
                 content = f"[User:{message.author.name} (id: {message.author.id})]: {content}"
-                response = await process_message("discord", str(message.author.id), content, read_only=read_only)
+                response = await process_message("discord", str(message.author.id), content, chat_id=str(message.channel.id), read_only=read_only)
                 if response:
-                    for chunk in [response[i:i+2000] for i in range(0, len(response), 2000)]:
+                    chunks = split_message(response)
+                    for chunk in chunks:
                         await message.channel.send(chunk)
             except Exception as e:
                 logger.error(f"Error processing Discord message: {e}")
@@ -70,6 +71,22 @@ async def run_discord_bot():
     except Exception as e:
         logger.error(f"Failed to start Discord bot: {e}")
 
+def split_message(text: str, limit: int = 2000) -> list[str]:
+    """Split text into chunks at newline boundaries where possible."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        split_at = text.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    return chunks
+
 async def push_discord_message(channel_id: int, text: str):
     """Send a message to a Discord channel."""
     if not bot.is_ready():
@@ -78,12 +95,13 @@ async def push_discord_message(channel_id: int, text: str):
 
     channel = bot.get_channel(channel_id)
     if channel:
-        for chunk in [text[i:i+2000] for i in range(0, len(text), 2000)]:
+        chunks = split_message(text)
+        for chunk in chunks:
             await channel.send(chunk)
     else:
         logger.error(f"Discord channel {channel_id} not found")
 
 async def handle_discord_payload(channel_id: int, user_id: str, text: str):
     """Process Discord message and send response."""
-    response_text = await process_message("discord", user_id, text)
+    response_text = await process_message("discord", user_id, text, chat_id=str(channel_id))
     await push_discord_message(channel_id, response_text)

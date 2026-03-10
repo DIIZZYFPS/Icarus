@@ -49,6 +49,9 @@ async def _poll_mailbox():
     for stem, ack_path, data in unacked:
         message = data.get("message", "(no message)")
         restart = data.get("restart_performed", False)
+        platform = data.get("platform")
+        user_id = data.get("user_id")
+        chat_id = data.get("chat_id")
 
         if stem.startswith("intent_"):
             lines = [f"[MAILBOX] Councilor escalation complete ({stem})."]
@@ -59,22 +62,28 @@ async def _poll_mailbox():
             lines.append("[Container was restarted — source changes applied.]")
         prompt = "\n\n".join(lines)
 
-        logger.info(f"[heartbeat] Delivering mailbox notification for {stem}")
+        logger.info(f"[heartbeat] Delivering mailbox notification for {stem} to {platform}:{chat_id}")
         
-        # Deliver to Telegram — route through process_message so the agent can act on the result.
-        # user_id must be a string to satisfy the ADK Session model.
-        if telegram_chat_id != 0:
+        # Targeted delivery based on the platform that initiated the request
+        if platform == "telegram" and chat_id:
             try:
-                await handle_telegram_payload(telegram_chat_id, str(telegram_chat_id), prompt)
+                await handle_telegram_payload(int(chat_id), str(user_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Telegram notification for {stem}: {e}")
-
-        # Deliver to Discord — route through process_message for the same reason.
-        if discord_channel_id != 0:
+        elif platform == "discord" and chat_id:
             try:
-                await handle_discord_payload(discord_channel_id, str(discord_channel_id), prompt)
+                await handle_discord_payload(int(chat_id), str(user_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Discord notification for {stem}: {e}")
+        else:
+            # Fallback for legacy payloads or when platform/chat info is missing
+            telegram_chat_id = int(os.environ.get("ALLOWED_CHAT_ID", "0"))
+            discord_channel_id = int(os.environ.get("DISCORD_ALLOWED_CHANNEL_ID", "0"))
+
+            if platform != "discord" and telegram_chat_id != 0:
+                await handle_telegram_payload(telegram_chat_id, str(telegram_chat_id), prompt)
+            if platform != "telegram" and discord_channel_id != 0:
+                await handle_discord_payload(discord_channel_id, str(discord_channel_id), prompt)
 
         # Mark as acked so this result isn't re-delivered if we crash mid-cleanup,
         # then delete both files to keep the mail directory clean.
