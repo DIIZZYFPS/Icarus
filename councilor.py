@@ -49,6 +49,22 @@ def _send_telegram(message: str, chat_id: str = None):
     except Exception as e:
         logger.warning(f"Failed to send Telegram notification: {e}")
 
+def _split_discord_message(text: str, limit: int = 2000) -> list:
+    """Split text into chunks at newline boundaries where possible, respecting Discord's limit."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        split_at = text.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    return chunks
+
 def _send_discord(message: str, channel_id: str = None):
     """Send a message to DIIZZY via the Discord bot API."""
     token = os.getenv("DISCORD_BOT_TOKEN")
@@ -56,22 +72,23 @@ def _send_discord(message: str, channel_id: str = None):
     if not token or not channel_id:
         logger.warning("DISCORD_BOT_TOKEN or channel_id not set — skipping Discord notification")
         return
-    try:
-        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-        data = json.dumps({"content": message}).encode()
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Authorization": f"Bot {token}",
-                "Content-Type": "application/json",
-                "User-Agent": "Icarus-Councilor-v0.1.0",
-            }
-        )
-        urllib.request.urlopen(req, timeout=10)
-        logger.info("Discord notification sent.")
-    except Exception as e:
-        logger.warning(f"Failed to send Discord notification: {e}")
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "Icarus-Councilor-v0.1.0",
+    }
+    chunks = _split_discord_message(message)
+    for i, chunk in enumerate(chunks):
+        try:
+            data = json.dumps({"content": chunk}).encode()
+            req = urllib.request.Request(url, data=data, headers=headers)
+            urllib.request.urlopen(req, timeout=10)
+            logger.info(f"Discord notification sent (chunk {i + 1}/{len(chunks)}).")
+        except Exception as e:
+            remaining = len(chunks) - i
+            logger.warning(f"Failed to send Discord notification chunk {i + 1}/{len(chunks)} ({remaining} chunk(s) skipped): {e}")
+            break
 
 def _get_repo_remote_info() -> tuple:
     """Parse owner and repo name from the git remote origin URL. Returns (owner, repo) or None."""
@@ -166,6 +183,9 @@ def _write_consult_response(timestamp: int, message: str, platform: str = None, 
 def process_consultation(file_path: Path):
     """Handles a read-only advisory consultation request from Icarus."""
     logger.info(f"Consultation detected: {file_path.name}")
+    platform = None
+    user_id = None
+    chat_id = None
     try:
         with open(file_path, 'r') as f:
             data = json.load(f)
@@ -245,6 +265,9 @@ def process_consultation(file_path: Path):
 def process_escalation(file_path: Path):
     """Reads the escalation intent from the L1 model and triggers Gemini CLI."""
     logger.info(f"Escalation detected: {file_path.name}")
+    platform = None
+    user_id = None
+    chat_id = None
     try:
         with open(file_path, 'r') as f:
             data = json.load(f)
@@ -443,6 +466,8 @@ def process_escalation(file_path: Path):
                 _send_discord(err_notify, chat_id)
             else:
                 _send_telegram(err_notify, chat_id)
+        except Exception as inner_e:
+            logger.error(f"Failed to write error response for {file_path.name}: {inner_e}")
 
 def main():
     _load_env()
