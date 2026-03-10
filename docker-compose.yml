@@ -23,6 +23,7 @@ services:
     volumes:
       - ./ollama_data:/root/.ollama
       - ./ollama_entrypoint.sh:/entrypoint.sh:ro
+      - ./Modelfile:/Modelfile:ro
 
   icarus-api:
     build:

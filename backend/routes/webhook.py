@@ -9,8 +9,7 @@ from fastapi import APIRouter, Request, BackgroundTasks
 from google.adk.runners import Runner
 from google.genai.types import Content, Part
 from backend.agent.engine import get_engine
-from backend.agent.tools import _respond_ctx, respond, read_file, list_directory, replace_file_contents
-from backend.agent.esc_tool import escalate_to_councilor
+from backend.agent.tools import read_file, list_directory, replace_file_contents
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,19 +45,16 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
 
 
 # Maps tool names → (function, ordered param names for positional arg fallback)
+# escalate_to_councilor is excluded: it is async and must be called by ADK structurally.
 _TOOL_REGISTRY = {
-    "respond":               (respond,               ["message"]),
-    "escalate_to_councilor": (escalate_to_councilor, ["intent_description", "target_files"]),
     "replace_file_contents": (replace_file_contents, ["filepath", "new_contents"]),
     "read_file":             (read_file,              ["filepath"]),
     "list_directory":        (list_directory,         ["directory"]),
 }
 # Default values for optional/commonly-omitted parameters
-_TOOL_DEFAULTS = {
-    "escalate_to_councilor": {"target_files": []},
-}
-# Scan in priority order — respond first, then terminals, then reads
-_TOOL_SCAN_ORDER = ["respond", "escalate_to_councilor", "replace_file_contents", "read_file", "list_directory"]
+_TOOL_DEFAULTS = {}
+# Scan in priority order — writes first, then reads
+_TOOL_SCAN_ORDER = ["replace_file_contents", "read_file", "list_directory"]
 
 def _find_call_end(text: str, paren_open: int) -> int:
     """Return the index of the closing ')' matching text[paren_open]='('."""
@@ -104,6 +100,31 @@ def _dispatch_tool_call(raw: str) -> str:
     # Model uses both "tool_call: name(...)" and "tool_call name{...}" formats.
     text = re.sub(r"```(?:python)?\s*", "", raw)
     text = re.sub(r"\btool_call[\s:]+", "", text).strip()
+
+    # --- Path C: Qwen3.5 thinking-mode XML format ---
+    # <tool_call><function=name><parameter=param>value</parameter></function></tool_call>
+    xml_m = re.search(r"<tool_call>\s*<function=(\w+)>(.*?)</function>\s*</tool_call>", text, re.DOTALL)
+    if xml_m:
+        tool_name = xml_m.group(1)
+        inner = xml_m.group(2)
+        logger.info(f"[fallback] Detected XML tool_call format: {tool_name}")
+        if tool_name in _TOOL_REGISTRY:
+            fn, param_names = _TOOL_REGISTRY[tool_name]
+            params = dict(re.findall(r"<parameter=(\w+)>(.*?)</parameter>", inner, re.DOTALL))
+            # Fill in defaults for any missing parameters
+            for k, v in _TOOL_DEFAULTS.get(tool_name, {}).items():
+                params.setdefault(k, v)
+            # Remap any unknown param names positionally
+            known = set(param_names)
+            kwargs = {k: v.strip() for k, v in params.items() if k in known}
+            try:
+                result = fn(**kwargs)
+                if isinstance(result, list):
+                    result = "\n".join(str(x) for x in result)
+                logger.info(f"[fallback] XML path: {tool_name}() succeeded")
+                return result or raw
+            except Exception as e:
+                logger.error(f"[fallback] XML path: {tool_name}() failed: {e}")
 
     for tool_name in _TOOL_SCAN_ORDER:
         fn, param_names = _TOOL_REGISTRY[tool_name]
@@ -192,29 +213,50 @@ async def process_telegram_payload(chat_id: int, text: str):
     # Fresh session every call — prevents tool-role accumulation in ADK history
     session_id = f"telegram_{chat_id}_{int(time.time())}"
 
-    _respond_ctx.set('')
     message = Content(role="user", parts=[Part(text=full_prompt)])
-
     response_text = ""
     async for event in runner.run_async(
         user_id=str(chat_id),
         session_id=session_id,
         new_message=message
     ):
-        val = _respond_ctx.get('')
-        if val:
-            response_text = val
-            break
         if event.is_final_response() and event.content:
-            response_text = event.content.parts[0].text
+            logger.info("[event-structure] ADK final response received")
+            logger.info(f"[event-structure] event.content type={type(event.content).__name__}")
+            logger.info(f"[event-structure] event.content.parts count={len(event.content.parts) if event.content.parts else 0}")
+
+            if event.content.parts:
+                for i, part in enumerate(event.content.parts):
+                    part_type = type(part).__name__
+                    logger.info(f"[event-structure] parts[{i}] type={part_type}")
+
+                    # Log text content
+                    if hasattr(part, 'text'):
+                        text_preview = part.text[:200] if part.text else "(empty)"
+                        logger.info(f"[event-structure] parts[{i}].text = {text_preview!r}")
+
+                    # Log function calls if present
+                    if hasattr(part, 'function_calls'):
+                        logger.info(f"[event-structure] parts[{i}].function_calls = {part.function_calls!r}")
+
+                    # Log reasoning if present
+                    if hasattr(part, 'reasoning'):
+                        reasoning_preview = str(part.reasoning)[:200] if part.reasoning else "(empty)"
+                        logger.info(f"[event-structure] parts[{i}].reasoning = {reasoning_preview!r}")
+
+            logger.info("[dispatch] ADK returned final text response (no structured tool call) — using fallback dispatcher")
+            # ADK puts reasoning in parts[0] and actual response in the last part.
+            # Always grab the last non-empty text part to skip any reasoning preamble.
+            text_parts = [p.text for p in event.content.parts if hasattr(p, 'text') and p.text]
+            response_text = text_parts[-1] if text_parts else ""
             break
 
     # Store clean user/response pair in plain-text history
     if response_text:
-        # If respond() wasn't dispatched as a real tool call (pythonic parser
-        # produced finish_reason=stop), extract the message from the raw text.
-        if not _respond_ctx.get(''):
-            response_text = _dispatch_tool_call(response_text)
+        logger.info(f"[raw-response] length={len(response_text)}")
+        logger.info(f"[raw-response] first 500 chars:\n{response_text[:500]!r}")
+        # If the model output contains a tool call in raw text format, execute it.
+        response_text = _dispatch_tool_call(response_text)
         # Strip any leaked <think>...</think> blocks from Qwen3.5 thinking mode
         response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
         history.append((text, response_text))
