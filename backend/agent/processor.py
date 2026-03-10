@@ -5,12 +5,14 @@ import json
 import time
 import logging
 import inspect
+from collections import deque
 from google.adk.runners import Runner
 from google.genai.types import Content, Part
 from backend.agent.engine import get_engine, get_readonly_engine
 from backend.agent.tools import (
     read_file, list_directory, replace_file_contents, request_create_file,
-    append_memory, MEMORY_LOG_PATH, ICARUS_READONLY_TOOLS
+    append_memory, MEMORY_LOG_PATH, ICARUS_READONLY_TOOLS,
+    current_platform, current_user_id
 )
 from backend.agent.esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from backend.agent.github_tools import (
@@ -34,7 +36,7 @@ _TOOL_REGISTRY = {
     "read_file":             (read_file,              ["filepath"]),
     "list_directory":        (list_directory,         ["directory"]),
     "request_create_file":   (request_create_file,    ["filepath", "contents"]),
-    "append_memory":         (append_memory,          ["entry"]),
+    "append_memory":         (append_memory,          ["entry", "visibility"]),
     "escalate_to_councilor": (escalate_to_councilor,  ["intent_description", "target_files"]),
     "consult_councilor":     (consult_councilor,      ["question"]),
     "check_mailbox":         (check_mailbox,          []),
@@ -217,48 +219,91 @@ async def _dispatch_tool_call(raw: str, read_only: bool = False) -> str:
 
     return raw
 
-def _load_memory_context() -> str:
-    """Read recent memory entries from the persistent memory log."""
+def _load_memory_context(platform: str, user_id: str, read_only: bool = False) -> str:
+    """Read recent memory entries from the persistent memory log, filtering for
+    global entries and entries matching the current platform and user.
+    When read_only=True, only global entries are included to prevent private
+    memory leakage into untrusted (public server) contexts.
+    Tail-reads at most MEMORY_INJECT_LINES * 4 lines to bound per-request I/O.
+    """
     try:
+        if not os.path.exists(MEMORY_LOG_PATH):
+            return ""
+        # Tail-read a bounded window without loading the entire file.
+        # deque with maxlen iterates lazily, keeping only the last N lines.
+        tail_limit = MEMORY_INJECT_LINES * 4
         with open(MEMORY_LOG_PATH, 'r') as f:
-            lines = f.readlines()
-        recent = lines[-MEMORY_INJECT_LINES:]
+            lines = list(deque(f, maxlen=tail_limit))
+
+        user_tag = f"[{platform}:{user_id}]"
+        filtered = []
+        for line in lines:
+            is_global = "[GLOBAL]" in line
+            is_user = user_tag in line
+
+            if read_only:
+                # Public/server context: only inject global entries to prevent
+                # private DM memories from leaking into public replies.
+                if not is_global:
+                    continue
+            else:
+                if not (is_global or is_user):
+                    continue
+
+            # Strip the tag for the model's readability
+            clean_line = line.replace(user_tag, "").replace("[GLOBAL]", "[SYSTEM]").strip()
+            filtered.append(clean_line)
+
+        recent = filtered[-MEMORY_INJECT_LINES:]
         if not recent:
             return ""
-        return "[PERSISTENT MEMORY — recent entries]\n" + "".join(recent) + "\n"
+        return "[PERSISTENT MEMORY — relevant entries]\n" + "\n".join(recent) + "\n"
     except Exception as e:
         logger.warning(f"[memory] Failed to load memory context: {e}")
         return ""
 
 async def process_message(platform: str, user_id: str, text: str, read_only: bool = False) -> str:
     """Core message processing logic using ADK Runner."""
-    runner: Runner = get_readonly_engine() if read_only else get_engine()
-    history_id = f"{platform}_{user_id}"
+    # Set context for tools (like append_memory)
+    token_p = current_platform.set(platform)
+    token_u = current_user_id.set(user_id)
+    
+    try:
+        runner: Runner = get_readonly_engine() if read_only else get_engine()
+        history_id = f"{platform}_{user_id}"
 
-    history = _chat_history.get(history_id, [])
-    memory_context = _load_memory_context()
-    history_text = "".join(f"User: {u}\nIcarus: {a}\n\n" for u, a in history)
-    full_prompt = memory_context + ICARUS_CONTEXT + history_text + f"User: {text}"
+        history = _chat_history.get(history_id, [])
+        memory_context = _load_memory_context(platform, user_id, read_only=read_only)
+        
+        # Identity and context headers to ensure the model knows its environment
+        context_header = f"[CONTEXT: Platform={platform.upper()}, UserID={user_id}, Access={'ReadOnly' if read_only else 'Full'}]\n"
+        
+        history_text = "".join(f"User: {u}\nIcarus: {a}\n\n" for u, a in history)
+        full_prompt = context_header + memory_context + ICARUS_CONTEXT + history_text + f"User: {text}"
 
-    session_id = f"{platform}_{user_id}_{int(time.time())}"
+        session_id = f"{platform}_{user_id}_{int(time.time())}"
 
-    message = Content(role="user", parts=[Part(text=full_prompt)])
-    response_text = ""
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=message
-    ):
-        if event.is_final_response() and event.content:
-            text_parts = [p.text for p in event.content.parts if hasattr(p, 'text') and p.text]
-            response_text = text_parts[-1] if text_parts else ""
-            break
+        message = Content(role="user", parts=[Part(text=full_prompt)])
+        response_text = ""
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=message
+        ):
+            if event.is_final_response() and event.content:
+                text_parts = [p.text for p in event.content.parts if hasattr(p, 'text') and p.text]
+                response_text = text_parts[-1] if text_parts else ""
+                break
 
-    if response_text:
-        response_text = await _dispatch_tool_call(response_text, read_only=read_only)
-        response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
-        history.append((text, response_text))
-        _chat_history[history_id] = history[-MAX_HISTORY_TURNS:]
+        if response_text:
+            response_text = await _dispatch_tool_call(response_text, read_only=read_only)
+            response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+            history.append((text, response_text))
+            _chat_history[history_id] = history[-MAX_HISTORY_TURNS:]
 
-    return response_text or "[No response]"
+        return response_text or "[No response]"
+    finally:
+        # Reset context
+        current_platform.reset(token_p)
+        current_user_id.reset(token_u)
 

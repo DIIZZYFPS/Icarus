@@ -1,5 +1,7 @@
 import os
+import re
 import logging
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
@@ -7,6 +9,11 @@ from .github_tools import GITHUB_TOOLS
 MEMORY_LOG_PATH = "/workspace/memory/memory.log"
 
 logger = logging.getLogger(__name__)
+
+# Context variables for differentiating between Discord/Telegram and users.
+# These are set in backend/agent/processor.py:process_message
+current_platform = ContextVar("current_platform", default="global")
+current_user_id = ContextVar("current_user_id", default="system")
 
 def read_file(filepath: str) -> str:
     """Reads the contents of a file from the workspace."""
@@ -73,19 +80,36 @@ def request_create_file(filepath: str, contents: str) -> str:
         logger.error(f"[tool:request_create_file] error: {e}")
         return f"Error creating file {filepath}: {str(e)}"
 
-def append_memory(entry: str) -> str:
+def append_memory(entry: str, visibility: str = "private") -> str:
     """Appends a timestamped entry to the persistent memory log at /workspace/memory/memory.log.
     Use this to record decisions made, operator preferences discovered, task outcomes,
     recurring errors, or any context worth retaining across sessions.
-    The log persists across container restarts."""
-    logger.info(f"[tool:append_memory] entry={entry!r}")
+    The log persists across container restarts.
+
+    Args:
+        entry: The memory entry to store.
+        visibility: 'public' to store as global (visible to all contexts),
+                    'private' to store scoped to the current platform/user (default).
+    """
+    logger.info(f"[tool:append_memory] entry={entry!r} visibility={visibility!r}")
     try:
         os.makedirs(os.path.dirname(MEMORY_LOG_PATH), exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        line = f"[{timestamp}] {entry}\n"
+
+        platform = current_platform.get()
+        user_id = current_user_id.get()
+
+        # Tag as global if visibility='public' or if the entry contains [GLOBAL] (any case).
+        if visibility == "public" or re.search(r'\[GLOBAL\]', entry, re.IGNORECASE):
+            tag = "[GLOBAL]"
+            entry = re.sub(r'\[GLOBAL\]', '', entry, flags=re.IGNORECASE).strip()
+        else:
+            tag = f"[{platform}:{user_id}]"
+
+        line = f"[{timestamp}] {tag} {entry}\n"
         with open(MEMORY_LOG_PATH, 'a') as f:
             f.write(line)
-        logger.info(f"[tool:append_memory] wrote entry to {MEMORY_LOG_PATH!r}")
+        logger.info(f"[tool:append_memory] wrote entry to {MEMORY_LOG_PATH!r} with tag {tag}")
         return f"Memory logged: {line.strip()}"
     except Exception as e:
         logger.error(f"[tool:append_memory] error: {e}")
