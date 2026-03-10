@@ -61,18 +61,18 @@ async def _poll_mailbox():
 
         logger.info(f"[heartbeat] Delivering mailbox notification for {stem}")
         
-        # Deliver to Telegram
+        # Deliver to Telegram — route through process_message so the agent can act on the result.
+        # user_id must be a string to satisfy the ADK Session model.
         if telegram_chat_id != 0:
             try:
-                await handle_telegram_payload(telegram_chat_id, prompt)
+                await handle_telegram_payload(telegram_chat_id, str(telegram_chat_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Telegram notification for {stem}: {e}")
 
-        # Deliver to Discord
+        # Deliver to Discord — route through process_message for the same reason.
         if discord_channel_id != 0:
             try:
-                # For heartbeat, we use the bot's user_id as a dummy since there's no initiating user
-                await handle_discord_payload(discord_channel_id, "system", prompt)
+                await handle_discord_payload(discord_channel_id, str(discord_channel_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Discord notification for {stem}: {e}")
 
