@@ -55,7 +55,7 @@ def _sanitize_identifier(value: str) -> str:
 
 async def handle_telegram_payload(chat_id: int, user_id: str, text: str):
     """Process Telegram message and send response."""
-    response_text = await process_message("telegram", user_id, text)
+    response_text = await process_message("telegram", user_id, text, chat_id=str(chat_id))
     await push_telegram_message(chat_id, response_text)
 
 @router.post("/webhook/telegram")

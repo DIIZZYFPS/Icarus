@@ -65,6 +65,12 @@ async def consult_councilor(question: str) -> str:
     os.makedirs(IPC_ESCALATION_DIR, exist_ok=True)
     os.makedirs(IPC_MAIL_DIR, exist_ok=True)
 
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id
+    
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    
     timestamp = int(time.time())
     tmp_path = os.path.join(IPC_ESCALATION_DIR, f"consult_{timestamp}.tmp")
     file_path = os.path.join(IPC_ESCALATION_DIR, f"consult_{timestamp}.json")
@@ -72,6 +78,9 @@ async def consult_councilor(question: str) -> str:
 
     payload = {
         "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
         "question": question,
         "status": "pending_host_pickup"
     }
@@ -121,7 +130,7 @@ async def escalate_to_councilor(intent_description: str, target_files: List[str]
     3. You are unable to complete a task due to container restrictions.
 
     This call returns IMMEDIATELY — it does not block. The Councilor processes the
-    task in the background and delivers the result via Telegram directly to DIIZZY.
+    task in the background and delivers the result via the originating platform directly to DIIZZY.
     After calling this tool, log the dispatch with append_memory so you remember
     the operation is pending.
 
@@ -131,12 +140,21 @@ async def escalate_to_councilor(intent_description: str, target_files: List[str]
     """
     os.makedirs(IPC_ESCALATION_DIR, exist_ok=True)
 
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id
+    
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    
     timestamp = int(time.time())
     tmp_path = os.path.join(IPC_ESCALATION_DIR, f"intent_{timestamp}.tmp")
     file_path = os.path.join(IPC_ESCALATION_DIR, f"intent_{timestamp}.json")
 
     payload = {
         "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
         "intent": intent_description,
         "target_files": target_files,
         "status": "pending_host_pickup"
@@ -146,10 +164,10 @@ async def escalate_to_councilor(intent_description: str, target_files: List[str]
         with open(tmp_path, 'w') as f:
             json.dump(payload, f, indent=2)
         os.replace(tmp_path, file_path)
-        logger.info(f"Dropped escalation payload to {file_path}. Councilor will notify via Telegram on completion.")
+        logger.info(f"Dropped escalation payload to {file_path}. Councilor will notify via {(platform or 'unknown').capitalize()} on completion.")
         return (
             f"Escalation dispatched to the Councilor. "
-            f"The result will be delivered via Telegram when complete. "
+            f"The result will be delivered via the originating platform when complete. "
             f"Intent file: intent_{timestamp}.json"
         )
     except Exception as e:

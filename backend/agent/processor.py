@@ -12,7 +12,7 @@ from backend.agent.engine import get_engine, get_readonly_engine
 from backend.agent.tools import (
     read_file, list_directory, replace_file_contents, request_create_file,
     append_memory, MEMORY_LOG_PATH, ICARUS_READONLY_TOOLS,
-    current_platform, current_user_id
+    current_platform, current_user_id, current_chat_id
 )
 from backend.agent.esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from backend.agent.github_tools import (
@@ -263,11 +263,12 @@ def _load_memory_context(platform: str, user_id: str, read_only: bool = False) -
         logger.warning(f"[memory] Failed to load memory context: {e}")
         return ""
 
-async def process_message(platform: str, user_id: str, text: str, read_only: bool = False) -> str:
+async def process_message(platform: str, user_id: str, text: str, chat_id: str = "0", read_only: bool = False) -> str:
     """Core message processing logic using ADK Runner."""
-    # Set context for tools (like append_memory)
+    # Set context for tools (like append_memory and escalate_to_councilor)
     token_p = current_platform.set(platform)
     token_u = current_user_id.set(user_id)
+    token_c = current_chat_id.set(str(chat_id))
     
     try:
         runner: Runner = get_readonly_engine() if read_only else get_engine()
@@ -277,7 +278,7 @@ async def process_message(platform: str, user_id: str, text: str, read_only: boo
         memory_context = _load_memory_context(platform, user_id, read_only=read_only)
         
         # Identity and context headers to ensure the model knows its environment
-        context_header = f"[CONTEXT: Platform={platform.upper()}, UserID={user_id}, Access={'ReadOnly' if read_only else 'Full'}]\n"
+        context_header = f"[CONTEXT: Platform={platform.upper()}, UserID={user_id}, ChatID={chat_id}, Access={'ReadOnly' if read_only else 'Full'}]\n"
         
         history_text = "".join(f"User: {u}\nIcarus: {a}\n\n" for u, a in history)
         full_prompt = context_header + memory_context + ICARUS_CONTEXT + history_text + f"User: {text}"
@@ -307,4 +308,5 @@ async def process_message(platform: str, user_id: str, text: str, read_only: boo
         # Reset context
         current_platform.reset(token_p)
         current_user_id.reset(token_u)
+        current_chat_id.reset(token_c)
 

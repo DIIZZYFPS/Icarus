@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 # These are set in backend/agent/processor.py:process_message
 current_platform = ContextVar("current_platform", default="global")
 current_user_id = ContextVar("current_user_id", default="system")
+current_chat_id = ContextVar("current_chat_id", default="0")
 
 def read_file(filepath: str) -> str:
     """Reads the contents of a file from the workspace."""
