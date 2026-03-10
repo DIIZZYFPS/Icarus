@@ -1,5 +1,6 @@
 import os
 import logging
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
@@ -7,6 +8,11 @@ from .github_tools import GITHUB_TOOLS
 MEMORY_LOG_PATH = "/workspace/memory/memory.log"
 
 logger = logging.getLogger(__name__)
+
+# Context variables for differentiating between Discord/Telegram and users.
+# These are set in backend/agent/processor.py:process_message
+current_platform = ContextVar("current_platform", default="global")
+current_user_id = ContextVar("current_user_id", default="system")
 
 def read_file(filepath: str) -> str:
     """Reads the contents of a file from the workspace."""
@@ -82,10 +88,21 @@ def append_memory(entry: str) -> str:
     try:
         os.makedirs(os.path.dirname(MEMORY_LOG_PATH), exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        line = f"[{timestamp}] {entry}\n"
+        
+        platform = current_platform.get()
+        user_id = current_user_id.get()
+        
+        # If the entry explicitly contains [GLOBAL], tag it as global instead of user-specific.
+        if "[GLOBAL]" in entry.upper():
+            tag = "[GLOBAL]"
+            entry = entry.replace("[GLOBAL]", "").replace("[global]", "").strip()
+        else:
+            tag = f"[{platform}:{user_id}]"
+
+        line = f"[{timestamp}] {tag} {entry}\n"
         with open(MEMORY_LOG_PATH, 'a') as f:
             f.write(line)
-        logger.info(f"[tool:append_memory] wrote entry to {MEMORY_LOG_PATH!r}")
+        logger.info(f"[tool:append_memory] wrote entry to {MEMORY_LOG_PATH!r} with tag {tag}")
         return f"Memory logged: {line.strip()}"
     except Exception as e:
         logger.error(f"[tool:append_memory] error: {e}")

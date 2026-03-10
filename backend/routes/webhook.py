@@ -53,11 +53,17 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 
     message = payload.get("message", {})
     chat_id = message.get("chat", {}).get("id")
+    user = message.get("from", {})
+    username = user.get("username") or user.get("first_name") or "unknown"
+    user_id = user.get("id")
     text = message.get("text")
 
     if chat_id and text:
         if chat_id != ALLOWED_CHAT_ID:
             return {"status": "ok"}  # Silently drop unknown senders
-        background_tasks.add_task(handle_telegram_payload, chat_id, text)
+        
+        # Standardize message format with identity prefix
+        formatted_text = f"[User:{username} (id: {user_id})]: {text}"
+        background_tasks.add_task(handle_telegram_payload, chat_id, formatted_text)
 
     return {"status": "ok"}
