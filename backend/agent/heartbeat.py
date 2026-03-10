@@ -36,8 +36,8 @@ async def _poll_mailbox():
         return
 
     # Lazy imports to avoid circular import at module load time
-    from backend.routes.webhook import push_telegram_message
-    from backend.agent.discord_bot import push_discord_message
+    from backend.routes.webhook import handle_telegram_payload
+    from backend.agent.discord_bot import handle_discord_payload
 
     telegram_chat_id = int(os.environ.get("ALLOWED_CHAT_ID", "0"))
     discord_channel_id = int(os.environ.get("DISCORD_ALLOWED_CHANNEL_ID", "0"))
@@ -61,17 +61,18 @@ async def _poll_mailbox():
 
         logger.info(f"[heartbeat] Delivering mailbox notification for {stem}")
         
-        # Deliver to Telegram
+        # Deliver to Telegram — route through process_message so the agent can act on the result.
+        # user_id must be a string to satisfy the ADK Session model.
         if telegram_chat_id != 0:
             try:
-                await push_telegram_message(telegram_chat_id, prompt)
+                await handle_telegram_payload(telegram_chat_id, str(telegram_chat_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Telegram notification for {stem}: {e}")
 
-        # Deliver to Discord
+        # Deliver to Discord — route through process_message for the same reason.
         if discord_channel_id != 0:
             try:
-                await push_discord_message(discord_channel_id, prompt)
+                await handle_discord_payload(discord_channel_id, str(discord_channel_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Discord notification for {stem}: {e}")
 
