@@ -19,7 +19,7 @@ class GitHubClient:
         else:
             logger.warning("GITHUB_TOKEN not found in environment. GitHub tools will operate in read-only mode for public repos.")
 
-    async def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
+    async def _request(self, method: str, path: str, **kwargs) -> Any:
         url = f"{self.base_url}{path}"
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
@@ -50,7 +50,11 @@ class GitHubClient:
         return await self._request("GET", f"/repos/{owner}/{repo}/issues/{issue_number}")
 
     async def get_issue_comments(self, owner: str, repo: str, issue_number: int) -> List[Dict[str, Any]]:
-        return await self._request("GET", f"/repos/{owner}/{repo}/issues/{issue_number}/comments")
+        return await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+            params={"per_page": 100},
+        )
 
     async def create_issue(self, owner: str, repo: str, title: str, body: str) -> Dict[str, Any]:
         data = {"title": title, "body": body}

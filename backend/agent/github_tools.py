@@ -60,23 +60,32 @@ async def github_read_issue(owner: str, repo: str, issue_number: int, include_co
     client = get_github_client()
     try:
         issue = await client.get_issue(owner, repo, issue_number)
-        
+
+        issue_user = issue.get("user") or {}
+        issue_author = issue_user.get("login", "unknown")
+        issue_body = issue.get("body") or "No description provided."
+
         response = [
             f"Issue #{issue['number']}: {issue['title']}",
             f"State: {issue['state']}",
-            f"Author: {issue['user']['login']}",
+            f"Author: {issue_author}",
             f"URL: {issue['html_url']}",
             "\n--- Body ---",
-            issue.get('body') or "No description provided.",
+            issue_body,
             "--- End Body ---\n"
         ]
-        
+
         if include_comments:
             comments = await client.get_issue_comments(owner, repo, issue_number)
             if comments:
                 response.append(f"Comments ({len(comments)}):")
                 for c in comments:
-                    response.append(f"- [{c['user']['login']}]: {c['body'][:200]}{'...' if len(c['body']) > 200 else ''}")
+                    comment_user = c.get("user") or {}
+                    comment_author = comment_user.get("login", "unknown")
+                    comment_body = c.get("body") or ""
+                    truncated_body = comment_body[:200]
+                    ellipsis = "..." if len(comment_body) > 200 else ""
+                    response.append(f"- [{comment_author}]: {truncated_body}{ellipsis}")
             else:
                 response.append("No comments found.")
                 
