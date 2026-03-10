@@ -2,7 +2,7 @@ from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
-from .tools import ICARUS_TOOLS
+from .tools import ICARUS_TOOLS, ICARUS_READONLY_TOOLS
 
 ICARUS_SYSTEM_PROMPT = """
 
@@ -12,7 +12,7 @@ You are not a chatbot. You are a daemon: persistent, precise, and purposeful.
 ## Identity
 - Host machine: X3R0 (RTX 4080 Super, 16GB VRAM)
 - You run as the L1 agent. The Councilor (L2) runs on the host and handles tasks beyond your reach.
-- You communicate exclusively through Telegram with your operator, DIIZZY.
+- You communicate with your operator, DIIZZY, via Telegram and Discord.
 
 ## Tool Law
 Use tools only when action is required:
@@ -59,9 +59,9 @@ Two escalation modes are available:
 - Modifying backend source files that require a service restart
 - Adding Python dependencies to requirements.txt
 - Any operation that requires running commands on the host
-- Non-blocking: dispatches and returns immediately; result arrives via Telegram
+- Non-blocking: dispatches and returns immediately; result arrives via Telegram or Discord
 - Always write a clear, complete intent description — the Councilor has no prior context
-- Log the dispatch with append_memory (e.g. "Escalated: add /healthz route — pending Telegram confirmation")
+- Log the dispatch with append_memory (e.g. "Escalated: add /healthz route — pending confirmation")
 
 ## Autonomy
 You have a heartbeat — a background task that wakes you up every 15 seconds to check for
@@ -72,7 +72,7 @@ pending user message. You were woken up autonomously. Act accordingly:
 - If the task produced something actionable (e.g. code was written, a file was changed),
   take the logical next step without waiting to be asked — create a PR, verify the change, etc.
 - Message DIIZZY if the result is significant, failed, or requires a decision
-- Keep your response concise — DIIZZY will see it as an unsolicited Telegram message
+- Keep your response concise — DIIZZY will see it as an unsolicited Telegram or Discord message
 
 ## Constraints
 - You cannot access the host filesystem directly.
@@ -89,6 +89,16 @@ lite_llm_model = LiteLlm(
     api_base="http://icarus-brain:11434"
 )
 
+ICARUS_READONLY_ADDENDUM = """
+## Access Level: Read-Only
+You are responding in a Discord server channel (untrusted context). You may only use:
+read_file, list_directory, append_memory, check_mailbox, consult_councilor,
+github_get_repo_info, github_list_repos, github_read_file, github_list_issues.
+Do NOT use replace_file_contents, request_create_file, escalate_to_councilor, or any
+GitHub write tools. If asked to perform a write/execute action, state clearly that it
+requires operator-level access (DM or Telegram).
+"""
+
 # Plain text replies go directly as model output — no respond() tool needed.
 agent = LlmAgent(
     model=lite_llm_model,
@@ -97,13 +107,28 @@ agent = LlmAgent(
     tools=ICARUS_TOOLS,
 )
 
+# Read-only variant for Discord server channels.
+readonly_agent = LlmAgent(
+    model=lite_llm_model,
+    name="icarus_core_readonly",
+    instruction=ICARUS_SYSTEM_PROMPT + ICARUS_READONLY_ADDENDUM,
+    tools=ICARUS_READONLY_TOOLS,
+)
+
 # The Runner manages states and conversation history
 session_service = InMemorySessionService()
 runner = Runner(agent=agent, app_name="icarus", session_service=session_service, auto_create_session=True)
 
+readonly_session_service = InMemorySessionService()
+readonly_runner = Runner(agent=readonly_agent, app_name="icarus_readonly", session_service=readonly_session_service, auto_create_session=True)
+
 def get_engine():
     """Returns the ADK Runner instance."""
     return runner
+
+def get_readonly_engine():
+    """Returns the read-only ADK Runner for untrusted contexts (Discord server channels)."""
+    return readonly_runner
 
 def get_agent():
     """Returns the raw ADK Agent instance."""

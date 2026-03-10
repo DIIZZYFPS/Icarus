@@ -27,6 +27,7 @@ error_*.txt
 .gemini/
 self_docs/
 *-cwd
+assets/
 
 # Docker
 .docker_compose_cache/

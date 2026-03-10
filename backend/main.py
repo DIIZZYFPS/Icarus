@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from backend.database.connection import init_db
 from backend.routes import webhook
 from backend.agent.heartbeat import run_heartbeat
+from backend.agent.discord_bot import run_discord_bot
 
 # Setup logging
 logging.basicConfig(
@@ -60,8 +61,10 @@ async def lifespan(app: FastAPI):
 
     logger.info("Database initialized successfully. Icarus is coming online.")
     heartbeat_task = asyncio.create_task(run_heartbeat())
+    discord_task = asyncio.create_task(run_discord_bot())
     yield
     heartbeat_task.cancel()
+    discord_task.cancel()
     logger.info("Icarus shutting down.")
 
 app = FastAPI(title="Project Icarus API", lifespan=lifespan)

@@ -5,6 +5,7 @@ import logging
 import subprocess
 import threading
 import os
+import re
 import urllib.request
 from pathlib import Path
 
@@ -47,6 +48,52 @@ def _send_telegram(message: str):
         logger.info("Telegram notification sent.")
     except Exception as e:
         logger.warning(f"Failed to send Telegram notification: {e}")
+
+def _get_repo_remote_info() -> tuple:
+    """Parse owner and repo name from the git remote origin URL. Returns (owner, repo) or None."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            return None
+        url = result.stdout.strip()
+        # Matches both HTTPS (https://github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git)
+        match = re.search(r'github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?$', url)
+        if match:
+            return match.group(1), match.group(2)
+        return None
+    except Exception:
+        return None
+
+def _create_pr_via_api(token: str, owner: str, repo: str, branch: str, title: str, body: str) -> str:
+    """Create a GitHub PR via REST API. Returns the PR HTML URL or an error string."""
+    try:
+        data = json.dumps({
+            "title": title,
+            "head": branch,
+            "base": "main",
+            "body": body,
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            data=data,
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+                "User-Agent": "Icarus-Councilor-v0.1.0",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            pr_data = json.loads(resp.read().decode())
+            return pr_data.get("html_url", "(no URL in response)")
+    except Exception as e:
+        logger.warning(f"Failed to create PR via GitHub API: {e}")
+        return None
 
 def _stream_pipe(pipe, log_fn, collector):
     """Read lines from a subprocess pipe, log each one, and collect for later."""
@@ -179,6 +226,31 @@ def process_escalation(file_path: Path):
         logger.info(f"Target files: {target_files}")
         logger.info(f"Executing L2 Intent:\n{intent_description}")
 
+        # Ensure we start from a clean main branch before letting Gemini work.
+        # Stash any leftover uncommitted changes from a previous failed run, then
+        # switch to main and create a dedicated feature branch for this escalation.
+        branch_name = f"councilor/intent-{timestamp}"
+        subprocess.run(["git", "stash"], cwd=str(PROJECT_ROOT), capture_output=True)
+        checkout_main = subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True
+        )
+        if checkout_main.returncode != 0:
+            logger.warning(f"Could not checkout main: {checkout_main.stderr.strip()} — will branch from current HEAD")
+        create_branch = subprocess.run(
+            ["git", "checkout", "-b", branch_name],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True
+        )
+        if create_branch.returncode == 0:
+            logger.info(f"Working on branch: {branch_name}")
+        else:
+            logger.warning(f"Branch creation failed: {create_branch.stderr.strip()} — continuing without branch isolation")
+            branch_name = None
+
         # Trigger Gemini CLI.
         # System prompt is loaded from GEMINI.md in the project root.
         # Popen + threads streams output in real time instead of buffering until exit.
@@ -229,42 +301,75 @@ def process_escalation(file_path: Path):
             )
             files_changed = bool(git_check.stdout.strip())
 
-            restart_performed = False
+            pr_url = None
             if files_changed:
-                logger.info("Source changes detected — restarting icarus-api...")
+                logger.info("Source changes detected.")
+                changed_list = [line.strip().split(None, 1)[-1] for line in git_check.stdout.strip().split("\n") if line.strip()]
 
-                # RESTART PROTOCOL: Write info file for the daemon to parse on startup
-                restart_info_path = PROJECT_ROOT / "workspace" / "ipc" / "restart_info.json"
-                try:
-                    changed_list = [line.strip().split(None, 1)[-1] for line in git_check.stdout.strip().split("\n") if line.strip()]
-                    restart_data = {
-                        "reason": "Councilor Escalation: Source Modification",
-                        "files": changed_list,
-                        "context": intent_description
-                    }
-                    with open(restart_info_path, 'w') as f:
-                        json.dump(restart_data, f, indent=2)
-                    logger.info(f"Wrote restart context to {restart_info_path.name}")
-                except Exception as e:
-                    logger.warning(f"Failed to write restart context: {e}")
+                # COMMIT + PUSH + PR on the feature branch
+                if branch_name:
+                    subprocess.run(["git", "add", "-A"], cwd=str(PROJECT_ROOT), capture_output=True)
+                    commit_msg = f"Councilor: {intent_description[:72]}"
+                    git_commit = subprocess.run(
+                        ["git", "commit", "-m", commit_msg],
+                        cwd=str(PROJECT_ROOT),
+                        capture_output=True,
+                        text=True
+                    )
+                    if git_commit.returncode == 0:
+                        logger.info(f"Committed changes to {branch_name}")
+                        git_push = subprocess.run(
+                            ["git", "push", "origin", branch_name],
+                            cwd=str(PROJECT_ROOT),
+                            capture_output=True,
+                            text=True
+                        )
+                        if git_push.returncode == 0:
+                            logger.info(f"Pushed {branch_name} to origin")
+                            github_token = os.getenv("GITHUB_TOKEN")
+                            repo_info = _get_repo_remote_info()
+                            if github_token and repo_info:
+                                owner, repo = repo_info
+                                changed_files_md = "\n".join(f"- `{f}`" for f in changed_list)
+                                pr_body = (
+                                    f"## Automated changes by The Councilor\n\n"
+                                    f"**Intent:**\n{intent_description}\n\n"
+                                    f"**Changed files:**\n{changed_files_md}"
+                                )
+                                pr_url = _create_pr_via_api(
+                                    github_token, owner, repo, branch_name,
+                                    title=f"Councilor: {intent_description[:60]}",
+                                    body=pr_body
+                                )
+                                if pr_url:
+                                    logger.info(f"PR created: {pr_url}")
+                                else:
+                                    logger.warning("PR creation returned no URL.")
+                            else:
+                                logger.warning("GITHUB_TOKEN or remote info missing — PR not created.")
+                        else:
+                            logger.warning(f"git push failed: {git_push.stderr.strip()}")
+                    else:
+                        logger.warning(f"git commit failed: {git_commit.stderr.strip()}")
 
+                # Switch back to main — deployment is handled externally.
                 subprocess.run(
-                    ["docker", "compose", "restart", "icarus-api"],
-                    cwd=str(PROJECT_ROOT)
+                    ["git", "checkout", "main"],
+                    cwd=str(PROJECT_ROOT),
+                    capture_output=True
                 )
-                restart_performed = True
+                logger.info("Switched back to main. Deployment is up to the operator.")
             else:
-                logger.info("No source changes — skipping container restart.")
+                logger.info("No source changes — nothing to commit.")
 
             message = stdout or "(Councilor completed with no output)"
-            _write_response(timestamp, message, restart_performed)
+            if files_changed and pr_url:
+                message += f"\n\nPR: {pr_url}"
+            _write_response(timestamp, message, restart_performed=False)
             file_path.rename(file_path.with_suffix(".completed"))
 
             # Notify DIIZZY via Telegram — Icarus returned immediately and doesn't poll
-            notify = f"[Icarus Escalation Complete]\n\n{message}"
-            if restart_performed:
-                notify += "\n\n[Container restarted — source changes applied.]"
-            _send_telegram(notify)
+            _send_telegram(f"[Icarus Escalation Complete]\n\n{message}")
 
         else:
             logger.error(f"L2 execution failed (exit {returncode})")

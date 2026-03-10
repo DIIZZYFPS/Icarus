@@ -103,3 +103,25 @@ ICARUS_TOOLS = [
     escalate_to_councilor,
     *GITHUB_TOOLS
 ]
+
+# Read-only subset: used for Discord server channels (untrusted context).
+# Excludes all write/execute tools: replace_file_contents, request_create_file,
+# escalate_to_councilor, and all GitHub mutation tools.
+from .github_tools import (
+    github_get_repo_info,
+    github_list_repos,
+    github_read_file,
+    github_list_issues,
+)
+
+ICARUS_READONLY_TOOLS = [
+    read_file,
+    list_directory,
+    append_memory,
+    check_mailbox,
+    consult_councilor,
+    github_get_repo_info,
+    github_list_repos,
+    github_read_file,
+    github_list_issues,
+]
