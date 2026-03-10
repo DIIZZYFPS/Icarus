@@ -5,6 +5,8 @@ from .github import get_github_client
 
 logger = logging.getLogger(__name__)
 
+PROTECTED_BRANCHES = {"main", "master"}
+
 async def github_get_repo_info(owner: str, repo: str) -> str:
     """Fetches metadata about a specific GitHub repository.
     Returns details like description, stars, fork count, etc."""
@@ -63,7 +65,10 @@ async def github_create_issue(owner: str, repo: str, title: str, body: str) -> s
 
 async def github_write_file(owner: str, repo: str, path: str, content: str, message: str, branch: str = "main") -> str:
     """Creates or updates a file in a GitHub repository.
-    If the file exists, it will try to fetch its SHA first to perform an update."""
+    If the file exists, it will try to fetch its SHA first to perform an update.
+    Direct writes to protected branches (main, master) are not permitted — create a branch first."""
+    if branch in PROTECTED_BRANCHES:
+        return f"Error: Direct writes to '{branch}' are not permitted. Use github_create_branch to create a working branch, then open a PR."
     client = get_github_client()
     try:
         sha = None
@@ -71,9 +76,10 @@ async def github_write_file(owner: str, repo: str, path: str, content: str, mess
             existing = await client.get_contents(owner, repo, path, branch)
             if not isinstance(existing, list):
                 sha = existing.get("sha")
-        except:
-            pass # File likely doesn't exist
-        
+        except Exception as e:
+            if "404" not in str(e):
+                return f"Error checking existing file: {str(e)}"
+
         result = await client.write_file(owner, repo, path, content, message, branch, sha)
         return f"Successfully wrote file '{path}' to {owner}/{repo} (branch: {branch}). URL: {result['content']['html_url']}"
     except Exception as e:
@@ -88,12 +94,23 @@ async def github_create_pr(owner: str, repo: str, title: str, head: str, base: s
     except Exception as e:
         return f"Error creating PR: {str(e)}"
 
+async def github_create_branch(owner: str, repo: str, branch: str, from_branch: str = "main") -> str:
+    """Creates a new branch in a GitHub repository, branching off from from_branch (default: main).
+    Always call this before github_write_file when preparing changes for a PR."""
+    client = get_github_client()
+    try:
+        await client.create_branch(owner, repo, branch, from_branch)
+        return f"Created branch '{branch}' from '{from_branch}' in {owner}/{repo}."
+    except Exception as e:
+        return f"Error creating branch: {str(e)}"
+
 GITHUB_TOOLS = [
     github_get_repo_info,
     github_list_repos,
     github_read_file,
     github_list_issues,
     github_create_issue,
+    github_create_branch,
     github_write_file,
     github_create_pr
 ]

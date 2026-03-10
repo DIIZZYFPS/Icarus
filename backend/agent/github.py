@@ -21,7 +21,7 @@ class GitHubClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             try:
                 response = await client.request(method, url, headers=self.headers, **kwargs)
                 response.raise_for_status()
@@ -65,6 +65,14 @@ class GitHubClient:
         if body:
             data["body"] = body
         return await self._request("POST", f"/repos/{owner}/{repo}/pulls", json=data)
+
+    async def create_branch(self, owner: str, repo: str, branch: str, from_branch: str = "main") -> Dict[str, Any]:
+        ref_data = await self._request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{from_branch}")
+        sha = ref_data["object"]["sha"]
+        return await self._request("POST", f"/repos/{owner}/{repo}/git/refs", json={
+            "ref": f"refs/heads/{branch}",
+            "sha": sha
+        })
 
 # Singleton instance
 _client = GitHubClient()
