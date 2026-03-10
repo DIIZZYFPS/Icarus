@@ -81,9 +81,15 @@ async def _poll_mailbox():
             discord_channel_id = int(os.environ.get("DISCORD_ALLOWED_CHANNEL_ID", "0"))
 
             if platform != "discord" and telegram_chat_id != 0:
-                await handle_telegram_payload(telegram_chat_id, str(telegram_chat_id), prompt)
+                try:
+                    await handle_telegram_payload(telegram_chat_id, str(telegram_chat_id), prompt)
+                except Exception as e:
+                    logger.error(f"[heartbeat] Failed to deliver fallback Telegram notification for {stem}: {e}")
             if platform != "telegram" and discord_channel_id != 0:
-                await handle_discord_payload(discord_channel_id, str(discord_channel_id), prompt)
+                try:
+                    await handle_discord_payload(discord_channel_id, str(discord_channel_id), prompt)
+                except Exception as e:
+                    logger.error(f"[heartbeat] Failed to deliver fallback Discord notification for {stem}: {e}")
 
         # Mark as acked so this result isn't re-delivered if we crash mid-cleanup,
         # then delete both files to keep the mail directory clean.
