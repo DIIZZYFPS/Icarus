@@ -4,10 +4,20 @@ import ast
 import json
 import time
 import logging
+import inspect
 from google.adk.runners import Runner
 from google.genai.types import Content, Part
 from backend.agent.engine import get_engine, get_readonly_engine
-from backend.agent.tools import read_file, list_directory, replace_file_contents, append_memory, MEMORY_LOG_PATH
+from backend.agent.tools import (
+    read_file, list_directory, replace_file_contents, request_create_file,
+    append_memory, MEMORY_LOG_PATH
+)
+from backend.agent.esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
+from backend.agent.github_tools import (
+    github_get_repo_info, github_list_repos, github_read_file,
+    github_list_issues, github_create_issue, github_write_file,
+    github_create_pr, github_create_branch
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +33,29 @@ _TOOL_REGISTRY = {
     "replace_file_contents": (replace_file_contents, ["filepath", "new_contents"]),
     "read_file":             (read_file,              ["filepath"]),
     "list_directory":        (list_directory,         ["directory"]),
+    "request_create_file":   (request_create_file,    ["filepath", "contents"]),
     "append_memory":         (append_memory,          ["entry"]),
+    "escalate_to_councilor": (escalate_to_councilor,  ["intent_description", "target_files"]),
+    "consult_councilor":     (consult_councilor,      ["question"]),
+    "check_mailbox":         (check_mailbox,          []),
+    "github_get_repo_info":  (github_get_repo_info,   ["owner", "repo"]),
+    "github_list_repos":     (github_list_repos,      ["user"]),
+    "github_read_file":      (github_read_file,       ["owner", "repo", "path", "branch"]),
+    "github_list_issues":    (github_list_issues,     ["owner", "repo", "state"]),
+    "github_create_issue":   (github_create_issue,    ["owner", "repo", "title", "body"]),
+    "github_write_file":     (github_write_file,      ["owner", "repo", "path", "content", "message", "branch"]),
+    "github_create_pr":      (github_create_pr,       ["owner", "repo", "title", "head", "base", "body"]),
+    "github_create_branch":  (github_create_branch,   ["owner", "repo", "branch", "from_branch"]),
 }
+
+# Tools that are allowed in read-only mode (untrusted contexts like Discord server channels)
+_READONLY_ALLOWED_TOOLS = {
+    "read_file", "list_directory", "append_memory", "consult_councilor", "check_mailbox",
+    "github_get_repo_info", "github_list_repos", "github_read_file", "github_list_issues"
+}
+
 _TOOL_DEFAULTS = {}
-_TOOL_SCAN_ORDER = ["replace_file_contents", "append_memory", "read_file", "list_directory"]
+_TOOL_SCAN_ORDER = list(_TOOL_REGISTRY.keys())
 
 def _find_call_end(text: str, paren_open: int) -> int:
     """Return the index of the closing ')' matching text[paren_open]='('."""
@@ -64,20 +93,23 @@ def _find_call_end(text: str, paren_open: int) -> int:
         i += 1
     return -1
 
-def _dispatch_tool_call(raw: str) -> str:
+async def _dispatch_tool_call(raw: str, read_only: bool = False) -> str:
     """Fallback: scan raw model output for any known tool call, execute it,
-    and return the result. Handles all 5 tools via ast.parse for robustness.
-    Falls back to the raw text if nothing is parseable."""
+    and return the result. Handles XML, Python-like, and JSON formats.
+    Respects read_only flag for untrusted contexts."""
     text = re.sub(r"```(?:python)?\s*", "", raw)
     text = re.sub(r"\btool_call[\s:]+", "", text).strip()
 
-    # --- Path C: Qwen3.5 thinking-mode XML format ---
+    # --- XML format ---
     xml_m = re.search(r"<tool_call>\s*<function=(\w+)>(.*?)</function>\s*</tool_call>", text, re.DOTALL)
     if xml_m:
         tool_name = xml_m.group(1)
         inner = xml_m.group(2)
         logger.info(f"[fallback] Detected XML tool_call format: {tool_name}")
         if tool_name in _TOOL_REGISTRY:
+            if read_only and tool_name not in _READONLY_ALLOWED_TOOLS:
+                return f"Error: Tool '{tool_name}' is not allowed in read-only mode."
+            
             fn, param_names = _TOOL_REGISTRY[tool_name]
             params = dict(re.findall(r"<parameter=(\w+)>(.*?)</parameter>", inner, re.DOTALL))
             for k, v in _TOOL_DEFAULTS.get(tool_name, {}).items():
@@ -85,7 +117,10 @@ def _dispatch_tool_call(raw: str) -> str:
             known = set(param_names)
             kwargs = {k: v.strip() for k, v in params.items() if k in known}
             try:
-                result = fn(**kwargs)
+                if inspect.iscoroutinefunction(fn):
+                    result = await fn(**kwargs)
+                else:
+                    result = fn(**kwargs)
                 if isinstance(result, list):
                     result = "\n".join(str(x) for x in result)
                 logger.info(f"[fallback] XML path: {tool_name}() succeeded")
@@ -135,6 +170,9 @@ def _dispatch_tool_call(raw: str) -> str:
         if not raw_kwargs:
             continue
 
+        if read_only and tool_name not in _READONLY_ALLOWED_TOOLS:
+            return f"Error: Tool '{tool_name}' is not allowed in read-only mode."
+
         known = set(param_names)
         kwargs = {k: v for k, v in raw_kwargs.items() if k in known}
         unknown_vals = [v for k, v in raw_kwargs.items() if k not in known]
@@ -148,7 +186,10 @@ def _dispatch_tool_call(raw: str) -> str:
 
         logger.info(f"[fallback] Executing {tool_name}(kwargs={list(kwargs.keys())})")
         try:
-            result = fn(**kwargs)
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(**kwargs)
+            else:
+                result = fn(**kwargs)
             if isinstance(result, list):
                 result = "\n".join(str(x) for x in result)
             logger.info(f"[fallback] {tool_name}() succeeded")
@@ -197,9 +238,10 @@ async def process_message(platform: str, user_id: str, text: str, read_only: boo
             break
 
     if response_text:
-        response_text = _dispatch_tool_call(response_text)
+        response_text = await _dispatch_tool_call(response_text, read_only=read_only)
         response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
         history.append((text, response_text))
         _chat_history[history_id] = history[-MAX_HISTORY_TURNS:]
 
     return response_text or "[No response]"
+
