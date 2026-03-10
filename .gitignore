@@ -26,6 +26,7 @@ workspace/projects/
 error_*.txt
 .gemini/
 self_docs/
+*-cwd
 
 # Docker
 .docker_compose_cache/

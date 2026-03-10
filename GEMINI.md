@@ -30,7 +30,6 @@ When you are called, an escalation intent JSON file has been placed in `workspac
 
 - Do not remove FastAPI routing or switch to a synchronous web framework.
 - Always use `aiosqlite` for all database operations — never synchronous SQLite.
-- Use `write_file` to write files. Always supply **complete file contents**, not diffs or patches. Never generate unified diff syntax.
 - The vLLM model runs on 16GB VRAM at `--gpu-memory-utilization 0.9`. Do not increase model parameter size or add configurations that risk OOM.
 - Do not grant the L1 agent direct host shell access.
 - Do not commit secrets or tokens to the repository. Credentials live in `.env` only.

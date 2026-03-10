@@ -65,7 +65,7 @@ def process_escalation(file_path: Path):
         # Trigger Gemini CLI.
         # System prompt is loaded from GEMINI.md in the project root.
         # Popen + threads streams output in real time instead of buffering until exit.
-        cmd = ["gemini", "-p", intent_description]
+        cmd = ["gemini", "--yolo", "--model", "gemini-3-flash-preview", "-p", intent_description]
         proc = subprocess.Popen(
             cmd,
             cwd=str(PROJECT_ROOT),

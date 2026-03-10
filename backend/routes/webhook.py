@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, BackgroundTasks
 from google.adk.runners import Runner
 from google.genai.types import Content, Part
 from backend.agent.engine import get_engine
-from backend.agent.tools import read_file, list_directory, replace_file_contents
+from backend.agent.tools import read_file, list_directory, replace_file_contents, append_memory, MEMORY_LOG_PATH
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -50,11 +50,12 @@ _TOOL_REGISTRY = {
     "replace_file_contents": (replace_file_contents, ["filepath", "new_contents"]),
     "read_file":             (read_file,              ["filepath"]),
     "list_directory":        (list_directory,         ["directory"]),
+    "append_memory":         (append_memory,          ["entry"]),
 }
 # Default values for optional/commonly-omitted parameters
 _TOOL_DEFAULTS = {}
 # Scan in priority order — writes first, then reads
-_TOOL_SCAN_ORDER = ["replace_file_contents", "read_file", "list_directory"]
+_TOOL_SCAN_ORDER = ["replace_file_contents", "append_memory", "read_file", "list_directory"]
 
 def _find_call_end(text: str, paren_open: int) -> int:
     """Return the index of the closing ')' matching text[paren_open]='('."""
@@ -202,13 +203,31 @@ def _dispatch_tool_call(raw: str) -> str:
     logger.debug("[fallback] No parseable tool call found in model output")
     return raw
 
+MEMORY_INJECT_LINES = 30  # number of recent memory entries to inject per session
+
+def _load_memory_context() -> str:
+    """Read the last MEMORY_INJECT_LINES entries from the persistent memory log."""
+    try:
+        with open(MEMORY_LOG_PATH, 'r') as f:
+            lines = f.readlines()
+        recent = lines[-MEMORY_INJECT_LINES:]
+        if not recent:
+            return ""
+        return "[PERSISTENT MEMORY — recent entries]\n" + "".join(recent) + "\n"
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        logger.warning(f"[memory] Failed to load memory context: {e}")
+        return ""
+
 async def process_telegram_payload(chat_id: int, text: str):
     runner: Runner = get_engine()
 
-    # Build context: system prompt + last N plain-text turns + current message
+    # Build context: memory log + last N plain-text turns + current message
     history = _chat_history.get(chat_id, [])
+    memory_context = _load_memory_context()
     history_text = "".join(f"User: {u}\nIcarus: {a}\n\n" for u, a in history)
-    full_prompt = ICARUS_CONTEXT + history_text + f"User: {text}"
+    full_prompt = memory_context + ICARUS_CONTEXT + history_text + f"User: {text}"
 
     # Fresh session every call — prevents tool-role accumulation in ADK history
     session_id = f"telegram_{chat_id}_{int(time.time())}"
