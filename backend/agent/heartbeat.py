@@ -36,8 +36,8 @@ async def _poll_mailbox():
         return
 
     # Lazy imports to avoid circular import at module load time
-    from backend.routes.webhook import handle_telegram_payload
-    from backend.agent.discord_bot import handle_discord_payload
+    from backend.routes.webhook import push_telegram_message
+    from backend.agent.discord_bot import push_discord_message
 
     telegram_chat_id = int(os.environ.get("ALLOWED_CHAT_ID", "0"))
     discord_channel_id = int(os.environ.get("DISCORD_ALLOWED_CHANNEL_ID", "0"))
@@ -64,15 +64,14 @@ async def _poll_mailbox():
         # Deliver to Telegram
         if telegram_chat_id != 0:
             try:
-                await handle_telegram_payload(telegram_chat_id, prompt)
+                await push_telegram_message(telegram_chat_id, prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Telegram notification for {stem}: {e}")
 
         # Deliver to Discord
         if discord_channel_id != 0:
             try:
-                # For heartbeat, we use the bot's user_id as a dummy since there's no initiating user
-                await handle_discord_payload(discord_channel_id, "system", prompt)
+                await push_discord_message(discord_channel_id, prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Discord notification for {stem}: {e}")
 
