@@ -12,9 +12,10 @@ When you are called, an escalation intent JSON file has been placed in `workspac
 
 ## Your Responsibilities
 
-1. Read the escalation intent carefully. If it is ambiguous, read the relevant source files in `backend/` for context before acting.
-2. Modify the `backend/` source code to fulfill the intent (for code-change tasks), or answer the question directly (for informational tasks).
-3. If the container fails to boot after your changes, the next escalation turn will contain the `stderr` output. Patch your own errors before returning control.
+1. Sometimes L1 Agent will send you simple Informational requests. In the case of those, do not make any codebase changes, just respond promply.
+2. Read the escalation intent carefully. If it is ambiguous, read the relevant source files in `backend/` for context before acting.
+3. Modify the `backend/` source code to fulfill the intent (for code-change tasks), or answer the question directly (for informational tasks).
+4. If the container fails to boot after your changes, the next escalation turn will contain the `stderr` output. Patch your own errors before returning control.
 
 ## Current Codebase State
 
