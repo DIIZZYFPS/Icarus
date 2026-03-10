@@ -46,6 +46,12 @@ class GitHubClient:
     async def list_issues(self, owner: str, repo: str, state: str = "open") -> List[Dict[str, Any]]:
         return await self._request("GET", f"/repos/{owner}/{repo}/issues", params={"state": state})
 
+    async def get_issue(self, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
+        return await self._request("GET", f"/repos/{owner}/{repo}/issues/{issue_number}")
+
+    async def get_issue_comments(self, owner: str, repo: str, issue_number: int) -> List[Dict[str, Any]]:
+        return await self._request("GET", f"/repos/{owner}/{repo}/issues/{issue_number}/comments")
+
     async def create_issue(self, owner: str, repo: str, title: str, body: str) -> Dict[str, Any]:
         data = {"title": title, "body": body}
         return await self._request("POST", f"/repos/{owner}/{repo}/issues", json=data)
