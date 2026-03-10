@@ -5,6 +5,7 @@ import json
 import time
 import logging
 import inspect
+from collections import deque
 from google.adk.runners import Runner
 from google.genai.types import Content, Part
 from backend.agent.engine import get_engine, get_readonly_engine
@@ -35,7 +36,7 @@ _TOOL_REGISTRY = {
     "read_file":             (read_file,              ["filepath"]),
     "list_directory":        (list_directory,         ["directory"]),
     "request_create_file":   (request_create_file,    ["filepath", "contents"]),
-    "append_memory":         (append_memory,          ["entry"]),
+    "append_memory":         (append_memory,          ["entry", "visibility"]),
     "escalate_to_councilor": (escalate_to_councilor,  ["intent_description", "target_files"]),
     "consult_councilor":     (consult_councilor,      ["question"]),
     "check_mailbox":         (check_mailbox,          []),
@@ -218,24 +219,41 @@ async def _dispatch_tool_call(raw: str, read_only: bool = False) -> str:
 
     return raw
 
-def _load_memory_context(platform: str, user_id: str) -> str:
-    """Read recent memory entries from the persistent memory log, filtering for 
+def _load_memory_context(platform: str, user_id: str, read_only: bool = False) -> str:
+    """Read recent memory entries from the persistent memory log, filtering for
     global entries and entries matching the current platform and user.
+    When read_only=True, only global entries are included to prevent private
+    memory leakage into untrusted (public server) contexts.
+    Tail-reads at most MEMORY_INJECT_LINES * 4 lines to bound per-request I/O.
     """
     try:
         if not os.path.exists(MEMORY_LOG_PATH):
             return ""
+        # Tail-read a bounded window without loading the entire file.
+        # deque with maxlen iterates lazily, keeping only the last N lines.
+        tail_limit = MEMORY_INJECT_LINES * 4
         with open(MEMORY_LOG_PATH, 'r') as f:
-            lines = f.readlines()
-        
+            lines = list(deque(f, maxlen=tail_limit))
+
         user_tag = f"[{platform}:{user_id}]"
         filtered = []
         for line in lines:
-            if "[GLOBAL]" in line or user_tag in line:
-                # Strip the tag for the model's readability if it's user-specific
-                clean_line = line.replace(user_tag, "").replace("[GLOBAL]", "[SYSTEM]").strip()
-                filtered.append(clean_line)
-        
+            is_global = "[GLOBAL]" in line
+            is_user = user_tag in line
+
+            if read_only:
+                # Public/server context: only inject global entries to prevent
+                # private DM memories from leaking into public replies.
+                if not is_global:
+                    continue
+            else:
+                if not (is_global or is_user):
+                    continue
+
+            # Strip the tag for the model's readability
+            clean_line = line.replace(user_tag, "").replace("[GLOBAL]", "[SYSTEM]").strip()
+            filtered.append(clean_line)
+
         recent = filtered[-MEMORY_INJECT_LINES:]
         if not recent:
             return ""
@@ -255,7 +273,7 @@ async def process_message(platform: str, user_id: str, text: str, read_only: boo
         history_id = f"{platform}_{user_id}"
 
         history = _chat_history.get(history_id, [])
-        memory_context = _load_memory_context(platform, user_id)
+        memory_context = _load_memory_context(platform, user_id, read_only=read_only)
         
         # Identity and context headers to ensure the model knows its environment
         context_header = f"[CONTEXT: Platform={platform.upper()}, UserID={user_id}, Access={'ReadOnly' if read_only else 'Full'}]\n"
