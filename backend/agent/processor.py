@@ -10,7 +10,7 @@ from google.genai.types import Content, Part
 from backend.agent.engine import get_engine, get_readonly_engine
 from backend.agent.tools import (
     read_file, list_directory, replace_file_contents, request_create_file,
-    append_memory, MEMORY_LOG_PATH
+    append_memory, MEMORY_LOG_PATH, ICARUS_READONLY_TOOLS
 )
 from backend.agent.esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from backend.agent.github_tools import (
@@ -48,14 +48,30 @@ _TOOL_REGISTRY = {
     "github_create_branch":  (github_create_branch,   ["owner", "repo", "branch", "from_branch"]),
 }
 
-# Tools that are allowed in read-only mode (untrusted contexts like Discord server channels)
-_READONLY_ALLOWED_TOOLS = {
-    "read_file", "list_directory", "append_memory", "consult_councilor", "check_mailbox",
-    "github_get_repo_info", "github_list_repos", "github_read_file", "github_list_issues"
-}
+# Derive the read-only allowlist from the single source of truth in tools.py so the
+# two sets can never drift apart.
+_READONLY_ALLOWED_TOOLS = {fn.__name__ for fn in ICARUS_READONLY_TOOLS}
 
 _TOOL_DEFAULTS = {}
 _TOOL_SCAN_ORDER = list(_TOOL_REGISTRY.keys())
+
+_COERCE_MAX_LEN = 10_240  # 10 KB guard against DoS via deeply nested structures
+
+def _coerce_param(v: str):
+    """Try to parse a raw string parameter value as JSON or a Python literal.
+    Falls back to the original stripped string if neither succeeds."""
+    v = v.strip()
+    if len(v) > _COERCE_MAX_LEN:
+        return v
+    try:
+        return json.loads(v)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    try:
+        return ast.literal_eval(v)
+    except (ValueError, SyntaxError, RecursionError):
+        pass
+    return v
 
 def _find_call_end(text: str, paren_open: int) -> int:
     """Return the index of the closing ')' matching text[paren_open]='('."""
@@ -108,25 +124,25 @@ async def _dispatch_tool_call(raw: str, read_only: bool = False) -> str:
         logger.info(f"[fallback] Detected XML tool_call format: {tool_name}")
         if tool_name in _TOOL_REGISTRY:
             if read_only and tool_name not in _READONLY_ALLOWED_TOOLS:
-                return f"Error: Tool '{tool_name}' is not allowed in read-only mode."
-            
-            fn, param_names = _TOOL_REGISTRY[tool_name]
-            params = dict(re.findall(r"<parameter=(\w+)>(.*?)</parameter>", inner, re.DOTALL))
-            for k, v in _TOOL_DEFAULTS.get(tool_name, {}).items():
-                params.setdefault(k, v)
-            known = set(param_names)
-            kwargs = {k: v.strip() for k, v in params.items() if k in known}
-            try:
-                if inspect.iscoroutinefunction(fn):
-                    result = await fn(**kwargs)
-                else:
-                    result = fn(**kwargs)
-                if isinstance(result, list):
-                    result = "\n".join(str(x) for x in result)
-                logger.info(f"[fallback] XML path: {tool_name}() succeeded")
-                return result or raw
-            except Exception as e:
-                logger.error(f"[fallback] XML path: {tool_name}() failed: {e}")
+                logger.info(f"[fallback] Skipping disallowed tool '{tool_name}' in read-only mode.")
+            else:
+                fn, param_names = _TOOL_REGISTRY[tool_name]
+                params = dict(re.findall(r"<parameter=(\w+)>(.*?)</parameter>", inner, re.DOTALL))
+                for k, v in _TOOL_DEFAULTS.get(tool_name, {}).items():
+                    params.setdefault(k, v)
+                known = set(param_names)
+                kwargs = {k: _coerce_param(v) for k, v in params.items() if k in known}
+                try:
+                    if inspect.iscoroutinefunction(fn):
+                        result = await fn(**kwargs)
+                    else:
+                        result = fn(**kwargs)
+                    if isinstance(result, list):
+                        result = "\n".join(str(x) for x in result)
+                    logger.info(f"[fallback] XML path: {tool_name}() succeeded")
+                    return result or raw
+                except Exception as e:
+                    logger.error(f"[fallback] XML path: {tool_name}() failed: {e}")
 
     for tool_name in _TOOL_SCAN_ORDER:
         fn, param_names = _TOOL_REGISTRY[tool_name]
@@ -171,7 +187,8 @@ async def _dispatch_tool_call(raw: str, read_only: bool = False) -> str:
             continue
 
         if read_only and tool_name not in _READONLY_ALLOWED_TOOLS:
-            return f"Error: Tool '{tool_name}' is not allowed in read-only mode."
+            logger.info(f"[fallback] Skipping disallowed tool '{tool_name}' in read-only mode.")
+            continue
 
         known = set(param_names)
         kwargs = {k: v for k, v in raw_kwargs.items() if k in known}
