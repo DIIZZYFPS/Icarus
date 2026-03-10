@@ -45,8 +45,7 @@ When escalating, write a clear, complete intent description — the Councilor ha
 # api_base is the Ollama base URL (no /v1 suffix — that's only for the OpenAI-compat endpoint).
 lite_llm_model = LiteLlm(
     model="ollama_chat/icarus-qwen",
-    api_base="http://icarus-brain:11434",
-    extra_body={"think": False},  # Ollama: top-level param to disable Qwen3.5 thinking mode
+    api_base="http://icarus-brain:11434"
 )
 
 # Plain text replies go directly as model output — no respond() tool needed.

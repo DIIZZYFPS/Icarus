@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import subprocess
+import threading
 import os
 from pathlib import Path
 
@@ -16,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
 IPC_DIR = PROJECT_ROOT / "workspace" / "ipc" / "escalation"
+
+def _stream_pipe(pipe, log_fn, collector):
+    """Read lines from a subprocess pipe, log each one, and collect for later."""
+    for line in iter(pipe.readline, ''):
+        stripped = line.rstrip('\n')
+        if stripped:
+            log_fn(stripped)
+            collector.append(stripped)
+    pipe.close()
 
 def ensure_directories():
     IPC_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,24 +64,44 @@ def process_escalation(file_path: Path):
 
         # Trigger Gemini CLI.
         # System prompt is loaded from GEMINI.md in the project root.
+        # Popen + threads streams output in real time instead of buffering until exit.
         cmd = ["gemini", "-p", intent_description]
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(PROJECT_ROOT),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            shell=True  # Required on Windows: gemini is installed as .cmd, not .exe
+            shell=True,   # Required on Windows: gemini is installed as .cmd, not .exe
+            bufsize=1,    # Line-buffered on Python's side; Node may still chunk internally
         )
 
-        if result.returncode == 0:
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        t_out = threading.Thread(
+            target=_stream_pipe,
+            args=(proc.stdout, lambda l: logger.info(f"[Gemini] {l}"), stdout_lines),
+            daemon=True,
+        )
+        t_err = threading.Thread(
+            target=_stream_pipe,
+            args=(proc.stderr, lambda l: logger.info(f"[Gemini stderr] {l}"), stderr_lines),
+            daemon=True,
+        )
+        t_out.start()
+        t_err.start()
+        t_out.join()
+        t_err.join()
+        proc.wait()
+
+        returncode = proc.returncode
+        stdout = '\n'.join(stdout_lines).strip()
+        stderr = '\n'.join(stderr_lines).strip()
+
+        if returncode == 0:
             logger.info("L2 execution successful.")
-            if result.stderr.strip():
-                logger.info(f"[Gemini stderr]\n{result.stderr.strip()}")
-            stdout = result.stdout.strip()
-            if stdout:
-                logger.info(f"[Gemini response]\n{stdout}")
-            else:
-                logger.info("[Gemini response] (no stdout captured)")
+            if not stdout:
+                logger.info("[Gemini] (no stdout captured)")
 
             # Detect whether gemini actually modified any tracked files.
             git_check = subprocess.run(
@@ -98,16 +128,10 @@ def process_escalation(file_path: Path):
             file_path.rename(file_path.with_suffix(".completed"))
 
         else:
-            logger.error(f"L2 execution failed (exit {result.returncode})")
-            stdout = result.stdout.strip()
-            stderr = result.stderr.strip()
-            if stdout:
-                logger.error(f"[Gemini stdout]\n{stdout}")
-            if stderr:
-                logger.error(f"[Gemini stderr]\n{stderr}")
+            logger.error(f"L2 execution failed (exit {returncode})")
 
             error_message = (
-                f"Councilor failed (exit {result.returncode})."
+                f"Councilor failed (exit {returncode})."
                 + (f"\n\n{stdout}" if stdout else "")
                 + (f"\n\nstderr: {stderr}" if stderr else "")
             )
