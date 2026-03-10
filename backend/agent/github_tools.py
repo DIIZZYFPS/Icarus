@@ -1,0 +1,99 @@
+import logging
+import base64
+from typing import Optional, List, Dict, Any
+from .github import get_github_client
+
+logger = logging.getLogger(__name__)
+
+async def github_get_repo_info(owner: str, repo: str) -> str:
+    """Fetches metadata about a specific GitHub repository.
+    Returns details like description, stars, fork count, etc."""
+    client = get_github_client()
+    try:
+        data = await client.get_repo(owner, repo)
+        return f"Repo: {data['full_name']}\nDescription: {data['description']}\nStars: {data['stargazers_count']}\nForks: {data['forks_count']}"
+    except Exception as e:
+        return f"Error fetching repo info: {str(e)}"
+
+async def github_list_repos(user: Optional[str] = None) -> str:
+    """Lists repositories for a user (or the authenticated user if user is None)."""
+    client = get_github_client()
+    try:
+        repos = await client.list_repos(user)
+        repo_list = "\n".join([f"- {r['full_name']}" for r in repos])
+        return f"Repositories:\n{repo_list}"
+    except Exception as e:
+        return f"Error listing repositories: {str(e)}"
+
+async def github_read_file(owner: str, repo: str, path: str, branch: str = "main") -> str:
+    """Reads the content of a file from a GitHub repository.
+    Handles base64 decoding automatically."""
+    client = get_github_client()
+    try:
+        data = await client.get_contents(owner, repo, path, branch)
+        if isinstance(data, list):
+            return f"Error: '{path}' is a directory, not a file."
+        if data.get("encoding") == "base64":
+            content = base64.b64decode(data["content"]).decode("utf-8")
+            return content
+        return data.get("content", "Error: No content found.")
+    except Exception as e:
+        return f"Error reading file from GitHub: {str(e)}"
+
+async def github_list_issues(owner: str, repo: str, state: str = "open") -> str:
+    """Lists issues in a GitHub repository."""
+    client = get_github_client()
+    try:
+        issues = await client.list_issues(owner, repo, state)
+        if not issues:
+            return f"No {state} issues found in {owner}/{repo}."
+        issue_list = "\n".join([f"#{i['number']}: {i['title']} ({i['user']['login']})" for i in issues])
+        return f"Issues in {owner}/{repo}:\n{issue_list}"
+    except Exception as e:
+        return f"Error listing issues: {str(e)}"
+
+async def github_create_issue(owner: str, repo: str, title: str, body: str) -> str:
+    """Creates a new issue in a GitHub repository."""
+    client = get_github_client()
+    try:
+        issue = await client.create_issue(owner, repo, title, body)
+        return f"Successfully created issue #{issue['number']}: {issue['html_url']}"
+    except Exception as e:
+        return f"Error creating issue: {str(e)}"
+
+async def github_write_file(owner: str, repo: str, path: str, content: str, message: str, branch: str = "main") -> str:
+    """Creates or updates a file in a GitHub repository.
+    If the file exists, it will try to fetch its SHA first to perform an update."""
+    client = get_github_client()
+    try:
+        sha = None
+        try:
+            existing = await client.get_contents(owner, repo, path, branch)
+            if not isinstance(existing, list):
+                sha = existing.get("sha")
+        except:
+            pass # File likely doesn't exist
+        
+        result = await client.write_file(owner, repo, path, content, message, branch, sha)
+        return f"Successfully wrote file '{path}' to {owner}/{repo} (branch: {branch}). URL: {result['content']['html_url']}"
+    except Exception as e:
+        return f"Error writing file to GitHub: {str(e)}"
+
+async def github_create_pr(owner: str, repo: str, title: str, head: str, base: str = "main", body: Optional[str] = None) -> str:
+    """Creates a Pull Request on GitHub."""
+    client = get_github_client()
+    try:
+        pr = await client.create_pr(owner, repo, title, head, base, body)
+        return f"Successfully created PR #{pr['number']}: {pr['html_url']}"
+    except Exception as e:
+        return f"Error creating PR: {str(e)}"
+
+GITHUB_TOOLS = [
+    github_get_repo_info,
+    github_list_repos,
+    github_read_file,
+    github_list_issues,
+    github_create_issue,
+    github_write_file,
+    github_create_pr
+]

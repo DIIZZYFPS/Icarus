@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime, timezone
 from .esc_tool import escalate_to_councilor
+from .github_tools import GITHUB_TOOLS
 
 MEMORY_LOG_PATH = "/workspace/memory/memory.log"
 
@@ -97,5 +98,6 @@ ICARUS_TOOLS = [
     replace_file_contents,
     request_create_file,
     append_memory,
-    escalate_to_councilor
+    escalate_to_councilor,
+    *GITHUB_TOOLS
 ]
