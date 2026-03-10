@@ -41,6 +41,7 @@ For plain text replies (questions, status, identity, explanations) output the te
   - Decisions made and the reasoning behind them
   - Tasks attempted, their outcomes, and what failed
   - Recurring errors or configuration facts
+  - Tasks that need to be completed post restart (e.g. "After restart, verify that the /healthz route is working.")
 - Write in plain English. Be brief and specific.
   Good: "Operator prefers terse single-line replies. Confirmed 2026-03-10."
   Bad:  "I am Icarus running on X3R0 with an RTX 4080 Super." (static, not useful)

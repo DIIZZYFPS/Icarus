@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DISCORD_ALLOWED_CHANNEL_ID = os.environ.get("DISCORD_ALLOWED_CHANNEL_ID")
+DISCORD_OPERATOR_ID = int(os.environ.get("DISCORD_OPERATOR_ID", "0"))
 
 class IcarusBot(commands.Bot):
     def __init__(self):
@@ -25,7 +26,7 @@ class IcarusBot(commands.Bot):
         if message.author == self.user:
             return
 
-        is_dm = message.guild is None
+        is_dm = message.guild is None and message.author.id == DISCORD_OPERATOR_ID
 
         if is_dm:
             # DMs are treated as operator access — full permissions, no channel restriction.
@@ -46,6 +47,8 @@ class IcarusBot(commands.Bot):
                 if not is_dm:
                     # Strip the @mention prefix before sending to the model
                     content = content.replace(f'<@{self.user.id}>', '').replace(f'<@!{self.user.id}>', '').strip()
+                # Prefix with author identity so the model knows who is speaking
+                content = f"[User:{message.author.name} (id: {message.author.id})]: {content}"
                 response = await process_message("discord", str(message.author.id), content, read_only=read_only)
                 if response:
                     for chunk in [response[i:i+2000] for i in range(0, len(response), 2000)]:

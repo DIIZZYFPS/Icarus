@@ -76,12 +76,21 @@ async def _poll_mailbox():
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Discord notification for {stem}: {e}")
 
-        # Mark as acked so this result isn't delivered again
+        # Mark as acked so this result isn't re-delivered if we crash mid-cleanup,
+        # then delete both files to keep the mail directory clean.
+        response_path = os.path.join(IPC_DIR, f"{stem}.response.json")
         try:
             open(ack_path, 'w').close()
             logger.info(f"[heartbeat] Acked {stem}")
         except Exception as e:
             logger.warning(f"[heartbeat] Failed to write ack for {stem}: {e}")
+            continue
+
+        for path in (response_path, ack_path):
+            try:
+                os.remove(path)
+            except Exception as e:
+                logger.warning(f"[heartbeat] Failed to remove {path}: {e}")
 
 
 async def run_heartbeat():
