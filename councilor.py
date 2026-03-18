@@ -203,10 +203,14 @@ def process_consultation(file_path: Path):
 
         logger.info(f"Consulting Gemini (read-only) [platform={platform}]: {question[:200]}")
 
-        # Advisory prefix instructs Gemini not to execute anything
+        # Inject the question directly as immediate context, not as something to search for.
+        # Prepend with strong instructions to avoid unnecessary project scanning.
         prompt = (
-            "CONSULTATION (read-only advisory — analyse and advise only, "
-            "do not execute any commands or modify any files):\n\n"
+            "**IMMEDIATE TASK — READ-ONLY CONSULTATION**\n"
+            "You are given a direct question below. DO NOT search the project or read source files first.\n"
+            "Analyze and advise based on the question itself and your knowledge.\n"
+            "Do not execute any commands or modify any files.\n\n"
+            "QUESTION:\n"
             + question
         )
         cmd = ["gemini","--model", "gemini-3-flash-preview", "-p", prompt]
@@ -287,6 +291,17 @@ def process_escalation(file_path: Path):
         logger.info(f"Target files: {target_files}")
         logger.info(f"Executing L2 Intent [platform={platform}]:\n{intent_description}")
 
+        # Prepend strong focus instructions to prevent unnecessary full-project scanning.
+        # Task-specific prompts help Gemini prioritize correctly without exploring every file.
+        focused_intent = (
+            "**IMMEDIATE TASK — EXECUTE THIS INTENT DIRECTLY**\n"
+            "You are given a specific intent below. Focus on fulfilling ONLY this intent.\n"
+            "Read source files only if they are directly needed to complete this task.\n"
+            "Do not scan the entire project or explore unrelated areas.\n\n"
+            "INTENT:\n"
+            + intent_description
+        )
+
         # Ensure we start from a clean main branch before letting Gemini work.
         # Stash any leftover uncommitted changes from a previous failed run, then
         # switch to main and create a dedicated feature branch for this escalation.
@@ -315,7 +330,7 @@ def process_escalation(file_path: Path):
         # Trigger Gemini CLI.
         # System prompt is loaded from GEMINI.md in the project root.
         # Popen + threads streams output in real time instead of buffering until exit.
-        cmd = ["gemini", "--yolo", "--model", "gemini-3-flash-preview", "-p", intent_description]
+        cmd = ["gemini", "--yolo", "--model", "gemini-3-flash-preview", "-p", focused_intent]
         proc = subprocess.Popen(
             cmd,
             cwd=str(PROJECT_ROOT),

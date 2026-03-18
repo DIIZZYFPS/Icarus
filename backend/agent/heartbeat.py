@@ -9,6 +9,17 @@ IPC_DIR = "/workspace/ipc/mail"
 HEARTBEAT_INTERVAL = 15  # seconds between mailbox polls
 
 
+def _env_int(name: str, default: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(f"[heartbeat] Invalid integer in {name}={raw!r}; using {default}")
+        return default
+
+
 async def _poll_mailbox():
     """Scan for unacked Councilor responses and wake Icarus for each one."""
     if not os.path.isdir(IPC_DIR):
@@ -36,13 +47,13 @@ async def _poll_mailbox():
         return
 
     # Lazy imports to avoid circular import at module load time
-    from backend.routes.webhook import handle_telegram_payload
-    from backend.agent.discord_bot import handle_discord_payload
+    from backend.routes.webhook import push_telegram_message
+    from backend.agent.discord_bot import relay_councilor_mailbox_to_operator, push_discord_message
 
-    telegram_chat_id = int(os.environ.get("ALLOWED_CHAT_ID", "0"))
-    discord_channel_id = int(os.environ.get("DISCORD_ALLOWED_CHANNEL_ID", "0"))
+    telegram_chat_id = _env_int("ALLOWED_CHAT_ID", 0)
+    discord_operator_id = _env_int("DISCORD_OPERATOR_ID", 0)
 
-    if telegram_chat_id == 0 and discord_channel_id == 0:
+    if telegram_chat_id == 0 and discord_operator_id == 0:
         logger.warning("[heartbeat] No delivery channels configured — cannot deliver mailbox notifications")
         return
 
@@ -67,27 +78,42 @@ async def _poll_mailbox():
         # Targeted delivery based on the platform that initiated the request
         if platform == "telegram" and chat_id:
             try:
-                await handle_telegram_payload(int(chat_id), str(user_id), prompt)
+                await push_telegram_message(int(chat_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Telegram notification for {stem}: {e}")
-        elif platform == "discord" and chat_id:
+        elif platform == "discord":
             try:
-                await handle_discord_payload(int(chat_id), str(user_id), prompt)
+                target_user = str(user_id) if user_id else (str(discord_operator_id) if discord_operator_id != 0 else "")
+                if stem.startswith("consult_"):
+                    await relay_councilor_mailbox_to_operator(
+                        prompt,
+                        target_user,
+                        chat_id=str(chat_id) if chat_id else None,
+                    )
+                else:
+                    await push_discord_message(None, prompt, user_id=target_user)
             except Exception as e:
                 logger.error(f"[heartbeat] Failed to deliver Discord notification for {stem}: {e}")
         else:
             # Fallback for legacy payloads or when platform/chat info is missing
-            telegram_chat_id = int(os.environ.get("ALLOWED_CHAT_ID", "0"))
-            discord_channel_id = int(os.environ.get("DISCORD_ALLOWED_CHANNEL_ID", "0"))
+            telegram_chat_id = _env_int("ALLOWED_CHAT_ID", 0)
+            discord_operator_id = _env_int("DISCORD_OPERATOR_ID", 0)
 
             if platform != "discord" and telegram_chat_id != 0:
                 try:
-                    await handle_telegram_payload(telegram_chat_id, str(telegram_chat_id), prompt)
+                    await push_telegram_message(telegram_chat_id, prompt)
                 except Exception as e:
                     logger.error(f"[heartbeat] Failed to deliver fallback Telegram notification for {stem}: {e}")
-            if platform != "telegram" and discord_channel_id != 0:
+            if platform != "telegram" and discord_operator_id != 0:
                 try:
-                    await handle_discord_payload(discord_channel_id, str(discord_channel_id), prompt)
+                    if stem.startswith("consult_"):
+                        await relay_councilor_mailbox_to_operator(
+                            prompt,
+                            str(discord_operator_id),
+                            chat_id=None,
+                        )
+                    else:
+                        await push_discord_message(None, prompt, user_id=str(discord_operator_id))
                 except Exception as e:
                     logger.error(f"[heartbeat] Failed to deliver fallback Discord notification for {stem}: {e}")
 
