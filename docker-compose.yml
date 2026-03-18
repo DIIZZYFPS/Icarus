@@ -31,6 +31,8 @@ services:
       dockerfile: Dockerfile
     container_name: icarus-api
     env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
     ports:
       - "8080:8000"
     networks:
@@ -40,8 +42,35 @@ services:
       - ./workspace/ipc:/workspace/ipc
       - ./workspace/memory:/workspace/memory
       - ./workspace/projects:/workspace/projects
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - icarus-brain
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: icarus-redis
+    networks:
+      - icarus-net
+    ports:
+      - "6379:6379"
+
+  email_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: icarus-worker # Shared image with api
+    command: python -m backend.agent.worker_email_priority
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    networks:
+      - icarus-net
+    depends_on:
+      - redis
+      - icarus-brain
+    deploy:
+      replicas: 0 # Scaled dynamically by orchestrator
 
 networks:
   icarus-net:

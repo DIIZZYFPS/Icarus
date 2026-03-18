@@ -5,6 +5,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
+from .orchestrator import dispatch_worker_task, get_worker_result
+from .gmail_tools import gmail_list_messages, gmail_get_message
 
 MEMORY_LOG_PATH = "/workspace/memory/memory.log"
 
@@ -126,6 +128,10 @@ ICARUS_TOOLS = [
     check_mailbox,
     consult_councilor,
     escalate_to_councilor,
+    dispatch_worker_task,
+    get_worker_result,
+    gmail_list_messages,
+    gmail_get_message,
     *GITHUB_TOOLS
 ]
 
@@ -151,4 +157,7 @@ ICARUS_READONLY_TOOLS = [
     github_read_file,
     github_list_issues,
     github_read_issue,
+    gmail_list_messages,
+    gmail_get_message,
+    get_worker_result,
 ]

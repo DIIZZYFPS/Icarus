@@ -21,14 +21,45 @@ from backend.agent.github_tools import (
     github_create_pr, github_create_branch
 )
 
+from backend.database.redis_connection import get_redis_client
+
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 6  # plain-text turns included in every prompt
 MEMORY_INJECT_LINES = 30  # number of recent memory entries to inject per session
 ICARUS_CONTEXT = "Conversation history:\n"
 
+async def get_chat_history(history_id: str) -> list[tuple[str, str]]:
+    """Retrieve chat history from Redis."""
+    redis = get_redis_client()
+    key = f"icarus:session:{history_id}"
+    try:
+        raw_history = await redis.lrange(key, 0, MAX_HISTORY_TURNS - 1)
+        # Redis stores strings, we need to parse them back to tuples
+        history = []
+        for item in reversed(raw_history): # lrange 0, N-1 gives newest first if we use lpush
+            try:
+                history.append(json.loads(item))
+            except json.JSONDecodeError:
+                continue
+        return history
+    except Exception as e:
+        logger.error(f"Failed to retrieve chat history from Redis: {e}")
+        return []
+
+async def save_chat_history(history_id: str, history_item: tuple[str, str]):
+    """Save chat history item to Redis."""
+    redis = get_redis_client()
+    key = f"icarus:session:{history_id}"
+    try:
+        await redis.lpush(key, json.dumps(history_item))
+        await redis.ltrim(key, 0, MAX_HISTORY_TURNS - 1)
+        await redis.expire(key, 3600 * 24 * 7) # 7 days TTL
+    except Exception as e:
+        logger.error(f"Failed to save chat history to Redis: {e}")
+
 # Plain-text conversation history keyed by platform-specific ID (e.g., "telegram_123" or "discord_456").
-_chat_history: dict[str, list[tuple[str, str]]] = {}
+# Removed: _chat_history: dict[str, list[tuple[str, str]]] = {}
 
 # Maps tool names → (function, ordered param names for positional arg fallback)
 _TOOL_REGISTRY = {
@@ -274,7 +305,7 @@ async def process_message(platform: str, user_id: str, text: str, chat_id: str =
         runner: Runner = get_readonly_engine() if read_only else get_engine()
         history_id = f"{platform}_{user_id}"
 
-        history = _chat_history.get(history_id, [])
+        history = await get_chat_history(history_id)
         memory_context = _load_memory_context(platform, user_id, read_only=read_only)
         
         # Identity and context headers to ensure the model knows its environment
@@ -300,8 +331,7 @@ async def process_message(platform: str, user_id: str, text: str, chat_id: str =
         if response_text:
             response_text = await _dispatch_tool_call(response_text, read_only=read_only)
             response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
-            history.append((text, response_text))
-            _chat_history[history_id] = history[-MAX_HISTORY_TURNS:]
+            await save_chat_history(history_id, (text, response_text))
 
         return response_text or "[No response]"
     finally:
