@@ -157,7 +157,4 @@ ICARUS_READONLY_TOOLS = [
     github_read_file,
     github_list_issues,
     github_read_issue,
-    gmail_list_messages,
-    gmail_get_message,
-    get_worker_result,
 ]
