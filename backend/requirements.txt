@@ -8,4 +8,8 @@ google-adk[extensions]>=1.26.0
 google-adk
 httpx>=0.26.0
 discord.py>=2.3.2
+redis>=5.0.0
+google-api-python-client>=2.115.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
 

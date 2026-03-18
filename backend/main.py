@@ -23,6 +23,59 @@ logger = logging.getLogger(__name__)
 RESTART_INFO_PATH = Path("/workspace/ipc/restart_info.json")
 MEMORY_LOG_PATH = Path("/workspace/memory/memory.log")
 
+from backend.database.redis_connection import get_redis_client, close_redis
+
+# Supervisor logic
+async def run_supervisor():
+    """Monitor queue depth and log scale recommendations.
+
+    Dynamic scaling via docker compose is intentionally NOT executed from inside
+    the API container (no docker socket is mounted).  Instead, this supervisor
+    calculates the desired worker count and logs a recommendation; an external
+    operator or host-level watcher can act on it.
+    """
+    redis = get_redis_client()
+    # Threshold of pending+lagging messages that triggers a scale-up suggestion
+    THRESHOLD = 5
+    MAX_WORKERS = 10
+    
+    logger.info("Supervisor starting...")
+    while True:
+        try:
+            # Check queue depth for tasks:email_priority.
+            # "pending" counts messages delivered but not yet ACK-ed.
+            # "lag" counts messages not yet delivered to any consumer.
+            # Together they represent the true unprocessed backlog.
+            info = await redis.xinfo_groups("tasks:email_priority")
+            pending = 0
+            lag = 0
+            for group in info:
+                if group["name"] == "email_worker_group":
+                    pending = group.get("pending", 0)
+                    lag = group.get("lag", 0)
+            
+            backlog = pending + lag
+
+            # Simple scaling logic: 1 worker per THRESHOLD messages, minimum 1 when
+            # there is any backlog at all.
+            needed_workers = (backlog // THRESHOLD) + (1 if backlog > 0 else 0)
+            needed_workers = min(needed_workers, MAX_WORKERS)
+
+            if needed_workers > 0:
+                logger.info(
+                    f"[supervisor] Backlog={backlog} (pending={pending}, lag={lag}). "
+                    f"Recommended email_worker replicas: {needed_workers}. "
+                    f"To scale: docker compose up -d --scale email_worker={needed_workers}"
+                )
+
+        except Exception as e:
+            if "no such key" in str(e).lower():
+                pass  # Stream doesn't exist yet
+            else:
+                logger.warning(f"Supervisor error: {e}")
+        
+        await asyncio.sleep(30)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Icarus Database...")
@@ -62,9 +115,12 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized successfully. Icarus is coming online.")
     heartbeat_task = asyncio.create_task(run_heartbeat())
     discord_task = asyncio.create_task(run_discord_bot())
+    supervisor_task = asyncio.create_task(run_supervisor())
     yield
     heartbeat_task.cancel()
     discord_task.cancel()
+    supervisor_task.cancel()
+    await close_redis()
     logger.info("Icarus shutting down.")
 
 app = FastAPI(title="Project Icarus API", lifespan=lifespan)
