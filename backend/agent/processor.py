@@ -20,6 +20,8 @@ from backend.agent.github_tools import (
     github_list_issues, github_read_issue, github_create_issue, github_write_file,
     github_create_pr, github_create_branch
 )
+from backend.agent.orchestrator import dispatch_worker_task, get_worker_result
+from backend.agent.gmail_tools import gmail_list_messages, gmail_get_message
 
 from backend.database.redis_connection import get_redis_client
 
@@ -80,6 +82,10 @@ _TOOL_REGISTRY = {
     "github_write_file":     (github_write_file,      ["owner", "repo", "path", "content", "message", "branch"]),
     "github_create_pr":      (github_create_pr,       ["owner", "repo", "title", "head", "base", "body"]),
     "github_create_branch":  (github_create_branch,   ["owner", "repo", "branch", "from_branch"]),
+    "dispatch_worker_task":  (dispatch_worker_task,   ["stream", "data"]),
+    "get_worker_result":     (get_worker_result,      ["task_id", "timeout"]),
+    "gmail_list_messages":   (gmail_list_messages,    ["query"]),
+    "gmail_get_message":     (gmail_get_message,      ["message_id"]),
 }
 
 # Derive the read-only allowlist from the single source of truth in tools.py so the

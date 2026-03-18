@@ -27,53 +27,50 @@ from backend.database.redis_connection import get_redis_client, close_redis
 
 # Supervisor logic
 async def run_supervisor():
-    """Monitor queue depth and scale workers."""
+    """Monitor queue depth and log scale recommendations.
+
+    Dynamic scaling via docker compose is intentionally NOT executed from inside
+    the API container (no docker socket is mounted).  Instead, this supervisor
+    calculates the desired worker count and logs a recommendation; an external
+    operator or host-level watcher can act on it.
+    """
     redis = get_redis_client()
-    # Threshold for scaling
+    # Threshold of pending+lagging messages that triggers a scale-up suggestion
     THRESHOLD = 5
-    # Max workers to spawn
     MAX_WORKERS = 10
-    current_workers = 0
     
     logger.info("Supervisor starting...")
     while True:
         try:
-            # Check queue depth for tasks:email_priority
-            # xlen gives current total length, but we want pending messages
+            # Check queue depth for tasks:email_priority.
+            # "pending" counts messages delivered but not yet ACK-ed.
+            # "lag" counts messages not yet delivered to any consumer.
+            # Together they represent the true unprocessed backlog.
             info = await redis.xinfo_groups("tasks:email_priority")
             pending = 0
+            lag = 0
             for group in info:
                 if group["name"] == "email_worker_group":
-                    pending = group["pending"]
+                    pending = group.get("pending", 0)
+                    lag = group.get("lag", 0)
             
-            # Simple scaling logic
-            needed_workers = (pending // THRESHOLD) + (1 if pending > 0 else 0)
+            backlog = pending + lag
+
+            # Simple scaling logic: 1 worker per THRESHOLD messages, minimum 1 when
+            # there is any backlog at all.
+            needed_workers = (backlog // THRESHOLD) + (1 if backlog > 0 else 0)
             needed_workers = min(needed_workers, MAX_WORKERS)
-            
-            if needed_workers != current_workers:
-                logger.info(f"Scaling email_worker: {current_workers} -> {needed_workers} (Pending: {pending})")
-                # Using subprocess to run docker commands if socket is mounted
-                try:
-                    # Note: Inside container, we need to ensure docker-compose is installed
-                    # or use docker directly if it's a swarm/standalone.
-                    # Since it's docker-compose, we can try scaling via docker directly if name is known,
-                    # but docker-compose up --scale is easier.
-                    proc = await asyncio.create_subprocess_exec(
-                        "docker", "compose", "up", "-d", "--scale", f"email_worker={needed_workers}",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await proc.communicate()
-                    if proc.returncode == 0:
-                        current_workers = needed_workers
-                    else:
-                        logger.error(f"Scaling failed: {stderr.decode()}")
-                except Exception as e:
-                    logger.error(f"Scaling command failed: {e}")
-            
+
+            if needed_workers > 0:
+                logger.info(
+                    f"[supervisor] Backlog={backlog} (pending={pending}, lag={lag}). "
+                    f"Recommended email_worker replicas: {needed_workers}. "
+                    f"To scale: docker compose up -d --scale email_worker={needed_workers}"
+                )
+
         except Exception as e:
             if "no such key" in str(e).lower():
-                pass # Stream doesn't exist yet
+                pass  # Stream doesn't exist yet
             else:
                 logger.warning(f"Supervisor error: {e}")
         

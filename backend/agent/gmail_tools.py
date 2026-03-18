@@ -2,13 +2,15 @@ import os
 import base64
 import json
 import logging
+import asyncio
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 logger = logging.getLogger(__name__)
 
-# Gmail scopes: 'https://www.googleapis.com/auth/gmail.readonly' or 'https://www.googleapis.com/auth/gmail.modify'
-SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+# Use read-only scope: these tools only read/list messages.
+# Elevate to gmail.modify only if write tools are added in the future.
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 def get_gmail_service():
     """Authenticate and return Gmail service."""
@@ -40,8 +42,12 @@ async def gmail_list_messages(query: str = "is:unread"):
         return "Gmail service not configured."
     
     try:
-        # service.users().messages().list(...) is synchronous, in a real app use run_in_executor
-        results = service.users().messages().list(userId='me', q=query).execute()
+        # Run the synchronous .execute() call in a thread executor to avoid
+        # blocking the asyncio event loop.
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None, lambda: service.users().messages().list(userId='me', q=query).execute()
+        )
         messages = results.get('messages', [])
         return messages
     except Exception as e:
@@ -55,7 +61,10 @@ async def gmail_get_message(message_id: str):
         return None
     
     try:
-        message = service.users().messages().get(userId='me', id=message_id).execute()
+        loop = asyncio.get_running_loop()
+        message = await loop.run_in_executor(
+            None, lambda: service.users().messages().get(userId='me', id=message_id).execute()
+        )
         return message
     except Exception as e:
         logger.error(f"Failed to get gmail message {message_id}: {e}")

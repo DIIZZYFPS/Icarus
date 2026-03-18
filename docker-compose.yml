@@ -42,7 +42,6 @@ services:
       - ./workspace/ipc:/workspace/ipc
       - ./workspace/memory:/workspace/memory
       - ./workspace/projects:/workspace/projects
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - icarus-brain
       - redis
