@@ -21,9 +21,9 @@ else
     echo "[entrypoint] Pull complete."
 fi
 
-# Build icarus-qwen: qwen3.5 with think=false and 8K context (via Modelfile)
+# Build icarus-qwen: qwen3.5 with think=false and 32K context (via Modelfile)
 # This runs on every startup so Modelfile changes are always applied.
-echo "[entrypoint] Creating icarus-qwen (think=false, 8K ctx)..."
+echo "[entrypoint] Creating icarus-qwen (think=false, 32K ctx)..."
 ollama create icarus-qwen -f /Modelfile
 echo "[entrypoint] icarus-qwen ready."
 

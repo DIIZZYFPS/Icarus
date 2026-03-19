@@ -519,9 +519,75 @@ async def _listen_for_requests():
     await pubsub.subscribe("icarus:councilor:requests")
     logger.info("[redis] Subscribed to icarus:councilor:requests")
 
+<<<<<<< Updated upstream
     async for msg in pubsub.listen():
         if msg["type"] != "message":
             continue
+=======
+        if not question:
+            logger.error("No question found in consultation payload. Discarding.")
+            file_path.unlink()
+            return
+
+        logger.info(f"Consulting Gemini (read-only) [platform={platform}]: {question[:200]}")
+
+        # Inject the question directly as immediate context, not as something to search for.
+        # Prepend with strong instructions to avoid unnecessary project scanning.
+        prompt = (
+            "**IMMEDIATE TASK — READ-ONLY CONSULTATION**\n"
+            "You are given a direct question below. DO NOT search the project or read source files first.\n"
+            "Analyze and advise based on the question itself and your knowledge.\n"
+            "Do not execute any commands or modify any files.\n\n"
+            "QUESTION:\n"
+            + question
+        )
+        cmd = ["gemini","--model", "gemini-3-flash-preview", "-p", prompt]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=True,
+            bufsize=1,
+        )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        t_out = threading.Thread(
+            target=_stream_pipe,
+            args=(proc.stdout, lambda l: logger.info(f"[Gemini consult] {l}"), stdout_lines),
+            daemon=True,
+        )
+        t_err = threading.Thread(
+            target=_stream_pipe,
+            args=(proc.stderr, lambda l: logger.info(f"[Gemini consult stderr] {l}"), stderr_lines),
+            daemon=True,
+        )
+        t_out.start()
+        t_err.start()
+        t_out.join()
+        t_err.join()
+        proc.wait()
+
+        stdout = '\n'.join(stdout_lines).strip()
+        stderr = '\n'.join(stderr_lines).strip()
+
+        if proc.returncode == 0:
+            message = stdout or "(Gemini returned no output)"
+        else:
+            message = (
+                f"Consultation failed (exit {proc.returncode})."
+                + (f"\n\n{stdout}" if stdout else "")
+                + (f"\n\nstderr: {stderr}" if stderr else "")
+            )
+
+        _write_consult_response(timestamp, message, platform, user_id, chat_id)
+        file_path.rename(file_path.with_suffix(".completed"))
+
+    except Exception as e:
+        logger.error(f"Failed to process consultation {file_path.name}: {e}")
+>>>>>>> Stashed changes
         try:
             data = json.loads(msg["data"])
             req_type = data.get("type", "consultation")
@@ -547,9 +613,207 @@ async def async_main():
 
     # Verify Redis is reachable
     try:
+<<<<<<< Updated upstream
         r = await _get_redis()
         await r.ping()
         logger.info("[redis] Connection verified")
+=======
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+
+        intent_description = data.get("intent")
+        target_files = data.get("target_files", [])
+        timestamp = data.get("timestamp", int(time.time()))
+        platform = data.get("platform")
+        user_id = data.get("user_id")
+        chat_id = data.get("chat_id")
+
+        if not intent_description:
+            logger.error("No intent description found in payload. Discarding.")
+            file_path.unlink()
+            return
+
+        logger.info(f"Target files: {target_files}")
+        logger.info(f"Executing L2 Intent [platform={platform}]:\n{intent_description}")
+
+        # Prepend strong focus instructions to prevent unnecessary full-project scanning.
+        # Task-specific prompts help Gemini prioritize correctly without exploring every file.
+        focused_intent = (
+            "**IMMEDIATE TASK — EXECUTE THIS INTENT DIRECTLY**\n"
+            "You are given a specific intent below. Focus on fulfilling ONLY this intent.\n"
+            "Read source files only if they are directly needed to complete this task.\n"
+            "Do not scan the entire project or explore unrelated areas.\n\n"
+            "INTENT:\n"
+            + intent_description
+        )
+
+        # Ensure we start from a clean main branch before letting Gemini work.
+        # Stash any leftover uncommitted changes from a previous failed run, then
+        # switch to main and create a dedicated feature branch for this escalation.
+        branch_name = f"councilor/intent-{timestamp}"
+        subprocess.run(["git", "stash"], cwd=str(PROJECT_ROOT), capture_output=True)
+        checkout_main = subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True
+        )
+        if checkout_main.returncode != 0:
+            logger.warning(f"Could not checkout main: {checkout_main.stderr.strip()} — will branch from current HEAD")
+        create_branch = subprocess.run(
+            ["git", "checkout", "-b", branch_name],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True
+        )
+        if create_branch.returncode == 0:
+            logger.info(f"Working on branch: {branch_name}")
+        else:
+            logger.warning(f"Branch creation failed: {create_branch.stderr.strip()} — continuing without branch isolation")
+            branch_name = None
+
+        # Trigger Gemini CLI.
+        # System prompt is loaded from GEMINI.md in the project root.
+        # Popen + threads streams output in real time instead of buffering until exit.
+        cmd = ["gemini", "--yolo", "--model", "gemini-3-flash-preview", "-p", focused_intent]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=True,   # Required on Windows: gemini is installed as .cmd, not .exe
+            bufsize=1,    # Line-buffered on Python's side; Node may still chunk internally
+        )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        t_out = threading.Thread(
+            target=_stream_pipe,
+            args=(proc.stdout, lambda l: logger.info(f"[Gemini] {l}"), stdout_lines),
+            daemon=True,
+        )
+        t_err = threading.Thread(
+            target=_stream_pipe,
+            args=(proc.stderr, lambda l: logger.info(f"[Gemini stderr] {l}"), stderr_lines),
+            daemon=True,
+        )
+        t_out.start()
+        t_err.start()
+        t_out.join()
+        t_err.join()
+        proc.wait()
+
+        returncode = proc.returncode
+        stdout = '\n'.join(stdout_lines).strip()
+        stderr = '\n'.join(stderr_lines).strip()
+
+        if returncode == 0:
+            logger.info("L2 execution successful.")
+            if not stdout:
+                logger.info("[Gemini] (no stdout captured)")
+
+            # Detect whether gemini actually modified any tracked files.
+            git_check = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True
+            )
+            files_changed = bool(git_check.stdout.strip())
+
+            pr_url = None
+            if files_changed:
+                logger.info("Source changes detected.")
+                changed_list = [line.strip().split(None, 1)[-1] for line in git_check.stdout.strip().split("\n") if line.strip()]
+
+                # COMMIT + PUSH + PR on the feature branch
+                if branch_name:
+                    subprocess.run(["git", "add", "-A"], cwd=str(PROJECT_ROOT), capture_output=True)
+                    commit_msg = f"Councilor: {intent_description[:72]}"
+                    git_commit = subprocess.run(
+                        ["git", "commit", "-m", commit_msg],
+                        cwd=str(PROJECT_ROOT),
+                        capture_output=True,
+                        text=True
+                    )
+                    if git_commit.returncode == 0:
+                        logger.info(f"Committed changes to {branch_name}")
+                        git_push = subprocess.run(
+                            ["git", "push", "origin", branch_name],
+                            cwd=str(PROJECT_ROOT),
+                            capture_output=True,
+                            text=True
+                        )
+                        if git_push.returncode == 0:
+                            logger.info(f"Pushed {branch_name} to origin")
+                            github_token = os.getenv("GITHUB_TOKEN")
+                            repo_info = _get_repo_remote_info()
+                            if github_token and repo_info:
+                                owner, repo = repo_info
+                                changed_files_md = "\n".join(f"- `{f}`" for f in changed_list)
+                                pr_body = (
+                                    f"## Automated changes by The Councilor\n\n"
+                                    f"**Intent:**\n{intent_description}\n\n"
+                                    f"**Changed files:**\n{changed_files_md}"
+                                )
+                                pr_url = _create_pr_via_api(
+                                    github_token, owner, repo, branch_name,
+                                    title=f"Councilor: {intent_description[:60]}",
+                                    body=pr_body
+                                )
+                                if pr_url:
+                                    logger.info(f"PR created: {pr_url}")
+                                else:
+                                    logger.warning("PR creation returned no URL.")
+                            else:
+                                logger.warning("GITHUB_TOKEN or remote info missing — PR not created.")
+                        else:
+                            logger.warning(f"git push failed: {git_push.stderr.strip()}")
+                    else:
+                        logger.warning(f"git commit failed: {git_commit.stderr.strip()}")
+
+                # Switch back to main — deployment is handled externally.
+                subprocess.run(
+                    ["git", "checkout", "main"],
+                    cwd=str(PROJECT_ROOT),
+                    capture_output=True
+                )
+                logger.info("Switched back to main. Deployment is up to the operator.")
+            else:
+                logger.info("No source changes — nothing to commit.")
+
+            message = stdout or "(Councilor completed with no output)"
+            if files_changed and pr_url:
+                message += f"\n\nPR: {pr_url}"
+            _write_response(timestamp, message, False, platform, user_id, chat_id)
+            file_path.rename(file_path.with_suffix(".completed"))
+
+            # Notify operator via the platform they used
+            notify_msg = f"[Icarus Escalation Complete]\n\n{message}"
+            if platform == "discord":
+                _send_discord(notify_msg, chat_id)
+            else:
+                _send_telegram(notify_msg, chat_id)
+
+        else:
+            logger.error(f"L2 execution failed (exit {returncode})")
+
+            error_message = (
+                f"Councilor failed (exit {returncode})."
+                + (f"\n\n{stdout}" if stdout else "")
+                + (f"\n\nstderr: {stderr}" if stderr else "")
+            )
+            _write_response(timestamp, error_message, False, platform, user_id, chat_id)
+            file_path.rename(file_path.with_suffix(".failed"))
+            
+            fail_msg = f"[Icarus Escalation Failed]\n\n{error_message}"
+            if platform == "discord":
+                _send_discord(fail_msg, chat_id)
+            else:
+                _send_telegram(fail_msg, chat_id)
+
+>>>>>>> Stashed changes
     except Exception as e:
         logger.error(f"[redis] Cannot connect: {e}")
         logger.error("Ensure Redis is running and REDIS_URL is set correctly.")
