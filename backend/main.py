@@ -10,6 +10,7 @@ from backend.database.connection import init_db
 from backend.routes import webhook
 from backend.agent.heartbeat import run_heartbeat
 from backend.agent.discord_bot import run_discord_bot
+from backend.agent.gmail_watcher import run_gmail_watcher
 
 # Setup logging
 logging.basicConfig(
@@ -21,9 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Restart Notification Protocol - Informational only
 RESTART_INFO_PATH = Path("/workspace/ipc/restart_info.json")
-MEMORY_LOG_PATH = Path("/workspace/memory/memory.log")
+LEGACY_MEMORY_LOG = "/workspace/memory/memory.log"
 
 from backend.database.redis_connection import get_redis_client, close_redis
+
 
 # Supervisor logic
 async def run_supervisor():
@@ -42,15 +44,15 @@ async def run_supervisor():
     logger.info("Supervisor starting...")
     while True:
         try:
-            # Check queue depth for tasks:email_priority.
+            # Check queue depth for tasks:email_triage.
             # "pending" counts messages delivered but not yet ACK-ed.
             # "lag" counts messages not yet delivered to any consumer.
             # Together they represent the true unprocessed backlog.
-            info = await redis.xinfo_groups("tasks:email_priority")
+            info = await redis.xinfo_groups("tasks:email_triage")
             pending = 0
             lag = 0
             for group in info:
-                if group["name"] == "email_worker_group":
+                if group["name"] == "email_triage_group":
                     pending = group.get("pending", 0)
                     lag = group.get("lag", 0)
             
@@ -80,6 +82,15 @@ async def run_supervisor():
 async def lifespan(app: FastAPI):
     logger.info("Initializing Icarus Database...")
     await init_db()
+
+    # One-time migration: move flat-file memory.log entries into SQLite+FTS5
+    try:
+        from backend.agent.memory_repo import migrate_from_log
+        migrated = await migrate_from_log(LEGACY_MEMORY_LOG)
+        if migrated > 0:
+            logger.info(f"Migrated {migrated} memory entries from flat file to SQLite.")
+    except Exception as e:
+        logger.warning(f"Memory migration skipped or failed: {e}")
     
     # Process Restart Context if present
     if RESTART_INFO_PATH.exists():
@@ -97,14 +108,18 @@ async def lifespan(app: FastAPI):
             logger.info(f"FILES MODIFIED: {', '.join(files) if files else 'None'}")
             logger.info(f"ACTION CONTEXT: {context}")
             logger.info("------------------------------------")
-            
-            # 2. Append to memory log so the L1 agent sees it in prompt context
-            if MEMORY_LOG_PATH.parent.exists():
-                from datetime import datetime, timezone
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                entry = f"[{timestamp}] [RESTART] Reason: {reason}. Files: {', '.join(files)}. Context: {context}\n"
-                with open(MEMORY_LOG_PATH, 'a') as f:
-                    f.write(entry)
+
+            # 2. Store restart context in the memory database
+            try:
+                from backend.agent.memory_repo import store_entry
+                restart_entry = f"Restart — Reason: {reason}. Files: {', '.join(files)}. Context: {context}"
+                await store_entry(
+                    platform="global", user_id="system",
+                    entry=restart_entry, visibility="global",
+                    category="restart", source="system",
+                )
+            except Exception as mem_e:
+                logger.warning(f"Failed to store restart context in memory DB: {mem_e}")
             
             # 3. Cleanup: remove the info file so it doesn't trigger on every restart
             os.remove(RESTART_INFO_PATH)
@@ -116,10 +131,21 @@ async def lifespan(app: FastAPI):
     heartbeat_task = asyncio.create_task(run_heartbeat())
     discord_task = asyncio.create_task(run_discord_bot())
     supervisor_task = asyncio.create_task(run_supervisor())
+
+
+    # Start Gmail watcher if Pub/Sub is configured
+    gmail_task = None
+    if os.getenv("GMAIL_PUBSUB_TOPIC", "").strip():
+        gmail_task = asyncio.create_task(run_gmail_watcher())
+        logger.info("Gmail watcher started.")
+
     yield
     heartbeat_task.cancel()
     discord_task.cancel()
     supervisor_task.cancel()
+
+    if gmail_task:
+        gmail_task.cancel()
     await close_redis()
     logger.info("Icarus shutting down.")
 

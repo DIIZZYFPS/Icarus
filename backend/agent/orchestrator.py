@@ -4,12 +4,14 @@ from backend.database.redis_connection import get_redis_client
 
 logger = logging.getLogger(__name__)
 
-EMAIL_PRIORITY_STREAM = "tasks:email_priority"
+EMAIL_TRIAGE_STREAM = "tasks:email_triage"
 _STREAM_ALIASES = {
-    "tasks:email_priority": EMAIL_PRIORITY_STREAM,
-    "email_priority": EMAIL_PRIORITY_STREAM,
-    "email priority": EMAIL_PRIORITY_STREAM,
-    "emails": EMAIL_PRIORITY_STREAM,
+    "tasks:email_triage":  EMAIL_TRIAGE_STREAM,
+    "tasks:email_priority": EMAIL_TRIAGE_STREAM,   # legacy alias
+    "email_priority":       EMAIL_TRIAGE_STREAM,
+    "email_triage":         EMAIL_TRIAGE_STREAM,
+    "email priority":       EMAIL_TRIAGE_STREAM,
+    "emails":               EMAIL_TRIAGE_STREAM,
 }
 
 
@@ -18,18 +20,18 @@ def _normalize_stream(stream: str) -> str:
     if not raw:
         logger.warning(
             "dispatch_worker_task received an empty stream name; defaulting to %s",
-            EMAIL_PRIORITY_STREAM,
+            EMAIL_TRIAGE_STREAM,
         )
-        return EMAIL_PRIORITY_STREAM
+        return EMAIL_TRIAGE_STREAM
 
     normalized = _STREAM_ALIASES.get(raw.lower(), raw)
     if normalized != raw:
         logger.info("Normalizing worker stream '%s' -> '%s'", raw, normalized)
-    elif normalized != EMAIL_PRIORITY_STREAM:
+    elif normalized != EMAIL_TRIAGE_STREAM:
         logger.warning(
             "Dispatching to non-standard stream '%s'. Worker listens on '%s'.",
             normalized,
-            EMAIL_PRIORITY_STREAM,
+            EMAIL_TRIAGE_STREAM,
         )
     return normalized
 
@@ -58,13 +60,29 @@ async def dispatch_worker_task(stream: str, data: dict):
 async def get_worker_result(task_id: str, timeout: int = 60):
     """Wait for a worker result in Redis, keyed by the stream entry id (task_id)
     returned by dispatch_worker_task().
+
+    Uses Redis BLPOP for efficient blocking instead of polling.
+    Falls back to GET on the result key if BLPOP times out (result may
+    have been stored before we started listening).
     """
     redis = get_redis_client()
-    import asyncio
     key = f"icarus:email_score:{task_id}"
-    for _ in range(timeout):
-        res = await redis.get(key)
-        if res:
-            return json.loads(res)
-        await asyncio.sleep(1)
+
+    # First check if result already exists
+    res = await redis.get(key)
+    if res:
+        return json.loads(res)
+
+    # Wait using a notification channel
+    notify_key = f"icarus:worker:notify:{task_id}"
+    result = await redis.blpop(notify_key, timeout=timeout)
+    if result:
+        # BLPOP returns (key, value) tuple
+        return json.loads(result[1])
+
+    # Final fallback — check the result key one more time
+    res = await redis.get(key)
+    if res:
+        return json.loads(res)
     return None
+

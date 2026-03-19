@@ -1,35 +1,29 @@
-import os
+"""
+processor.py — Core message processing for Icarus L1 agent.
+
+Handles incoming messages from Telegram/Discord, injects memory context
+from the SQLite+FTS5 memory repository, runs the ADK agent, and persists
+conversation history in Redis.
+"""
+
 import re
-import ast
-import json
 import time
+import json
 import logging
-import inspect
-from collections import deque
 from google.adk.runners import Runner
 from google.genai.types import Content, Part
 from backend.agent.engine import get_engine, get_readonly_engine
-from backend.agent.tools import (
-    read_file, list_directory, replace_file_contents, request_create_file,
-    append_memory, MEMORY_LOG_PATH, ICARUS_READONLY_TOOLS,
-    current_platform, current_user_id, current_chat_id
-)
-from backend.agent.esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
-from backend.agent.github_tools import (
-    github_get_repo_info, github_list_repos, github_read_file,
-    github_list_issues, github_read_issue, github_create_issue, github_write_file,
-    github_create_pr, github_create_branch
-)
-from backend.agent.orchestrator import dispatch_worker_task, get_worker_result
-from backend.agent.gmail_tools import gmail_list_messages, gmail_get_message
-
+from backend.agent.tools import current_platform, current_user_id, current_chat_id
 from backend.database.redis_connection import get_redis_client
 
 logger = logging.getLogger(__name__)
 
-MAX_HISTORY_TURNS = 6  # plain-text turns included in every prompt
-MEMORY_INJECT_LINES = 30  # number of recent memory entries to inject per session
+MAX_HISTORY_TURNS = 6
+MEMORY_INJECT_LIMIT = 30
 ICARUS_CONTEXT = "Conversation history:\n"
+
+
+# ── Chat History (Redis-backed) ─────────────────────────────────────────────
 
 async def get_chat_history(history_id: str) -> list[tuple[str, str]]:
     """Retrieve chat history from Redis."""
@@ -37,17 +31,17 @@ async def get_chat_history(history_id: str) -> list[tuple[str, str]]:
     key = f"icarus:session:{history_id}"
     try:
         raw_history = await redis.lrange(key, 0, MAX_HISTORY_TURNS - 1)
-        # Redis stores strings, we need to parse them back to tuples
         history = []
-        for item in reversed(raw_history): # lrange 0, N-1 gives newest first if we use lpush
+        for item in reversed(raw_history):
             try:
                 history.append(json.loads(item))
             except json.JSONDecodeError:
                 continue
         return history
     except Exception as e:
-        logger.error(f"Failed to retrieve chat history from Redis: {e}")
+        logger.error(f"Failed to retrieve chat history: {e}")
         return []
+
 
 async def save_chat_history(history_id: str, history_item: tuple[str, str]):
     """Save chat history item to Redis."""
@@ -56,267 +50,72 @@ async def save_chat_history(history_id: str, history_item: tuple[str, str]):
     try:
         await redis.lpush(key, json.dumps(history_item))
         await redis.ltrim(key, 0, MAX_HISTORY_TURNS - 1)
-        await redis.expire(key, 3600 * 24 * 7) # 7 days TTL
+        await redis.expire(key, 3600 * 24 * 7)
     except Exception as e:
-        logger.error(f"Failed to save chat history to Redis: {e}")
+        logger.error(f"Failed to save chat history: {e}")
 
-# Plain-text conversation history keyed by platform-specific ID (e.g., "telegram_123" or "discord_456").
-# Removed: _chat_history: dict[str, list[tuple[str, str]]] = {}
 
-# Maps tool names → (function, ordered param names for positional arg fallback)
-_TOOL_REGISTRY = {
-    "replace_file_contents": (replace_file_contents, ["filepath", "new_contents"]),
-    "read_file":             (read_file,              ["filepath"]),
-    "list_directory":        (list_directory,         ["directory"]),
-    "request_create_file":   (request_create_file,    ["filepath", "contents"]),
-    "append_memory":         (append_memory,          ["entry", "visibility"]),
-    "escalate_to_councilor": (escalate_to_councilor,  ["intent_description", "target_files"]),
-    "consult_councilor":     (consult_councilor,      ["question"]),
-    "check_mailbox":         (check_mailbox,          []),
-    "github_get_repo_info":  (github_get_repo_info,   ["owner", "repo"]),
-    "github_list_repos":     (github_list_repos,      ["user"]),
-    "github_read_file":      (github_read_file,       ["owner", "repo", "path", "branch"]),
-    "github_list_issues":    (github_list_issues,     ["owner", "repo", "state"]),
-    "github_read_issue":     (github_read_issue,      ["owner", "repo", "issue_number", "include_comments"]),
-    "github_create_issue":   (github_create_issue,    ["owner", "repo", "title", "body"]),
-    "github_write_file":     (github_write_file,      ["owner", "repo", "path", "content", "message", "branch"]),
-    "github_create_pr":      (github_create_pr,       ["owner", "repo", "title", "head", "base", "body"]),
-    "github_create_branch":  (github_create_branch,   ["owner", "repo", "branch", "from_branch"]),
-    "dispatch_worker_task":  (dispatch_worker_task,   ["stream", "data"]),
-    "get_worker_result":     (get_worker_result,      ["task_id", "timeout"]),
-    "gmail_list_messages":   (gmail_list_messages,    ["query"]),
-    "gmail_get_message":     (gmail_get_message,      ["message_id"]),
-}
+# ── Memory Context (SQLite+FTS5) ────────────────────────────────────────────
 
-# Derive the read-only allowlist from the single source of truth in tools.py so the
-# two sets can never drift apart.
-_READONLY_ALLOWED_TOOLS = {fn.__name__ for fn in ICARUS_READONLY_TOOLS}
+async def _load_memory_context(platform: str, user_id: str, query: str, read_only: bool = False) -> str:
+    """Retrieve relevant memory entries from the SQLite+FTS5 repository.
 
-_TOOL_DEFAULTS = {}
-_TOOL_SCAN_ORDER = list(_TOOL_REGISTRY.keys())
-
-_COERCE_MAX_LEN = 10_240  # 10 KB guard against DoS via deeply nested structures
-
-def _coerce_param(v: str):
-    """Try to parse a raw string parameter value as JSON or a Python literal.
-    Falls back to the original stripped string if neither succeeds."""
-    v = v.strip()
-    if len(v) > _COERCE_MAX_LEN:
-        return v
-    try:
-        return json.loads(v)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    try:
-        return ast.literal_eval(v)
-    except (ValueError, SyntaxError, RecursionError):
-        pass
-    return v
-
-def _find_call_end(text: str, paren_open: int) -> int:
-    """Return the index of the closing ')' matching text[paren_open]='('."""
-    depth = 0
-    in_str = False
-    str_char = None
-    i = paren_open
-    while i < len(text):
-        c = text[i]
-        if in_str:
-            if c == "\\" :
-                i += 2
-                continue
-            if text[i:i+len(str_char)] == str_char:
-                in_str = False
-                i += len(str_char)
-                continue
-        else:
-            for q in ('"""', "'''", '"', "'"):
-                if text[i:i+len(q)] == q:
-                    in_str = True
-                    str_char = q
-                    i += len(q)
-                    break
-            else:
-                if c == "(":
-                    depth += 1
-                elif c == ")":
-                    depth -= 1
-                    if depth == 0:
-                        return i
-                i += 1
-                continue
-            continue
-        i += 1
-    return -1
-
-async def _dispatch_tool_call(raw: str, read_only: bool = False) -> str:
-    """Fallback: scan raw model output for any known tool call, execute it,
-    and return the result. Handles XML, Python-like, and JSON formats.
-    Respects read_only flag for untrusted contexts."""
-    text = re.sub(r"```(?:python)?\s*", "", raw)
-    text = re.sub(r"\btool_call[\s:]+", "", text).strip()
-
-    # --- XML format ---
-    xml_m = re.search(r"<tool_call>\s*<function=(\w+)>(.*?)</function>\s*</tool_call>", text, re.DOTALL)
-    if xml_m:
-        tool_name = xml_m.group(1)
-        inner = xml_m.group(2)
-        logger.info(f"[fallback] Detected XML tool_call format: {tool_name}")
-        if tool_name in _TOOL_REGISTRY:
-            if read_only and tool_name not in _READONLY_ALLOWED_TOOLS:
-                logger.info(f"[fallback] Skipping disallowed tool '{tool_name}' in read-only mode.")
-            else:
-                fn, param_names = _TOOL_REGISTRY[tool_name]
-                params = dict(re.findall(r"<parameter=(\w+)>(.*?)</parameter>", inner, re.DOTALL))
-                for k, v in _TOOL_DEFAULTS.get(tool_name, {}).items():
-                    params.setdefault(k, v)
-                known = set(param_names)
-                kwargs = {k: _coerce_param(v) for k, v in params.items() if k in known}
-                try:
-                    if inspect.iscoroutinefunction(fn):
-                        result = await fn(**kwargs)
-                    else:
-                        result = fn(**kwargs)
-                    if isinstance(result, list):
-                        result = "\n".join(str(x) for x in result)
-                    logger.info(f"[fallback] XML path: {tool_name}() succeeded")
-                    return result or raw
-                except Exception as e:
-                    logger.error(f"[fallback] XML path: {tool_name}() failed: {e}")
-
-    for tool_name in _TOOL_SCAN_ORDER:
-        fn, param_names = _TOOL_REGISTRY[tool_name]
-        raw_kwargs: dict | None = None
-
-        m = re.search(rf"\b{re.escape(tool_name)}\s*\(", text)
-        if m:
-            end = _find_call_end(text, m.end() - 1)
-            if end != -1:
-                call_str = text[m.start():end + 1]
-                logger.info(f"[fallback] Detected Python call: {call_str[:120]}")
-                try:
-                    tree = ast.parse(call_str, mode="eval")
-                    if isinstance(tree.body, ast.Call):
-                        raw_kwargs = {}
-                        for i, arg in enumerate(tree.body.args):
-                            if i < len(param_names):
-                                try:
-                                    raw_kwargs[param_names[i]] = ast.literal_eval(arg)
-                                except ValueError:
-                                    pass
-                        for kw in tree.body.keywords:
-                            try:
-                                raw_kwargs[kw.arg] = ast.literal_eval(kw.value)
-                            except ValueError:
-                                pass
-                except SyntaxError as e:
-                    logger.warning(f"[fallback] SyntaxError parsing {tool_name}(): {e}")
-
-        if raw_kwargs is None:
-            m_json = re.search(rf"\b{re.escape(tool_name)}\s*(\{{)", text)
-            if m_json:
-                brace_pos = m_json.start(1)
-                try:
-                    parsed, _ = json.JSONDecoder().raw_decode(text, brace_pos)
-                    if isinstance(parsed, dict):
-                        raw_kwargs = parsed
-                except json.JSONDecodeError as e:
-                    logger.warning(f"[fallback] JSONDecodeError parsing {tool_name}{{}}: {e}")
-
-        if not raw_kwargs:
-            continue
-
-        if read_only and tool_name not in _READONLY_ALLOWED_TOOLS:
-            logger.info(f"[fallback] Skipping disallowed tool '{tool_name}' in read-only mode.")
-            continue
-
-        known = set(param_names)
-        kwargs = {k: v for k, v in raw_kwargs.items() if k in known}
-        unknown_vals = [v for k, v in raw_kwargs.items() if k not in known]
-        remaining = [p for p in param_names if p not in kwargs]
-        for i, v in enumerate(unknown_vals):
-            if i < len(remaining):
-                kwargs[remaining[i]] = v
-
-        for k, v in _TOOL_DEFAULTS.get(tool_name, {}).items():
-            kwargs.setdefault(k, v)
-
-        logger.info(f"[fallback] Executing {tool_name}(kwargs={list(kwargs.keys())})")
-        try:
-            if inspect.iscoroutinefunction(fn):
-                result = await fn(**kwargs)
-            else:
-                result = fn(**kwargs)
-            if isinstance(result, list):
-                result = "\n".join(str(x) for x in result)
-            logger.info(f"[fallback] {tool_name}() succeeded")
-            return result or raw
-        except Exception as e:
-            logger.error(f"[fallback] {tool_name}() execution failed: {e}")
-            continue
-
-    return raw
-
-def _load_memory_context(platform: str, user_id: str, read_only: bool = False) -> str:
-    """Read recent memory entries from the persistent memory log, filtering for
-    global entries and entries matching the current platform and user.
-    When read_only=True, only global entries are included to prevent private
-    memory leakage into untrusted (public server) contexts.
-    Tail-reads at most MEMORY_INJECT_LINES * 4 lines to bound per-request I/O.
+    Uses the current user message as a search query to find semantically
+    relevant memories, ranked by FTS5 BM25 score + importance + recency.
     """
     try:
-        if not os.path.exists(MEMORY_LOG_PATH):
+        from backend.agent.memory_repo import retrieve_relevant
+
+        entries = await retrieve_relevant(
+            platform=platform,
+            user_id=user_id,
+            query=query,
+            limit=MEMORY_INJECT_LIMIT,
+            read_only=read_only,
+        )
+
+        if not entries:
             return ""
-        # Tail-read a bounded window without loading the entire file.
-        # deque with maxlen iterates lazily, keeping only the last N lines.
-        tail_limit = MEMORY_INJECT_LINES * 4
-        with open(MEMORY_LOG_PATH, 'r') as f:
-            lines = list(deque(f, maxlen=tail_limit))
 
-        user_tag = f"[{platform}:{user_id}]"
-        filtered = []
-        for line in lines:
-            is_global = "[GLOBAL]" in line
-            is_user = user_tag in line
+        lines = []
+        for e in entries:
+            visibility_tag = "[SYSTEM]" if e.visibility == "global" else ""
+            category_tag = f"[{e.category.upper()}]" if e.category else ""
+            lines.append(f"[{e.created_at}] {visibility_tag}{category_tag} {e.entry}")
 
-            if read_only:
-                # Public/server context: only inject global entries to prevent
-                # private DM memories from leaking into public replies.
-                if not is_global:
-                    continue
-            else:
-                if not (is_global or is_user):
-                    continue
-
-            # Strip the tag for the model's readability
-            clean_line = line.replace(user_tag, "").replace("[GLOBAL]", "[SYSTEM]").strip()
-            filtered.append(clean_line)
-
-        recent = filtered[-MEMORY_INJECT_LINES:]
-        if not recent:
-            return ""
-        return "[PERSISTENT MEMORY — relevant entries]\n" + "\n".join(recent) + "\n"
+        return "[PERSISTENT MEMORY — relevant entries]\n" + "\n".join(lines) + "\n"
     except Exception as e:
         logger.warning(f"[memory] Failed to load memory context: {e}")
         return ""
 
-async def process_message(platform: str, user_id: str, text: str, chat_id: str = "0", read_only: bool = False) -> str:
+
+# ── Message Processing ──────────────────────────────────────────────────────
+
+async def process_message(
+    platform: str,
+    user_id: str,
+    text: str,
+    chat_id: str = "0",
+    read_only: bool = False,
+) -> str:
     """Core message processing logic using ADK Runner."""
-    # Set context for tools (like append_memory and escalate_to_councilor)
     token_p = current_platform.set(platform)
     token_u = current_user_id.set(user_id)
     token_c = current_chat_id.set(str(chat_id))
-    
+
     try:
         runner: Runner = get_readonly_engine() if read_only else get_engine()
         history_id = f"{platform}_{user_id}"
 
         history = await get_chat_history(history_id)
-        memory_context = _load_memory_context(platform, user_id, read_only=read_only)
-        
-        # Identity and context headers to ensure the model knows its environment
-        context_header = f"[CONTEXT: Platform={platform.upper()}, UserID={user_id}, ChatID={chat_id}, Access={'ReadOnly' if read_only else 'Full'}]\n"
-        
+        memory_context = await _load_memory_context(platform, user_id, query=text, read_only=read_only)
+
+        # Identity and context headers
+        context_header = (
+            f"[CONTEXT: Platform={platform.upper()}, UserID={user_id}, "
+            f"ChatID={chat_id}, Access={'ReadOnly' if read_only else 'Full'}]\n"
+        )
+
         history_text = "".join(f"User: {u}\nIcarus: {a}\n\n" for u, a in history)
         full_prompt = context_header + memory_context + ICARUS_CONTEXT + history_text + f"User: {text}"
 
@@ -327,22 +126,20 @@ async def process_message(platform: str, user_id: str, text: str, chat_id: str =
         async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
-            new_message=message
+            new_message=message,
         ):
             if event.is_final_response() and event.content:
-                text_parts = [p.text for p in event.content.parts if hasattr(p, 'text') and p.text]
+                text_parts = [p.text for p in event.content.parts if hasattr(p, "text") and p.text]
                 response_text = text_parts[-1] if text_parts else ""
                 break
 
         if response_text:
-            response_text = await _dispatch_tool_call(response_text, read_only=read_only)
+            # Strip think tags if the model produces them
             response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
             await save_chat_history(history_id, (text, response_text))
 
         return response_text or "[No response]"
     finally:
-        # Reset context
         current_platform.reset(token_p)
         current_user_id.reset(token_u)
         current_chat_id.reset(token_c)
-

@@ -1,4 +1,5 @@
 import os
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from backend.database.models import Base
 
@@ -27,8 +28,15 @@ AsyncSessionLocal = async_sessionmaker(
 
 async def init_db():
     async with engine.begin() as conn:
-        # Create all tables bounded to the Base metadata
+        # Create all regular tables bounded to the Base metadata
         await conn.run_sync(Base.metadata.create_all)
+        # Create FTS5 virtual table for memory full-text search.
+        # SQLAlchemy's create_all() doesn't handle virtual tables,
+        # so we create it manually. IF NOT EXISTS prevents errors on restart.
+        await conn.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts "
+            "USING fts5(entry, content='memory_entries', content_rowid='id')"
+        ))
 
 async def get_db():
     async with AsyncSessionLocal() as session:

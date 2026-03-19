@@ -1,3 +1,10 @@
+"""
+gmail_tools.py — Gmail API integration for Icarus.
+
+Provides both L1 agent tools (list/read messages) and service-layer functions
+for the email triage agent (labels, watch, history, archive).
+"""
+
 import os
 import base64
 import json
@@ -10,13 +17,34 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
-# Use read-only scope: these tools only read/list messages.
-# Elevate to gmail.modify only if write tools are added in the future.
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+# gmail.modify allows read + label management + archive.
+# Only upgrade to gmail.compose if we ever need to send mail.
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/pubsub',
+]
 
+# ── Label cache ──────────────────────────────────────────────────────────────
+# Maps lowercase label name → Gmail label ID.  Populated on first use.
+_label_cache: dict[str, str] = {}
+_label_cache_loaded = False
+
+# Triage labels — created under an "Icarus/" prefix
+TRIAGE_LABELS = [
+    "Icarus/Jobs",
+    "Icarus/Bills",
+    "Icarus/Shopping",
+    "Icarus/Social",
+    "Icarus/Newsletters",
+    "Icarus/Important",
+    "Icarus/Other",
+]
+
+
+# ── Service builder ──────────────────────────────────────────────────────────
 
 def _build_service_with_personal_oauth():
-    """Build Gmail API client using personal OAuth refresh token credentials."""
+    """Build Gmail API client using personal OAuth refresh token."""
     client_id = (os.getenv("GMAIL_OAUTH_CLIENT_ID") or "").strip()
     client_secret = (os.getenv("GMAIL_OAUTH_CLIENT_SECRET") or "").strip()
     refresh_token = (os.getenv("GMAIL_OAUTH_REFRESH_TOKEN") or "").strip()
@@ -32,7 +60,6 @@ def _build_service_with_personal_oauth():
         client_secret=client_secret,
         scopes=SCOPES,
     )
-    # Disable discovery file cache to avoid noisy oauth2client compatibility logs.
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
@@ -41,7 +68,6 @@ def _build_service_with_service_account(creds_json: str):
     if creds_json.startswith("{"):
         info = json.loads(creds_json)
     else:
-        # Assume base64 encoded if it doesn't start with {
         info = json.loads(base64.b64decode(creds_json).decode("utf-8"))
 
     creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
@@ -56,17 +82,14 @@ def _build_service_with_service_account(creds_json: str):
 
 
 def get_gmail_service():
-    """Authenticate and return Gmail service."""
+    """Authenticate and return Gmail API service."""
     creds_json = os.getenv("GMAIL_CREDENTIALS_JSON")
-
     try:
         service = _build_service_with_personal_oauth()
         if service:
             return service
-
         if creds_json:
             return _build_service_with_service_account(creds_json)
-
         logger.warning(
             "Gmail auth not configured. Set GMAIL_OAUTH_CLIENT_ID, "
             "GMAIL_OAUTH_CLIENT_SECRET, and GMAIL_OAUTH_REFRESH_TOKEN."
@@ -76,27 +99,28 @@ def get_gmail_service():
         logger.error(f"Gmail authentication failed: {e}")
         return None
 
+
+def _run_sync(fn):
+    """Run a synchronous Gmail API call in a thread executor."""
+    loop = asyncio.get_running_loop()
+    return loop.run_in_executor(None, fn)
+
+
+# ── L1 Agent Tools (exposed to the ADK) ─────────────────────────────────────
+
 async def gmail_list_messages(query: str = "is:unread"):
     """List messages matching query."""
     service = get_gmail_service()
     if not service:
         return "Gmail service not configured."
-    
     try:
-        # Run the synchronous .execute() call in a thread executor to avoid
-        # blocking the asyncio event loop.
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(
-            None, lambda: service.users().messages().list(userId='me', q=query).execute()
+        results = await _run_sync(
+            lambda: service.users().messages().list(userId='me', q=query).execute()
         )
-        messages = results.get('messages', [])
-        return messages
+        return results.get('messages', [])
     except HttpError as e:
         if e.resp is not None and e.resp.status == 400 and "failedPrecondition" in str(e):
-            logger.error(
-                "Gmail failedPrecondition: personal inboxes require OAuth user credentials. "
-                "Service-account auth without domain delegation cannot access users/me."
-            )
+            logger.error("Gmail failedPrecondition: check OAuth credentials.")
         else:
             logger.error(f"Failed to list gmail messages: {e}")
         return f"Error: {e}"
@@ -104,27 +128,191 @@ async def gmail_list_messages(query: str = "is:unread"):
         logger.error(f"Failed to list gmail messages: {e}")
         return f"Error: {e}"
 
+
 async def gmail_get_message(message_id: str):
-    """Retrieve message content."""
+    """Retrieve full message content."""
     service = get_gmail_service()
     if not service:
         return None
-    
     try:
-        loop = asyncio.get_running_loop()
-        message = await loop.run_in_executor(
-            None, lambda: service.users().messages().get(userId='me', id=message_id).execute()
+        message = await _run_sync(
+            lambda: service.users().messages().get(userId='me', id=message_id).execute()
         )
         return message
-    except HttpError as e:
-        if e.resp is not None and e.resp.status == 400 and "failedPrecondition" in str(e):
-            logger.error(
-                "Gmail failedPrecondition on get_message: check OAuth user credentials "
-                "or Workspace delegation settings."
-            )
-        else:
-            logger.error(f"Failed to get gmail message {message_id}: {e}")
-        return None
     except Exception as e:
         logger.error(f"Failed to get gmail message {message_id}: {e}")
         return None
+
+
+# ── Label Management (used by triage worker) ─────────────────────────────────
+
+async def gmail_list_labels() -> dict[str, str]:
+    """List all Gmail labels. Returns {name: id} mapping."""
+    service = get_gmail_service()
+    if not service:
+        return {}
+    try:
+        results = await _run_sync(
+            lambda: service.users().labels().list(userId='me').execute()
+        )
+        labels = results.get('labels', [])
+        return {label['name']: label['id'] for label in labels}
+    except Exception as e:
+        logger.error(f"Failed to list labels: {e}")
+        return {}
+
+
+async def gmail_create_label(name: str) -> str | None:
+    """Create a Gmail label. Returns the label ID, or None on failure."""
+    service = get_gmail_service()
+    if not service:
+        return None
+    try:
+        body = {
+            'name': name,
+            'labelListVisibility': 'labelShow',
+            'messageListVisibility': 'show',
+        }
+        result = await _run_sync(
+            lambda: service.users().labels().create(userId='me', body=body).execute()
+        )
+        label_id = result['id']
+        logger.info(f"[gmail] Created label '{name}' (id={label_id})")
+        return label_id
+    except HttpError as e:
+        if e.resp.status == 409:
+            # Label already exists — fetch and return its ID
+            labels = await gmail_list_labels()
+            return labels.get(name)
+        logger.error(f"Failed to create label '{name}': {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to create label '{name}': {e}")
+        return None
+
+
+async def ensure_label(name: str) -> str | None:
+    """Get or create a label by name. Uses cached lookup first.
+
+    This is the primary entry point for the triage worker.
+    """
+    global _label_cache, _label_cache_loaded
+
+    # Load cache on first call
+    if not _label_cache_loaded:
+        labels = await gmail_list_labels()
+        _label_cache = {k.lower(): v for k, v in labels.items()}
+        _label_cache_loaded = True
+        logger.info(f"[gmail] Label cache loaded ({len(_label_cache)} labels)")
+
+    # Check cache
+    key = name.lower()
+    if key in _label_cache:
+        return _label_cache[key]
+
+    # Create new label
+    label_id = await gmail_create_label(name)
+    if label_id:
+        _label_cache[key] = label_id
+    return label_id
+
+
+async def gmail_apply_label(message_id: str, label_id: str) -> bool:
+    """Apply a label to a Gmail message."""
+    service = get_gmail_service()
+    if not service:
+        return False
+    try:
+        body = {'addLabelIds': [label_id]}
+        await _run_sync(
+            lambda: service.users().messages().modify(
+                userId='me', id=message_id, body=body
+            ).execute()
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to apply label to {message_id}: {e}")
+        return False
+
+
+async def gmail_archive_message(message_id: str) -> bool:
+    """Archive a message (remove INBOX label)."""
+    service = get_gmail_service()
+    if not service:
+        return False
+    try:
+        body = {'removeLabelIds': ['INBOX']}
+        await _run_sync(
+            lambda: service.users().messages().modify(
+                userId='me', id=message_id, body=body
+            ).execute()
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to archive message {message_id}: {e}")
+        return False
+
+
+# ── Push Notification Setup ──────────────────────────────────────────────────
+
+async def gmail_setup_watch(topic_name: str) -> dict | None:
+    """Register Gmail push notifications via Pub/Sub.
+
+    Must be renewed every 7 days. Returns watch response with historyId
+    and expiration, or None on failure.
+    """
+    service = get_gmail_service()
+    if not service:
+        return None
+    try:
+        body = {
+            'topicName': topic_name,
+            'labelIds': ['INBOX'],
+        }
+        result = await _run_sync(
+            lambda: service.users().watch(userId='me', body=body).execute()
+        )
+        logger.info(
+            f"[gmail] Watch registered. historyId={result.get('historyId')}, "
+            f"expires={result.get('expiration')}"
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Failed to setup Gmail watch: {e}")
+        return None
+
+
+async def gmail_get_history(start_history_id: str) -> list[str]:
+    """Fetch message IDs added since start_history_id.
+
+    Returns a list of new message IDs.
+    """
+    service = get_gmail_service()
+    if not service:
+        return []
+    try:
+        results = await _run_sync(
+            lambda: service.users().history().list(
+                userId='me',
+                startHistoryId=start_history_id,
+                historyTypes=['messageAdded'],
+            ).execute()
+        )
+        message_ids = []
+        for record in results.get('history', []):
+            for msg_added in record.get('messagesAdded', []):
+                msg = msg_added.get('message', {})
+                msg_id = msg.get('id')
+                if msg_id:
+                    message_ids.append(msg_id)
+        return message_ids
+    except HttpError as e:
+        if e.resp.status == 404:
+            # historyId too old — need to do a full sync
+            logger.warning("[gmail] History ID expired, need full re-sync")
+            return []
+        logger.error(f"Failed to get history: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Failed to get history: {e}")
+        return []

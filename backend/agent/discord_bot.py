@@ -3,6 +3,7 @@ import logging
 import discord
 from discord.ext import commands
 from backend.agent.processor import process_message
+from backend.utils import split_message
 
 logger = logging.getLogger(__name__)
 
@@ -81,21 +82,7 @@ async def run_discord_bot():
     except Exception as e:
         logger.error(f"Failed to start Discord bot: {e}")
 
-def split_message(text: str, limit: int = 2000) -> list[str]:
-    """Split text into chunks at newline boundaries where possible."""
-    if len(text) <= limit:
-        return [text]
-    chunks = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        split_at = text.rfind("\n", 0, limit)
-        if split_at == -1:
-            split_at = limit
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    return chunks
+# split_message imported from backend.utils
 
 async def push_discord_message(channel_id: int | None, text: str, user_id: str | None = None):
     """Send a message to a Discord channel, or DM a user as fallback."""
@@ -177,4 +164,36 @@ async def relay_councilor_mailbox_to_operator(
 
     # If the model returns an empty string, still deliver the original mailbox payload.
     final_text = response_text if response_text else mailbox_text
+    await push_discord_message(None, final_text, user_id=normalized_user_id)
+
+
+async def relay_email_notification_to_operator(
+    email_text: str,
+    operator_user_id: str,
+    chat_id: str | None = None,
+):
+    """Hydrate the agent with email triage output, then DM the operator."""
+    normalized_user_id = str(operator_user_id).strip() if operator_user_id is not None else ""
+    if not normalized_user_id:
+        logger.error("Cannot relay email notification: missing Discord operator user ID")
+        return
+
+    effective_chat_id = str(chat_id) if chat_id is not None else "0"
+    hydration_prompt = (
+        "[System: New email classified. Analyze the classification, decide if any immediate action is needed, "
+        "and provide the operator with a concise actionable update in your voice.]\n\n"
+        f"{email_text}"
+    )
+
+    from backend.agent.processor import process_message
+    response_text = await process_message(
+        "discord",
+        normalized_user_id,
+        hydration_prompt,
+        chat_id=effective_chat_id,
+        read_only=False,
+    )
+
+    # If the model returns an empty string, still deliver the original classification.
+    final_text = response_text if response_text else f"📧 **Email Alert:**\n{email_text}"
     await push_discord_message(None, final_text, user_id=normalized_user_id)

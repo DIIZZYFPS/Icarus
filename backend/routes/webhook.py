@@ -4,6 +4,7 @@ import logging
 import httpx
 from fastapi import APIRouter, Request, BackgroundTasks
 from backend.agent.processor import process_message
+from backend.utils import split_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -15,25 +16,11 @@ ALLOWED_CHAT_ID = int(os.environ.get("ALLOWED_CHAT_ID", "0"))
 _USERNAME_MAX_LEN = 64
 _SANITIZE_PATTERN = re.compile(r'[\r\n\t:\[\]]')
 
-def split_message(text: str, limit: int = 4000) -> list[str]:
-    """Split text into chunks at newline boundaries where possible."""
-    if len(text) <= limit:
-        return [text]
-    chunks = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        split_at = text.rfind("\n", 0, limit)
-        if split_at == -1:
-            split_at = limit
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    return chunks
+# split_message imported from backend.utils
 
 async def push_telegram_message(chat_id: int, text: str):
     """Send a message to a Telegram chat."""
-    chunks = split_message(text)
+    chunks = split_message(text, limit=4000)
     async with httpx.AsyncClient() as client:
         for chunk in chunks:
             try:

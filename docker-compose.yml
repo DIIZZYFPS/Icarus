@@ -33,13 +33,13 @@ services:
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     ports:
       - "8080:8000"
     networks:
       - icarus-net
     volumes:
       - ./backend:/app/backend:ro # Read-only source code mount for L1 restriction
-      - ./workspace/ipc:/workspace/ipc
       - ./workspace/memory:/workspace/memory
       - ./workspace/projects:/workspace/projects
     depends_on:
@@ -54,20 +54,23 @@ services:
     ports:
       - "6379:6379"
 
-  email_worker:
+  email_triage:
     build:
       context: ./backend
       dockerfile: Dockerfile
     image: icarus-worker # Shared image with api
-    command: python -m backend.agent.worker_email_priority
+    command: python -m backend.agent.worker_email_triage
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GMAIL_PUBSUB_TOPIC=${GMAIL_PUBSUB_TOPIC}
+      - GMAIL_PUBSUB_SUBSCRIPTION=${GMAIL_PUBSUB_SUBSCRIPTION}
     networks:
       - icarus-net
     volumes:
       - ./backend:/app/backend:ro # Read-only source code mount for L1 restriction
-      - ./workspace/ipc:/workspace/ipc
       - ./workspace/memory:/workspace/memory
       - ./workspace/projects:/workspace/projects
     depends_on:

@@ -35,3 +35,18 @@ class Message(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     conversation = relationship("Conversation", back_populates="messages")
+
+class MemoryEntry(Base):
+    __tablename__ = 'memory_entries'
+
+    id = Column(Integer, primary_key=True)
+    platform = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    category = Column(String, nullable=True)
+    visibility = Column(String, default="private")  # 'private' or 'global'
+    entry = Column(Text, nullable=False)
+    importance = Column(Integer, default=5)  # 0-10, auto-scored
+    created_at = Column(String, nullable=False)  # ISO 8601 timestamp
+    accessed_at = Column(String, nullable=True)
+    compacted = Column(Integer, default=0)  # 0=live, 1=compacted
+    source = Column(String, default="agent")  # 'agent', 'system', 'user'

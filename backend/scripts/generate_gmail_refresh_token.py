@@ -3,7 +3,10 @@ from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/pubsub",
+]
 
 
 def _required_env(name: str, env_path: Path) -> str:
@@ -75,6 +78,9 @@ def _run_console_flow(client_id: str, client_secret: str) -> str:
         # oauthlib requires HTTPS by default; loopback HTTP is acceptable for local desktop-style OAuth.
         os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
+    # Accept scope changes (Google may return additional granted scopes)
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
     client_config = {
         "installed": {
             "client_id": client_id,
@@ -90,7 +96,7 @@ def _run_console_flow(client_id: str, client_secret: str) -> str:
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         prompt="consent",
-        include_granted_scopes="true",
+        include_granted_scopes="false",
     )
 
     print("\nOpen this URL in your browser and approve access:")

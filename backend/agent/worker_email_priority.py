@@ -3,13 +3,9 @@ import re
 import asyncio
 import logging
 import json
-import httpx
 from backend.agent.worker_base import WorkerBase
 
 logger = logging.getLogger(__name__)
-
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://icarus-brain:11434")
-EMAIL_SCORER_MODEL = os.getenv("EMAIL_SCORER_MODEL", "qwen2.5:4b")
 
 class EmailPriorityWorker(WorkerBase):
     def __init__(self):
@@ -34,32 +30,29 @@ class EmailPriorityWorker(WorkerBase):
         return None
 
     async def _get_model_score(self, subject: str, body: str) -> float:
-        """Call configured Ollama model for priority scoring (0.0 to 1.0)."""
-        prompt = f"""
-Analyze the priority of the following email from 0.0 (very low) to 1.0 (very high).
-Consider urgency, professional importance, and action required.
-Respond ONLY with a single float value between 0.0 and 1.0.
+        """Call Gemma 27B API for priority scoring (0.0 to 1.0).
+        Uses the free tier via llm_router — no GPU contention with L1."""
+        from backend.agent.llm_router import generate
 
-Subject: {subject}
-Body: {body[:1000]}
-"""
+        prompt = (
+            "Analyze the priority of the following email from 0.0 (very low) to 1.0 (very high).\n"
+            "Consider urgency, professional importance, and action required.\n"
+            "Respond ONLY with a single float value between 0.0 and 1.0.\n\n"
+            f"Subject: {subject}\n"
+            f"Body: {body[:1000]}\n"
+        )
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(f"{OLLAMA_HOST}/api/generate", json={
-                    "model": EMAIL_SCORER_MODEL,
-                    "prompt": prompt,
-                    "stream": False
-                })
-                resp.raise_for_status()
-                data = resp.json()
-                text = data.get("response", "").strip()
-                # Extract the first valid float in the response (handles "0.8", "1", ".7", "0.7/1.0", etc.)
-                match = re.search(r"(\d+\.?\d*|\d*\.\d+)", text)
-                if match:
-                    score = float(match.group(1))
-                    return max(0.0, min(1.0, score))  # Clamp to [0.0, 1.0]
+            response = await generate(
+                task_type="scoring",
+                messages=[{"role": "user", "text": prompt}],
+                max_tokens=10,
+            )
+            match = re.search(r"(\d+\.?\d*|\d*\.\d+)", response)
+            if match:
+                score = float(match.group(1))
+                return max(0.0, min(1.0, score))
         except Exception as e:
-            logger.error(f"Ollama scoring failed: {e}")
+            logger.error(f"API scoring failed: {e}")
         return 0.5  # Default middle-ground
 
     async def process_task(self, task_id: str, data: dict):
