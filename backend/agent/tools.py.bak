@@ -10,7 +10,6 @@ import re
 import asyncio
 import logging
 from contextvars import ContextVar
-from backend.utils import execute_shell_command
 from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
 from .orchestrator import dispatch_worker_task, get_worker_result
@@ -91,17 +90,6 @@ def request_create_file(filepath: str, contents: str) -> str:
         return f"Error creating file {filepath}: {str(e)}"
 
 
-def run_shell_command(command: str, timeout: int = 30) -> str:
-    """Executes a shell command safely.
-    Wraps backend.utils.execute_shell_command for agent access."""
-    logger.info(f"[tool:run_shell_command] command={command!r} timeout={timeout}")
-    result = execute_shell_command(command, timeout=timeout)
-    if result["success"]:
-        return f"Command succeeded:\n{result['stdout']}"
-    else:
-        return f"Command failed (code {result['returncode']}):\n{result['stderr']}"
-
-
 def append_memory(entry: str, visibility: str = "private") -> str:
     """Appends a timestamped entry to the persistent memory database.
     Use this to record decisions made, operator preferences discovered, task outcomes,
@@ -167,7 +155,6 @@ ICARUS_TOOLS = [
     list_directory,
     replace_file_contents,
     request_create_file,
-    run_shell_command,
     append_memory,
     check_mailbox,
     consult_councilor,
