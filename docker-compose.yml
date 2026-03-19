@@ -65,6 +65,11 @@ services:
       - REDIS_URL=redis://redis:6379/0
     networks:
       - icarus-net
+    volumes:
+      - ./backend:/app/backend:ro # Read-only source code mount for L1 restriction
+      - ./workspace/ipc:/workspace/ipc
+      - ./workspace/memory:/workspace/memory
+      - ./workspace/projects:/workspace/projects
     depends_on:
       - redis
       - icarus-brain

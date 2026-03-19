@@ -4,6 +4,35 @@ from backend.database.redis_connection import get_redis_client
 
 logger = logging.getLogger(__name__)
 
+EMAIL_PRIORITY_STREAM = "tasks:email_priority"
+_STREAM_ALIASES = {
+    "tasks:email_priority": EMAIL_PRIORITY_STREAM,
+    "email_priority": EMAIL_PRIORITY_STREAM,
+    "email priority": EMAIL_PRIORITY_STREAM,
+    "emails": EMAIL_PRIORITY_STREAM,
+}
+
+
+def _normalize_stream(stream: str) -> str:
+    raw = (stream or "").strip()
+    if not raw:
+        logger.warning(
+            "dispatch_worker_task received an empty stream name; defaulting to %s",
+            EMAIL_PRIORITY_STREAM,
+        )
+        return EMAIL_PRIORITY_STREAM
+
+    normalized = _STREAM_ALIASES.get(raw.lower(), raw)
+    if normalized != raw:
+        logger.info("Normalizing worker stream '%s' -> '%s'", raw, normalized)
+    elif normalized != EMAIL_PRIORITY_STREAM:
+        logger.warning(
+            "Dispatching to non-standard stream '%s'. Worker listens on '%s'.",
+            normalized,
+            EMAIL_PRIORITY_STREAM,
+        )
+    return normalized
+
 async def dispatch_worker_task(stream: str, data: dict):
     """Push a task to a Redis stream.
 
@@ -11,6 +40,7 @@ async def dispatch_worker_task(stream: str, data: dict):
     for retrieving the result via get_worker_result().
     """
     redis = get_redis_client()
+    stream = _normalize_stream(stream)
     try:
         # Serialize non-primitive values to JSON so Redis XADD receives a flat
         # dict of strings (Redis XADD requires string field/values).
