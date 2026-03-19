@@ -10,7 +10,11 @@ from backend.database.connection import init_db
 from backend.routes import webhook
 from backend.agent.heartbeat import run_heartbeat
 from backend.agent.discord_bot import run_discord_bot
+<<<<<<< Updated upstream
 from backend.agent.gmail_watcher import run_gmail_watcher
+=======
+from backend.agent.memory_repo import migrate_from_log, store_entry
+>>>>>>> Stashed changes
 
 # Setup logging
 logging.basicConfig(
@@ -22,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Restart Notification Protocol - Informational only
 RESTART_INFO_PATH = Path("/workspace/ipc/restart_info.json")
+<<<<<<< Updated upstream
 LEGACY_MEMORY_LOG = "/workspace/memory/memory.log"
 
 from backend.database.redis_connection import get_redis_client, close_redis
@@ -77,12 +82,16 @@ async def run_supervisor():
                 logger.warning(f"Supervisor error: {e}")
         
         await asyncio.sleep(30)
+=======
+MEMORY_LOG_PATH   = Path("/workspace/memory/memory.log")
+>>>>>>> Stashed changes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Icarus Database...")
     await init_db()
 
+<<<<<<< Updated upstream
     # One-time migration: move flat-file memory.log entries into SQLite+FTS5
     try:
         from backend.agent.memory_repo import migrate_from_log
@@ -92,16 +101,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Memory migration skipped or failed: {e}")
     
+=======
+    # Migrate legacy flat-file memory log into SQLite on first boot after upgrade
+    if MEMORY_LOG_PATH.exists():
+        try:
+            migrated = await migrate_from_log(str(MEMORY_LOG_PATH))
+            if migrated > 0:
+                logger.info(f"Migrated {migrated} entries from memory.log into SQLite.")
+        except Exception as e:
+            logger.warning(f"Memory log migration failed (non-fatal): {e}")
+
+>>>>>>> Stashed changes
     # Process Restart Context if present
     if RESTART_INFO_PATH.exists():
         try:
             with open(RESTART_INFO_PATH, 'r') as f:
                 data = json.load(f)
-            
-            reason = data.get("reason", "Code update / Restart")
-            files = data.get("files", [])
+
+            reason  = data.get("reason", "Code update / Restart")
+            files   = data.get("files", [])
             context = data.get("context", "No context provided")
-            
+
             # 1. Log to daemon stdout
             logger.info("--- RESTART CHANGE NOTIFICATION ---")
             logger.info(f"REASON: {reason}")
@@ -109,6 +129,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"ACTION CONTEXT: {context}")
             logger.info("------------------------------------")
 
+<<<<<<< Updated upstream
             # 2. Store restart context in the memory database
             try:
                 from backend.agent.memory_repo import store_entry
@@ -121,14 +142,29 @@ async def lifespan(app: FastAPI):
             except Exception as mem_e:
                 logger.warning(f"Failed to store restart context in memory DB: {mem_e}")
             
+=======
+            # 2. Store in SQLite memory so the L1 agent sees it in prompt context
+            entry_text = f"Restart: {reason}. Files: {', '.join(files) if files else 'None'}. Context: {context}"
+            await store_entry(
+                platform="global",
+                user_id="system",
+                entry=entry_text,
+                visibility="global",
+                category="restart",
+                importance=1.5,
+                source="system",
+            )
+
+>>>>>>> Stashed changes
             # 3. Cleanup: remove the info file so it doesn't trigger on every restart
             os.remove(RESTART_INFO_PATH)
-            
+
         except Exception as e:
             logger.warning(f"Failed to process restart context: {e}")
 
     logger.info("Database initialized successfully. Icarus is coming online.")
     heartbeat_task = asyncio.create_task(run_heartbeat())
+<<<<<<< Updated upstream
     discord_task = asyncio.create_task(run_discord_bot())
     supervisor_task = asyncio.create_task(run_supervisor())
 
@@ -139,6 +175,9 @@ async def lifespan(app: FastAPI):
         gmail_task = asyncio.create_task(run_gmail_watcher())
         logger.info("Gmail watcher started.")
 
+=======
+    discord_task   = asyncio.create_task(run_discord_bot())
+>>>>>>> Stashed changes
     yield
     heartbeat_task.cancel()
     discord_task.cancel()

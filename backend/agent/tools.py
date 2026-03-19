@@ -12,8 +12,12 @@ import logging
 from contextvars import ContextVar
 from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
+<<<<<<< Updated upstream
 from .orchestrator import dispatch_worker_task, get_worker_result
 from .gmail_tools import gmail_list_messages, gmail_get_message
+=======
+from .memory_repo import store_entry
+>>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +93,20 @@ def request_create_file(filepath: str, contents: str) -> str:
         logger.error(f"[tool:request_create_file] error: {e}")
         return f"Error creating file {filepath}: {str(e)}"
 
+<<<<<<< Updated upstream
 
 def append_memory(entry: str, visibility: str = "private") -> str:
     """Appends a timestamped entry to the persistent memory database.
     Use this to record decisions made, operator preferences discovered, task outcomes,
     recurring errors, or any context worth retaining across sessions.
     The memory persists across container restarts.
+=======
+async def append_memory(entry: str, visibility: str = "private") -> str:
+    """Appends a timestamped entry to the persistent memory store.
+    Use this to record decisions made, operator preferences discovered, task outcomes,
+    recurring errors, or any context worth retaining across sessions.
+    The store persists across container restarts.
+>>>>>>> Stashed changes
 
     Args:
         entry: The memory entry to store.
@@ -114,6 +126,7 @@ def append_memory(entry: str, visibility: str = "private") -> str:
         resolved_visibility = "private"
 
     try:
+<<<<<<< Updated upstream
         from backend.agent.memory_repo import store_entry
 
         # store_entry is async — run it in the current event loop
@@ -144,9 +157,33 @@ def append_memory(entry: str, visibility: str = "private") -> str:
             )
             logger.info(f"[tool:append_memory] stored entry id={row_id}")
             return f"Memory logged (id={row_id}): {entry}"
+=======
+        platform = current_platform.get()
+        user_id = current_user_id.get()
+
+        # Backward compat: detect inline [GLOBAL] tag from model output
+        if re.search(r'\[GLOBAL\]', entry, re.IGNORECASE):
+            visibility = "public"
+            entry = re.sub(r'\[GLOBAL\]', '', entry, flags=re.IGNORECASE).strip()
+
+        if visibility == "public":
+            plat, uid, vis = "global", "system", "global"
+        else:
+            plat, uid, vis = platform, user_id, "private"
+
+        row_id = await store_entry(
+            platform=plat,
+            user_id=uid,
+            entry=entry,
+            visibility=vis,
+            source="agent",
+        )
+        logger.info(f"[tool:append_memory] stored entry id={row_id}")
+        return f"Memory stored (id={row_id})"
+>>>>>>> Stashed changes
     except Exception as e:
         logger.error(f"[tool:append_memory] error: {e}")
-        return f"Error logging memory: {str(e)}"
+        return f"Error storing memory: {str(e)}"
 
 
 # Master tool registry for the Google ADK

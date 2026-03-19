@@ -28,7 +28,11 @@ AsyncSessionLocal = async_sessionmaker(
 
 async def init_db():
     async with engine.begin() as conn:
+<<<<<<< Updated upstream
         # Create all regular tables bounded to the Base metadata
+=======
+        # Create ORM tables
+>>>>>>> Stashed changes
         await conn.run_sync(Base.metadata.create_all)
         # Create FTS5 virtual table for memory full-text search.
         # SQLAlchemy's create_all() doesn't handle virtual tables,
@@ -37,6 +41,35 @@ async def init_db():
             "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts "
             "USING fts5(entry, content='memory_entries', content_rowid='id')"
         ))
+
+        # FTS5 virtual table for full-text search on memory entries (BM25 scoring)
+        await conn.execute(text("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
+            USING fts5(entry, content='memory_entries', content_rowid='id')
+        """))
+
+        # Sync triggers to keep memory_fts in step with memory_entries
+        await conn.execute(text("""
+            CREATE TRIGGER IF NOT EXISTS memory_fts_insert
+            AFTER INSERT ON memory_entries BEGIN
+                INSERT INTO memory_fts(rowid, entry) VALUES (new.id, new.entry);
+            END
+        """))
+        await conn.execute(text("""
+            CREATE TRIGGER IF NOT EXISTS memory_fts_delete
+            BEFORE DELETE ON memory_entries BEGIN
+                INSERT INTO memory_fts(memory_fts, rowid, entry)
+                VALUES ('delete', old.id, old.entry);
+            END
+        """))
+        await conn.execute(text("""
+            CREATE TRIGGER IF NOT EXISTS memory_fts_update
+            AFTER UPDATE ON memory_entries BEGIN
+                INSERT INTO memory_fts(memory_fts, rowid, entry)
+                VALUES ('delete', old.id, old.entry);
+                INSERT INTO memory_fts(rowid, entry) VALUES (new.id, new.entry);
+            END
+        """))
 
 async def get_db():
     async with AsyncSessionLocal() as session:

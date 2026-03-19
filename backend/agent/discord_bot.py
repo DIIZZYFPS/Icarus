@@ -165,6 +165,7 @@ async def relay_councilor_mailbox_to_operator(
     # If the model returns an empty string, still deliver the original mailbox payload.
     final_text = response_text if response_text else mailbox_text
     await push_discord_message(None, final_text, user_id=normalized_user_id)
+<<<<<<< Updated upstream
 
 
 async def relay_email_notification_to_operator(
@@ -197,3 +198,5 @@ async def relay_email_notification_to_operator(
     # If the model returns an empty string, still deliver the original classification.
     final_text = response_text if response_text else f"📧 **Email Alert:**\n{email_text}"
     await push_discord_message(None, final_text, user_id=normalized_user_id)
+=======
+>>>>>>> Stashed changes
