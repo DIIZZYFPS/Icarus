@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 ROUTING_TABLE = {
     "consultation": "gemma-3-27b-it",
     "scoring":      "gemma-3-27b-it",
-    "escalation":   "gemini-3-flash",
+    "escalation":   "gemini-3.1-flash-lite-preview",
 }
 
 DEFAULT_MODEL = "gemma-3-27b-it"
