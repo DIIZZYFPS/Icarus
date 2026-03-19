@@ -2,6 +2,7 @@ import logging
 import base64
 from typing import Optional, List, Dict, Any
 from .github import get_github_client
+from .github_clone import github_clone_repo
 
 logger = logging.getLogger(__name__)
 
@@ -152,5 +153,6 @@ GITHUB_TOOLS = [
     github_create_issue,
     github_create_branch,
     github_write_file,
-    github_create_pr
+    github_create_pr,
+    github_clone_repo
 ]
