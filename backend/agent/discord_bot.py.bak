@@ -1,8 +1,6 @@
 import os
 import logging
 import discord
-import time
-import statistics
 from discord.ext import commands
 from backend.agent.processor import process_message
 from backend.utils import split_message
@@ -13,28 +11,6 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DISCORD_ALLOWED_CHANNEL_ID = os.environ.get("DISCORD_ALLOWED_CHANNEL_ID")
 DISCORD_OPERATOR_ID = int(os.environ.get("DISCORD_OPERATOR_ID", "0"))
 
-# Latency tracking store
-latency_metrics = {
-    "api_calls": [],
-    "worker_tasks": [],
-    "heartbeats": []
-}
-
-def record_latency(category: str, duration: float):
-    if category in latency_metrics:
-        latency_metrics[category].append(duration)
-        # Keep only the last 1000 measurements per category
-        if len(latency_metrics[category]) > 1000:
-            latency_metrics[category].pop(0)
-
-def _get_percentiles(data):
-    if not data:
-        return "N/A", "N/A", "N/A"
-    sorted_data = sorted(data)
-    p50 = statistics.median(sorted_data)
-    p95 = sorted_data[int(len(sorted_data) * 0.95)] if len(sorted_data) > 1 else sorted_data[0]
-    p99 = sorted_data[int(len(sorted_data) * 0.99)] if len(sorted_data) > 1 else sorted_data[0]
-    return f"{p50:.2f}s", f"{p95:.2f}s", f"{p99:.2f}s"
 
 def _to_int_or_none(value) -> int | None:
     if value is None:
@@ -49,22 +25,8 @@ class IcarusBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        self.allowed_channel_id = _to_int_or_none(DISCORD_ALLOWED_CHANNEL_ID)
-
-        @self.command(name="latency")
-        async def latency(ctx):
-            """Report system latency metrics."""
-            if ctx.channel.id != 1480825153972600954:
-                return
-
-            embed = discord.Embed(title="System Latency Metrics", color=discord.Color.blue())
-            
-            for category, data in latency_metrics.items():
-                p50, p95, p99 = _get_percentiles(data)
-                embed.add_field(name=category.replace("_", " ").title(), 
-                                value=f"p50: {p50}\np95: {p95}\np99: {p99}", inline=True)
-            
-            await ctx.send(embed=embed)
+        # Intentionally disabled: operator-only DM mode.
+        self.allowed_channel_id = None
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id}), (allowed_channel_id={self.allowed_channel_id})")
@@ -74,9 +36,6 @@ class IcarusBot(commands.Bot):
         # Don't respond to ourselves
         if message.author == self.user:
             return
-
-        # Process commands first
-        await self.process_commands(message)
 
         is_dm = message.guild is None and message.author.id == DISCORD_OPERATOR_ID
 
@@ -94,7 +53,6 @@ class IcarusBot(commands.Bot):
             read_only = True
 
         async with message.channel.typing():
-            start_time = time.perf_counter()
             try:
                 content = message.content
                 if not is_dm:
@@ -103,9 +61,6 @@ class IcarusBot(commands.Bot):
                 # Prefix with author identity so the model knows who is speaking
                 content = f"[User:{message.author.name} (id: {message.author.id})]: {content}"
                 response = await process_message("discord", str(message.author.id), content, chat_id=str(message.channel.id), read_only=read_only)
-                
-                record_latency("api_calls", time.perf_counter() - start_time)
-                
                 if response:
                     chunks = split_message(response)
                     for chunk in chunks:
