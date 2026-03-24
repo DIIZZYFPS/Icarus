@@ -13,6 +13,7 @@ import logging
 from google.adk.runners import Runner
 from google.genai.types import Content, Part
 from backend.agent.engine import get_engine, get_readonly_engine
+from backend.agent.telemetry_tools import fetch_latest_telemetry_snapshot
 from backend.agent.tools import current_platform, current_user_id, current_chat_id
 from backend.database.redis_connection import get_redis_client
 
@@ -21,6 +22,57 @@ logger = logging.getLogger(__name__)
 MAX_HISTORY_TURNS = 6
 MEMORY_INJECT_LIMIT = 30
 ICARUS_CONTEXT = "Conversation history:\n"
+HEALTH_QUERY_PATTERNS = (
+    "how are you feeling",
+    "how are you doing",
+    "system health",
+    "simulation readiness",
+    "resource usage",
+    "telemetry",
+)
+
+
+def _is_health_status_query(text: str) -> bool:
+    lowered = (text or "").lower()
+    if any(pattern in lowered for pattern in HEALTH_QUERY_PATTERNS):
+        return True
+
+    return bool(re.search(r"\b(status|health|readiness)\b", lowered))
+
+
+def _fmt_metric(value: float | None, suffix: str = "") -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.1f}{suffix}"
+
+
+async def _build_proactive_health_note(user_text: str) -> str:
+    """Inject a short operational warning only for non-health prompts in red state."""
+    if _is_health_status_query(user_text):
+        return ""
+
+    snapshot = await fetch_latest_telemetry_snapshot()
+    if not snapshot:
+        return ""
+
+    readiness = (snapshot.get("simulation_readiness") or "").lower()
+    if readiness != "red":
+        return ""
+
+    cpu = _fmt_metric(snapshot.get("cpu_percent"), "%")
+    mem_used = _fmt_metric(snapshot.get("memory_used_mb"), "MB")
+    mem_total = _fmt_metric(snapshot.get("memory_total_mb"), "MB")
+    disk = _fmt_metric(snapshot.get("disk_used_percent"), "%")
+    pressure = _fmt_metric(snapshot.get("pressure_score"))
+    gpu = _fmt_metric(snapshot.get("gpu_util_percent"), "%")
+
+    return (
+        "[SYSTEM HEALTH NOTE]\n"
+        "Latest telemetry indicates high pressure. "
+        f"readiness=red, pressure_score={pressure}, cpu={cpu}, "
+        f"memory={mem_used}/{mem_total}, disk={disk}, gpu={gpu}. "
+        "Keep the primary response focused; append one brief operational warning.\n"
+    )
 
 
 # ── Chat History (Redis-backed) ─────────────────────────────────────────────
@@ -109,6 +161,7 @@ async def process_message(
 
         history = await get_chat_history(history_id)
         memory_context = await _load_memory_context(platform, user_id, query=text, read_only=read_only)
+        health_note_context = await _build_proactive_health_note(text)
 
         # Identity and context headers
         context_header = (
@@ -117,7 +170,14 @@ async def process_message(
         )
 
         history_text = "".join(f"User: {u}\nIcarus: {a}\n\n" for u, a in history)
-        full_prompt = context_header + memory_context + ICARUS_CONTEXT + history_text + f"User: {text}"
+        full_prompt = (
+            context_header
+            + memory_context
+            + health_note_context
+            + ICARUS_CONTEXT
+            + history_text
+            + f"User: {text}"
+        )
 
         session_id = f"{platform}_{user_id}_{int(time.time())}"
 

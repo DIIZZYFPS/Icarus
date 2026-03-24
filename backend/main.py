@@ -11,6 +11,7 @@ from backend.routes import webhook
 from backend.agent.heartbeat import run_heartbeat
 from backend.agent.discord_bot import run_discord_bot
 from backend.agent.gmail_watcher import run_gmail_watcher
+from backend.agent.metrics_consumer import run_metrics_consumer
 
 # Setup logging
 logging.basicConfig(
@@ -131,6 +132,7 @@ async def lifespan(app: FastAPI):
     heartbeat_task = asyncio.create_task(run_heartbeat())
     discord_task = asyncio.create_task(run_discord_bot())
     supervisor_task = asyncio.create_task(run_supervisor())
+    metrics_task = asyncio.create_task(run_metrics_consumer())
 
 
     # Start Gmail watcher if Pub/Sub is configured
@@ -143,6 +145,7 @@ async def lifespan(app: FastAPI):
     heartbeat_task.cancel()
     discord_task.cancel()
     supervisor_task.cancel()
+    metrics_task.cancel()
 
     if gmail_task:
         gmail_task.cancel()
@@ -156,6 +159,33 @@ app.include_router(webhook.router)
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "version": "0.1.0"}
+
+
+@app.get("/metrics/latest")
+async def metrics_latest():
+    redis = get_redis_client()
+    raw = await redis.get("icarus:metrics:latest")
+    if not raw:
+        return {"status": "empty", "message": "No telemetry received yet."}
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"status": "error", "message": "Stored telemetry payload is invalid JSON."}
+
+
+@app.get("/metrics/recent")
+async def metrics_recent(limit: int = 10):
+    redis = get_redis_client()
+    safe_limit = max(1, min(limit, 100))
+    items = await redis.lrange("icarus:metrics:summary", 0, safe_limit - 1)
+    parsed = []
+    for item in items:
+        try:
+            parsed.append(json.loads(item))
+        except Exception:
+            continue
+    return {"count": len(parsed), "items": parsed}
 
 if __name__ == "__main__":
     import uvicorn

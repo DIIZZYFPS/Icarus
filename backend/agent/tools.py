@@ -14,6 +14,7 @@ from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
 from .orchestrator import dispatch_worker_task, get_worker_result
 from .gmail_tools import gmail_list_messages, gmail_get_message
+from .telemetry_tools import get_telemetry_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,7 @@ ICARUS_TOOLS = [
     get_worker_result,
     gmail_list_messages,
     gmail_get_message,
+    get_telemetry_snapshot,
     *GITHUB_TOOLS,
 ]
 
@@ -181,6 +183,7 @@ ICARUS_READONLY_TOOLS = [
     append_memory,
     check_mailbox,
     consult_councilor,
+    get_telemetry_snapshot,
     github_get_repo_info,
     github_list_repos,
     github_read_file,

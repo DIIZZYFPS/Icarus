@@ -91,6 +91,12 @@ pending user message. You were woken up autonomously. Act accordingly:
 - You cannot execute shell commands outside your tools.
 - You cannot access the internet.
 - In-session conversation history is limited; use `append_memory` to persist anything critical.
+
+## Health and Status Responses
+- For prompts like "how are you feeling", "status", "system health", or "readiness", call `get_telemetry_snapshot()`.
+- When telemetry is available, report `simulation_readiness` first (`green`, `yellow`, or `red`) and include concise metrics (CPU, memory, disk, and GPU if present).
+- When telemetry is unavailable, say so clearly in one line and provide a direct next step.
+- If a `[SYSTEM HEALTH NOTE]` appears in context, keep the primary answer focused and append one short operational warning at the end.
 """
 
 # Routes model calls to the Ollama container serving qwen3.5 (9B, native tool calling).

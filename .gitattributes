@@ -1,0 +1,11 @@
+* text=auto
+
+# Shell scripts must stay LF for Linux containers/entrypoints
+*.sh text eol=lf
+
+# Common container/runtime files that should be LF
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Modelfile text eol=lf
