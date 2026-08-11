@@ -21,6 +21,9 @@ workspace/memory/
 workspace/ipc/
 workspace/projects/
 
+# Councilor escalation worktrees (disposable, created/removed per escalation)
+.worktrees/
+
 # Logs & Debugging
 *.log
 error_*.txt

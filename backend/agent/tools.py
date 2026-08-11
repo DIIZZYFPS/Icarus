@@ -14,6 +14,7 @@ from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
 from .orchestrator import dispatch_worker_task, get_worker_result
 from .gmail_tools import gmail_list_messages, gmail_get_message
+from .calendar_tools import calendar_list_upcoming_events
 from .telemetry_tools import get_telemetry_snapshot
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,31 @@ current_chat_id = ContextVar("current_chat_id", default="0")
 
 # Legacy path for migration detection
 MEMORY_LOG_PATH = "/workspace/memory/memory.log"
+
+# The only host-persisted, writable location available to the L1 agent —
+# bind-mounted to ./workspace/projects on the host. Everywhere else in the
+# container is either read-only (:ro source mount) or writable-but-ephemeral
+# (e.g. the container's own home directory) — writes there succeed, report
+# success accurately, and then vanish on the next container recreation with
+# no warning. That's exactly what happened before this jail existed: the
+# model tried /resume.md, /workspace/resume.md, /home/resume.md (all
+# correctly denied), then /home/icarus_user/resume.md — which is writable,
+# so it succeeded and truthfully reported success, into a file that was one
+# `docker compose up --force-recreate` away from disappearing. Enforced here
+# as a capability, not a system-prompt instruction, same principle as the
+# Councilor's escalation sandbox.
+WORKSPACE_WRITE_ROOT = "/workspace/projects"
+
+
+def _resolve_in_write_root(filepath: str) -> str | None:
+    """Resolve filepath against WORKSPACE_WRITE_ROOT. Returns the resolved
+    absolute path, or None if it escapes the root (via '..' or by being an
+    absolute path elsewhere)."""
+    candidate = os.path.abspath(os.path.join(WORKSPACE_WRITE_ROOT, filepath))
+    root = os.path.abspath(WORKSPACE_WRITE_ROOT)
+    if candidate != root and not candidate.startswith(root + os.sep):
+        return None
+    return candidate
 
 
 def read_file(filepath: str) -> str:
@@ -55,40 +81,124 @@ def list_directory(directory: str) -> list[str]:
 
 def replace_file_contents(filepath: str, new_contents: str) -> str:
     """Safely replaces the entire contents of a file with the provided text.
-    Note: This is NOT for diffs. Provide the complete final file content."""
+    Note: This is NOT for diffs. Provide the complete final file content.
+    filepath is relative to your workspace (e.g. 'resume.md') — this is the
+    only location that actually persists across restarts."""
     logger.info(
         f"[tool:replace_file_contents] filepath={filepath!r} ({len(new_contents)} chars)"
     )
-    backup_path = f"{filepath}.bak"
+    resolved = _resolve_in_write_root(filepath)
+    if resolved is None:
+        return (
+            f"Error: '{filepath}' is outside your writable workspace. "
+            f"Use a path relative to your workspace, e.g. 'resume.md' or 'notes/resume.md'."
+        )
+    backup_path = f"{resolved}.bak"
     try:
-        if os.path.exists(filepath):
-            os.replace(filepath, backup_path)
-        with open(filepath, "w") as f:
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        if os.path.exists(resolved):
+            os.replace(resolved, backup_path)
+        with open(resolved, "w") as f:
             f.write(new_contents)
-        logger.info(f"[tool:replace_file_contents] successfully wrote {filepath!r}")
+        logger.info(f"[tool:replace_file_contents] successfully wrote {resolved!r}")
         return f"Successfully updated {filepath}"
     except Exception as e:
         if os.path.exists(backup_path):
-            os.replace(backup_path, filepath)
+            os.replace(backup_path, resolved)
         logger.error(f"[tool:replace_file_contents] error: {e}")
         return f"Error updating {filepath}: {str(e)}"
 
 
 def request_create_file(filepath: str, contents: str) -> str:
-    """Creates a new file with the provided contents.
-    The tool operates exclusively within the container's accessible paths."""
+    """Creates a new file with the provided contents. filepath is relative
+    to your workspace (e.g. 'resume.md') — this is the only location that
+    actually persists across restarts; anywhere else either isn't writable
+    or is writable-but-ephemeral and will silently disappear later."""
     logger.info(f"[tool:request_create_file] filepath={filepath!r}")
+    resolved = _resolve_in_write_root(filepath)
+    if resolved is None:
+        return (
+            f"Error: '{filepath}' is outside your writable workspace. "
+            f"Use a path relative to your workspace, e.g. 'resume.md' or 'notes/resume.md'."
+        )
     try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        if os.path.exists(filepath):
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        if os.path.exists(resolved):
             return f"Error: File {filepath} already exists. Use replace_file_contents to overwrite."
-        with open(filepath, "w") as f:
+        with open(resolved, "w") as f:
             f.write(contents)
-        logger.info(f"[tool:request_create_file] successfully created {filepath!r}")
+        logger.info(f"[tool:request_create_file] successfully created {resolved!r}")
         return f"Successfully created {filepath}"
     except Exception as e:
         logger.error(f"[tool:request_create_file] error: {e}")
         return f"Error creating file {filepath}: {str(e)}"
+
+
+async def recall(query: str, limit: int = 8) -> str:
+    """Search the full message transcript for anything relevant to `query` —
+    every message ever exchanged on this platform with this user, not just
+    what got explicitly saved via append_memory. Use this when you're asked
+    about something you might not remember, or need to check whether you (or
+    a background worker) already mentioned something earlier — e.g. "did you
+    already tell me about that email", "what did we decide about X last week".
+    This is a deliberate lookup, separate from the memory that's already
+    injected into your context automatically — reach for it when the answer
+    might be buried further back than your current context reaches.
+
+    Args:
+        query: What to search for.
+        limit: Max results to return (default 8).
+    """
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    logger.info(f"[tool:recall] platform={platform!r} user_id={user_id!r} query={query!r}")
+
+    try:
+        from backend.agent.transcript_repo import search
+
+        results = await search(platform=platform, user_id=user_id, query=query, limit=limit)
+        if not results:
+            return "No matching messages found in the transcript."
+
+        lines = [f"[{r.created_at}] {r.role}: {r.content}" for r in results]
+        return "Transcript search results:\n" + "\n".join(lines)
+    except Exception as e:
+        logger.error(f"[tool:recall] error: {e}")
+        return f"Error searching transcript: {str(e)}"
+
+
+async def list_tracked_items(item_type: str = "") -> str:
+    """List structured, stateful items tracked on your behalf — job
+    applications and bills extracted from triaged email, most recently
+    updated first. Use this for "what's outstanding", "where do things
+    stand with my job search", "what bills are due" — it reads current
+    state directly rather than trying to reconstruct it from scattered
+    email mentions.
+
+    Args:
+        item_type: Optional filter — "job_application" or "bill". Leave
+            empty to list everything.
+    """
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    logger.info(f"[tool:list_tracked_items] platform={platform!r} user_id={user_id!r} item_type={item_type!r}")
+
+    try:
+        from backend.agent.tracked_items_repo import list_items
+
+        items = await list_items(platform=platform, user_id=user_id, item_type=item_type or None)
+        if not items:
+            return "No tracked items found."
+
+        lines = []
+        for i in items:
+            due = f", due {i.due_at}" if i.due_at else ""
+            urgency = f" [{i.urgency}]" if i.urgency else ""
+            lines.append(f"- ({i.item_type}) {i.entity_key}: {i.state}{due}{urgency} — {i.summary or ''}".rstrip())
+        return "Tracked items:\n" + "\n".join(lines)
+    except Exception as e:
+        logger.error(f"[tool:list_tracked_items] error: {e}")
+        return f"Error listing tracked items: {str(e)}"
 
 
 def append_memory(entry: str, visibility: str = "private") -> str:
@@ -157,6 +267,8 @@ ICARUS_TOOLS = [
     replace_file_contents,
     request_create_file,
     append_memory,
+    recall,
+    list_tracked_items,
     check_mailbox,
     consult_councilor,
     escalate_to_councilor,
@@ -164,6 +276,7 @@ ICARUS_TOOLS = [
     get_worker_result,
     gmail_list_messages,
     gmail_get_message,
+    calendar_list_upcoming_events,
     get_telemetry_snapshot,
     *GITHUB_TOOLS,
 ]
@@ -181,6 +294,8 @@ ICARUS_READONLY_TOOLS = [
     read_file,
     list_directory,
     append_memory,
+    recall,
+    list_tracked_items,
     check_mailbox,
     consult_councilor,
     get_telemetry_snapshot,

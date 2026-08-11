@@ -1,5 +1,0 @@
-FROM qwen3.5
-
-# Reduce context window from the default 256K to 8K — saves VRAM, keeps Icarus turns fast.
-# Think mode is disabled at the API level via options.think=false (not a Modelfile parameter).
-PARAMETER num_ctx 8192

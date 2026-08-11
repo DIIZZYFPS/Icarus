@@ -15,6 +15,7 @@ import re
 import sys
 import json
 import time
+import uuid
 import asyncio
 import logging
 import subprocess
@@ -75,91 +76,116 @@ def _record_escalation(escalation_type: str, intent: str, outcome: str):
     })
 
 
-# ── Host filesystem tools for the agent loop ────────────────────────────────
-# These run on the HOST, giving Gemini Flash full access to Icarus source code.
+# ── Sandboxed, worktree-scoped tools for the agent loop ─────────────────────
+# Escalations run in a disposable git worktree, never against the live
+# checkout. read_file/write_file/list_directory are plain Python with a
+# path-prefix jail — fine, since their risk is scope, not arbitrary code
+# execution. run_command gets real OS-level confinement via bwrap: a string
+# blocklist can't safely bound arbitrary shell text, so it isn't trusted to
+# do that job anymore. The sandbox — read-only host outside the worktree, no
+# network, no visibility into other processes — is the actual boundary now.
 
-def read_file(filepath: str) -> str:
-    """Read the contents of a file from the project."""
-    try:
-        resolved = (PROJECT_ROOT / filepath).resolve()
-        # Security: ensure we stay within project root
-        if not str(resolved).startswith(str(PROJECT_ROOT)):
-            return f"Error: path {filepath} is outside the project root."
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except Exception as e:
-        return f"Error reading {filepath}: {e}"
+WORKTREE_ROOT = PROJECT_ROOT / ".worktrees"
 
 
-def write_file(filepath: str, contents: str) -> str:
-    """Write contents to a file in the project. Creates directories as needed."""
-    try:
-        resolved = (PROJECT_ROOT / filepath).resolve()
-        if not str(resolved).startswith(str(PROJECT_ROOT)):
-            return f"Error: path {filepath} is outside the project root."
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        # Backup existing file
-        if resolved.exists():
-            backup = resolved.with_suffix(resolved.suffix + ".bak")
-            resolved.replace(backup)
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(contents)
-        return f"Successfully wrote {filepath} ({len(contents)} chars)"
-    except Exception as e:
-        return f"Error writing {filepath}: {e}"
+def _make_tools(worktree_path: Path):
+    """Build a fresh read_file/write_file/list_directory/run_command set
+    bound to one escalation's worktree."""
+    root = worktree_path.resolve()
 
+    def _resolve(rel_path: str) -> Path | None:
+        candidate = (root / rel_path).resolve()
+        if not str(candidate).startswith(str(root)):
+            return None
+        return candidate
 
-def list_directory(directory: str) -> str:
-    """List files and subdirectories in a directory."""
-    try:
-        resolved = (PROJECT_ROOT / directory).resolve()
-        if not str(resolved).startswith(str(PROJECT_ROOT)):
-            return f"Error: path {directory} is outside the project root."
-        entries = sorted(os.listdir(resolved))
-        return "\n".join(entries) if entries else "(empty directory)"
-    except Exception as e:
-        return f"Error listing {directory}: {e}"
+    def read_file(filepath: str) -> str:
+        """Read the contents of a file from the escalation worktree."""
+        resolved = _resolve(filepath)
+        if resolved is None:
+            return f"Error: path {filepath} is outside the escalation worktree."
+        try:
+            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except Exception as e:
+            return f"Error reading {filepath}: {e}"
 
+    def write_file(filepath: str, contents: str) -> str:
+        """Write contents to a file in the escalation worktree. Creates directories as needed."""
+        resolved = _resolve(filepath)
+        if resolved is None:
+            return f"Error: path {filepath} is outside the escalation worktree."
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            if resolved.exists():
+                backup = resolved.with_suffix(resolved.suffix + ".bak")
+                resolved.replace(backup)
+            with open(resolved, "w", encoding="utf-8") as f:
+                f.write(contents)
+            return f"Successfully wrote {filepath} ({len(contents)} chars)"
+        except Exception as e:
+            return f"Error writing {filepath}: {e}"
 
-def run_command(command: str, cwd: str = ".") -> str:
-    """Run a shell command on the host. Returns stdout + stderr.
-    Times out after 30 seconds. Dangerous commands are blocked."""
-    blocked = ["rm -rf /", "format ", "del /f", "shutdown", "reboot"]
-    if any(b in command.lower() for b in blocked):
-        return f"Blocked: dangerous command detected."
-    try:
-        resolved_cwd = (PROJECT_ROOT / cwd).resolve()
-        if not str(resolved_cwd).startswith(str(PROJECT_ROOT)):
-            return f"Error: cwd {cwd} is outside the project root."
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(resolved_cwd),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += f"\n[stderr] {result.stderr}"
-        if result.returncode != 0:
-            output += f"\n[exit code: {result.returncode}]"
-        return output.strip() or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Command timed out after 30 seconds."
-    except Exception as e:
-        return f"Error running command: {e}"
+    def list_directory(directory: str) -> str:
+        """List files and subdirectories in a directory within the escalation worktree."""
+        resolved = _resolve(directory)
+        if resolved is None:
+            return f"Error: path {directory} is outside the escalation worktree."
+        try:
+            entries = sorted(os.listdir(resolved))
+            return "\n".join(entries) if entries else "(empty directory)"
+        except Exception as e:
+            return f"Error listing {directory}: {e}"
 
+    def run_command(command: str, cwd: str = ".") -> str:
+        """Run a shell command, sandboxed to the escalation worktree: read-only
+        view of the host outside it, no network, no visibility into other
+        processes. Times out after 30 seconds. Anything requiring a download
+        or external service will fail by design — that's a signal to escalate
+        manually, not something this sandbox allows."""
+        resolved_cwd = _resolve(cwd)
+        if resolved_cwd is None:
+            return f"Error: cwd {cwd} is outside the escalation worktree."
+        bwrap_cmd = [
+            "bwrap",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--tmpfs", "/tmp",
+            "--bind", str(root), str(root),
+            "--unshare-all",
+            "--die-with-parent",
+            "--new-session",
+            "--chdir", str(resolved_cwd),
+            "/bin/sh", "-c", command,
+        ]
+        try:
+            result = subprocess.run(bwrap_cmd, capture_output=True, text=True, timeout=30)
+            output = ""
+            if result.stdout:
+                output += result.stdout
+            if result.stderr:
+                output += f"\n[stderr] {result.stderr}"
+            if result.returncode != 0:
+                output += f"\n[exit code: {result.returncode}]"
+            return output.strip() or "(no output)"
+        except subprocess.TimeoutExpired:
+            return "Command timed out after 30 seconds."
+        except FileNotFoundError:
+            return "Error: bwrap is not installed on this host — sandboxed execution is unavailable."
+        except Exception as e:
+            return f"Error running command: {e}"
 
-COUNCILOR_TOOLS = [read_file, write_file, list_directory, run_command]
+    return [read_file, write_file, list_directory, run_command]
 
 
 # ── System prompts ───────────────────────────────────────────────────────────
 
 ESCALATION_SYSTEM_PROMPT = """You are The Councilor — the L2 meta-agent for Project Icarus.
-You run on the host machine (X3R0) with full filesystem access.
+You are operating inside an isolated git worktree — a disposable copy of the
+repository on its own branch. The primary checkout is never touched by your
+work, and run_command executes in a sandbox with no network access and a
+read-only view of the host outside this worktree.
 
 Your job: execute the given intent by reading and modifying source files as needed.
 
@@ -168,8 +194,11 @@ Rules:
 - Use read_file to understand context before making changes.
 - Use write_file to make changes. Provide COMPLETE file contents, not diffs.
 - Use list_directory to explore the project structure if needed.
-- Use run_command sparingly and only when necessary (e.g., to check syntax).
-- Do NOT run git commands — git operations are handled automatically after you finish.
+- Use run_command sparingly and only when necessary (e.g., to check syntax). It
+  has no network access — anything requiring a download or external service
+  will fail by design.
+- Do NOT run git commands — commit, push, and PR creation are handled
+  automatically after you finish.
 - Be precise and surgical. Modify only what's needed.
 - When done, provide a clear summary of what you changed and why.
 """
@@ -297,91 +326,111 @@ def _create_pr_via_api(token: str, owner: str, repo: str, branch: str, title: st
         return None
 
 
-def _git_workflow(intent: str, timestamp: int) -> str | None:
-    """Branch, commit, push, and PR if files were changed. Returns PR URL or None."""
-    git_check = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
+def _create_escalation_worktree(timestamp: int) -> tuple[Path, str] | None:
+    """Create an isolated git worktree on a fresh branch, based on main.
+    Never touches the primary checkout — unlike the old stash/checkout dance,
+    the live working tree isn't disturbed even while an escalation is running.
+    Returns (worktree_path, branch_name), or None on failure."""
+    branch_name = f"councilor/intent-{timestamp}-{uuid.uuid4().hex[:6]}"
+    worktree_path = WORKTREE_ROOT / branch_name.replace("/", "_")
+    WORKTREE_ROOT.mkdir(exist_ok=True)
+
+    result = subprocess.run(
+        ["git", "worktree", "add", "-b", branch_name, str(worktree_path), "main"],
+        cwd=str(PROJECT_ROOT), capture_output=True, text=True,
     )
-    if not git_check.stdout.strip():
-        logger.info("No source changes detected — skipping git workflow.")
+    if result.returncode != 0:
+        logger.error(f"Failed to create escalation worktree: {result.stderr.strip()}")
+        return None
+    logger.info(f"Created escalation worktree {worktree_path} on branch {branch_name}")
+    return worktree_path, branch_name
+
+
+def _finalize_worktree(worktree_path: Path, branch_name: str, intent: str) -> str | None:
+    """Commit, push, and PR from within the isolated worktree, if anything
+    changed. Returns the PR URL, or None if there was nothing to land or the
+    workflow failed."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(worktree_path), capture_output=True, text=True,
+    )
+    if not status.stdout.strip():
+        logger.info("No source changes detected in worktree — skipping git workflow.")
         return None
 
     changed_list = [
         line.strip().split(None, 1)[-1]
-        for line in git_check.stdout.strip().split("\n")
+        for line in status.stdout.strip().split("\n")
         if line.strip()
     ]
     logger.info(f"Changes detected in: {changed_list}")
 
-    branch_name = f"councilor/intent-{timestamp}"
+    from backend.agent.capability_registry import classify_change
+    risk_tier, sensitive_paths = classify_change(changed_list)
+    if risk_tier == "sensitive":
+        logger.warning(f"Escalation touches sensitive paths: {sensitive_paths}")
 
-    # Stash → main → feature branch
-    subprocess.run(["git", "stash"], cwd=str(PROJECT_ROOT), capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=str(PROJECT_ROOT), capture_output=True)
-    create = subprocess.run(
-        ["git", "checkout", "-b", branch_name],
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
-    )
-    if create.returncode != 0:
-        logger.warning(f"Branch creation failed: {create.stderr.strip()}")
-        # Pop the stash and return — don't leave the repo in a dirty state
-        subprocess.run(["git", "stash", "pop"], cwd=str(PROJECT_ROOT), capture_output=True)
-        return None
-
-    # Pop stash to bring changes onto the new branch
-    subprocess.run(["git", "stash", "pop"], cwd=str(PROJECT_ROOT), capture_output=True)
-
-    # Commit
-    subprocess.run(["git", "add", "-A"], cwd=str(PROJECT_ROOT), capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=str(worktree_path), capture_output=True)
     commit_msg = f"Councilor: {intent[:72]}"
     commit = subprocess.run(
         ["git", "commit", "-m", commit_msg],
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
+        cwd=str(worktree_path), capture_output=True, text=True,
     )
     if commit.returncode != 0:
         logger.warning(f"Commit failed: {commit.stderr.strip()}")
-        subprocess.run(["git", "checkout", "main"], cwd=str(PROJECT_ROOT), capture_output=True)
         return None
 
-    # Push
     push = subprocess.run(
         ["git", "push", "origin", branch_name],
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
+        cwd=str(worktree_path), capture_output=True, text=True,
     )
     if push.returncode != 0:
         logger.warning(f"Push failed: {push.stderr.strip()}")
-        subprocess.run(["git", "checkout", "main"], cwd=str(PROJECT_ROOT), capture_output=True)
         return None
-
     logger.info(f"Pushed {branch_name} to origin")
 
-    # PR
     pr_url = None
     github_token = os.getenv("GITHUB_TOKEN")
     repo_info = _get_repo_remote_info()
     if github_token and repo_info:
         owner, repo_name = repo_info
         changed_md = "\n".join(f"- `{f}`" for f in changed_list)
+        risk_line = (
+            f"⚠️ **Risk: sensitive** — touches {', '.join(f'`{p}`' for p in sensitive_paths)}. "
+            f"Review carefully regardless of diff size."
+            if risk_tier == "sensitive"
+            else "**Risk: standard** — no declared sensitive paths touched."
+        )
         pr_url = _create_pr_via_api(
             github_token, owner, repo_name, branch_name,
             title=f"Councilor: {intent[:60]}",
-            body=f"## Automated changes by The Councilor\n\n**Intent:**\n{intent}\n\n**Changed files:**\n{changed_md}",
+            body=(
+                f"## Automated changes by The Councilor\n\n"
+                f"{risk_line}\n\n"
+                f"**Intent:**\n{intent}\n\n"
+                f"**Changed files:**\n{changed_md}\n\n"
+                f"_Built and committed inside an isolated worktree — the primary "
+                f"checkout was never touched._"
+            ),
         )
         if pr_url:
             logger.info(f"PR created: {pr_url}")
 
-    # Return to main
-    subprocess.run(["git", "checkout", "main"], cwd=str(PROJECT_ROOT), capture_output=True)
     return pr_url
+
+
+def _cleanup_worktree(worktree_path: Path):
+    """Remove the escalation worktree. Always call this — success or failure —
+    so failed/aborted escalations don't leave orphaned worktrees behind."""
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", str(worktree_path), "--force"],
+            cwd=str(PROJECT_ROOT), capture_output=True,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to remove worktree {worktree_path}: {e}")
+    finally:
+        subprocess.run(["git", "worktree", "prune"], cwd=str(PROJECT_ROOT), capture_output=True)
 
 
 # ── Request processors ──────────────────────────────────────────────────────
@@ -436,47 +485,60 @@ async def process_escalation(data: dict):
 
     from backend.agent.llm_router import agent_loop
 
+    worktree = _create_escalation_worktree(timestamp)
+    if worktree is None:
+        error_msg = "Escalation failed: could not create an isolated worktree to work in."
+        await _publish_response(timestamp, "escalation", error_msg, platform, chat_id)
+        _notify(platform, chat_id, f"[Icarus Escalation Failed]\n\n{error_msg}")
+        return
+    worktree_path, branch_name = worktree
+    tools = _make_tools(worktree_path)
+
     memory_ctx = _get_memory_context()
     system = ESCALATION_SYSTEM_PROMPT
     if memory_ctx:
         system += "\n\n" + memory_ctx
 
-    # Retry loop
-    last_error = None
-    for attempt in range(max_retries + 1):
-        if attempt > 0:
-            logger.info(f"Retry {attempt}/{max_retries}...")
+    try:
+        # Retry loop — reuses the same worktree across attempts, so retries
+        # see the prior attempt's partial progress rather than starting clean.
+        last_error = None
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                logger.info(f"Retry {attempt}/{max_retries}...")
 
-        response = await agent_loop(
-            task_type="escalation",
-            initial_prompt=intent,
-            tools=COUNCILOR_TOOLS,
-            system_instruction=system,
-        )
+            response = await agent_loop(
+                task_type="escalation",
+                initial_prompt=intent,
+                tools=tools,
+                system_instruction=system,
+            )
 
-        # Check if response indicates failure
-        if "error" in response.lower() and attempt < max_retries:
-            last_error = response
-            system += f"\n\n[PREVIOUS ATTEMPT FAILED]\n{response}\nPlease fix the issue and try again."
-            continue
+            # Check if response indicates failure
+            if "error" in response.lower() and attempt < max_retries:
+                last_error = response
+                system += f"\n\n[PREVIOUS ATTEMPT FAILED]\n{response}\nPlease fix the issue and try again."
+                continue
 
-        # Success
-        pr_url = _git_workflow(intent, timestamp)
-        if pr_url:
-            response += f"\n\nPR: {pr_url}"
+            # Success
+            pr_url = _finalize_worktree(worktree_path, branch_name, intent)
+            if pr_url:
+                response += f"\n\nPR: {pr_url}"
 
-        _record_escalation("escalation", intent, response[:100])
-        await _publish_response(timestamp, "escalation", response, platform, chat_id)
+            _record_escalation("escalation", intent, response[:100])
+            await _publish_response(timestamp, "escalation", response, platform, chat_id)
 
-        # Notify operator
-        _notify(platform, chat_id, f"[Icarus Escalation Complete]\n\n{response}")
-        logger.info(f"Escalation complete ({len(response)} chars)")
-        return
+            # Notify operator
+            _notify(platform, chat_id, f"[Icarus Escalation Complete]\n\n{response}")
+            logger.info(f"Escalation complete ({len(response)} chars)")
+            return
 
-    # All retries exhausted
-    error_msg = f"Escalation failed after {max_retries + 1} attempts.\n\nLast error:\n{last_error or response}"
-    await _publish_response(timestamp, "escalation", error_msg, platform, chat_id)
-    _notify(platform, chat_id, f"[Icarus Escalation Failed]\n\n{error_msg}")
+        # All retries exhausted
+        error_msg = f"Escalation failed after {max_retries + 1} attempts.\n\nLast error:\n{last_error or response}"
+        await _publish_response(timestamp, "escalation", error_msg, platform, chat_id)
+        _notify(platform, chat_id, f"[Icarus Escalation Failed]\n\n{error_msg}")
+    finally:
+        _cleanup_worktree(worktree_path)
 
 
 # ── Redis IPC ────────────────────────────────────────────────────────────────
@@ -496,7 +558,17 @@ async def _get_redis():
 
 
 async def _publish_response(timestamp: int, resp_type: str, message: str, platform: str = None, chat_id: str = None):
-    """Publish a response to Redis for the heartbeat to deliver."""
+    """Publish a response to Redis.
+
+    Escalations are always fire-and-forget — nobody's ever blocking on the
+    pub/sub channel for those, so the heartbeat mailbox list is their only
+    delivery path. Consultations are answered directly to whichever
+    consult_councilor() call is blocking on this timestamp's channel; only
+    fall back to the mailbox list if PUBLISH reports zero receivers (the
+    blocking call already hit its timeout, or something unusual happened) —
+    otherwise every consultation would get delivered twice: once directly,
+    once again a few seconds later via the heartbeat, redundantly.
+    """
     r = await _get_redis()
     payload = json.dumps({
         "timestamp": timestamp,
@@ -505,11 +577,15 @@ async def _publish_response(timestamp: int, resp_type: str, message: str, platfo
         "platform": platform,
         "chat_id": chat_id,
     })
-    # Push to a list that the heartbeat polls
-    await r.lpush("icarus:councilor:responses", payload)
-    # Also publish to a specific channel for blocking consultations
-    await r.publish(f"icarus:councilor:response:{timestamp}", payload)
-    logger.info(f"Published {resp_type} response (timestamp={timestamp})")
+
+    receivers = await r.publish(f"icarus:councilor:response:{timestamp}", payload)
+
+    if resp_type != "consultation" or receivers == 0:
+        await r.lpush("icarus:councilor:responses", payload)
+
+    logger.info(
+        f"Published {resp_type} response (timestamp={timestamp}, direct_receivers={receivers})"
+    )
 
 
 async def _listen_for_requests():
@@ -555,10 +631,11 @@ async def async_main():
         logger.error("Ensure Redis is running and REDIS_URL is set correctly.")
         sys.exit(1)
 
-    # Verify Google API key
+    # GOOGLE_API_KEY is only needed for the dormant cloud overflow path in
+    # llm_router.py — consultation/scoring/escalation all route local by
+    # default now, so this is no longer a hard requirement to start.
     if not os.getenv("GOOGLE_API_KEY"):
-        logger.error("GOOGLE_API_KEY is not set. Get one from https://aistudio.google.com/apikey")
-        sys.exit(1)
+        logger.info("GOOGLE_API_KEY not set — fine, cloud overflow path stays unused.")
 
     # Enter the main listen loop
     await _listen_for_requests()

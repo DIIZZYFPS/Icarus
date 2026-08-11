@@ -172,6 +172,47 @@ class EmailTriageWorker(WorkerBase):
 
         return text_part
 
+    def _normalize_key(self, text: str) -> str:
+        """Collapse a free-text identifier into a stable-ish entity key."""
+        return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "unknown"
+
+    async def _track_item(self, classification: dict, sender: str, subject: str) -> int | None:
+        """Upsert this classification into tracked_items if it's a category
+        with an actual lifecycle (jobs, bills) — not everything is; shopping/
+        social/newsletters/other don't have a "current state" worth tracking,
+        they're just mentions. Returns the tracked item's row id, or None."""
+        category = classification.get("category")
+        details = classification.get("details") or {}
+
+        if category == "jobs":
+            company = details.get("company") or sender
+            entity_key = self._normalize_key(company)
+            state = details.get("status") or "unknown"
+        elif category == "bills":
+            # No invoice/account number is extracted today — sender+due_date
+            # is the best stable-ish identity available. A recurring bill
+            # from the same sender with a different due date next month
+            # correctly becomes a new row; a reminder about the same bill
+            # should share the same due date and update in place.
+            due_date = details.get("due_date") or "unknown-date"
+            entity_key = self._normalize_key(f"{sender}-{due_date}")
+            state = "unpaid"
+        else:
+            return None
+
+        from backend.agent.tracked_items_repo import upsert_item
+        return await upsert_item(
+            platform="discord",
+            user_id=os.environ.get("DISCORD_OPERATOR_ID", "0"),
+            item_type="job_application" if category == "jobs" else "bill",
+            entity_key=entity_key,
+            state=state,
+            summary=classification.get("summary"),
+            urgency=classification.get("urgency"),
+            payload=details or None,
+            source="email_triage",
+        )
+
     async def _notify_discord(self, classification: dict, sender: str, subject: str):
         """Push notification to the Councilor response queue for heartbeat delivery.
 
@@ -279,9 +320,24 @@ class EmailTriageWorker(WorkerBase):
         # 5. Archive out of inbox
         await gmail_archive_message(message_id)
 
+        # 5b. Persist structured lifecycle state (jobs/bills only) — this is
+        # what a future "what am I missing" digest reads, instead of trying
+        # to re-derive current state from scattered email mentions.
+        try:
+            tracked_item_id = await self._track_item(classification, sender, subject)
+        except Exception as e:
+            logger.error(f"[triage] Failed to upsert tracked item: {e}")
+            tracked_item_id = None
+
         # 6. Notify if actionable
         if urgency in ("high", "critical") or action_needed:
             await self._notify_discord(classification, sender, subject)
+            if tracked_item_id is not None:
+                try:
+                    from backend.agent.tracked_items_repo import mark_notified
+                    await mark_notified(tracked_item_id)
+                except Exception as e:
+                    logger.error(f"[triage] Failed to mark tracked item notified: {e}")
 
         # 7. Store result in Redis for observability
         from backend.database.redis_connection import get_redis_client

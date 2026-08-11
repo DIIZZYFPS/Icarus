@@ -448,15 +448,12 @@ async def migrate_from_log(log_path: str) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _default_summarize(text_block: str) -> str:
-    """Summarize a block of memory entries using the local Ollama model."""
-    from litellm import acompletion
-    resp = await acompletion(
-        model="ollama_chat/icarus-qwen",
-        api_base="http://icarus-brain:11434",
-        messages=[{"role": "user", "content": _COMPACT_PROMPT + text_block + "\n\nSUMMARY:"}],
+    """Summarize a block of memory entries using the local model."""
+    from backend.agent.local_llm import local_generate
+    return await local_generate(
+        messages=[{"role": "user", "text": _COMPACT_PROMPT + text_block + "\n\nSUMMARY:"}],
         max_tokens=400,
     )
-    return resp.choices[0].message.content.strip()
 
 
 async def _maybe_compact(platform: str, user_id: str) -> None:

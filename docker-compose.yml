@@ -1,54 +1,38 @@
-version: "3.8"
-
 services:
-  icarus-brain:
-    image: ollama/ollama
-    container_name: icarus-brain
-    runtime: nvidia
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
-    env_file: .env
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    entrypoint: [ "/bin/bash", "/entrypoint.sh" ]
-    ports:
-      - "8000:11434"
-    networks:
-      - icarus-net
-    volumes:
-      - ./ollama_data:/root/.ollama
-      - ./ollama_entrypoint.sh:/entrypoint.sh:ro
-      - ./Modelfile:/Modelfile:ro
-
   icarus-api:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: icarus-api
+    restart: unless-stopped
+    # Host networking: container-to-host traffic across the icarus-net bridge
+    # was being dropped by a host firewall rule we couldn't inspect/fix
+    # without root (confirmed: DNS resolved fine, every host port was
+    # unreachable via the bridge gateway regardless of which one). Host mode
+    # shares the host's network namespace directly, so 127.0.0.1 just works —
+    # no bridge crossing, no host.docker.internal/extra_hosts trick needed.
+    # Filesystem/process containment (:ro mount, no shell tools) is unaffected;
+    # this only gives up network-namespace isolation for icarus-api.
+    network_mode: host
     env_file: .env
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://127.0.0.1:6379/0
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-    ports:
-      - "8080:8000"
-    networks:
-      - icarus-net
+      # L1 chat, consultation, scoring, and escalation all route here — the
+      # bare-host llama-server (Qwen3.6-35B), not the Google cloud API and
+      # not a dedicated dockerized model anymore (icarus-brain retired).
+      - LOCAL_LLM_URL=http://127.0.0.1:8080/v1
     volumes:
       - ./backend:/app/backend:ro # Read-only source code mount for L1 restriction
       - ./workspace/memory:/workspace/memory
       - ./workspace/projects:/workspace/projects
     depends_on:
-      - icarus-brain
       - redis
 
   redis:
     image: redis:7-alpine
     container_name: icarus-redis
+    restart: unless-stopped
     networks:
       - icarus-net
     ports:
@@ -60,22 +44,24 @@ services:
       dockerfile: Dockerfile
     image: icarus-worker # Shared image with api
     command: python -m backend.agent.worker_email_triage
+    restart: unless-stopped
+    network_mode: host # see icarus-api — same bridge-to-host firewall issue
     env_file: .env
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://127.0.0.1:6379/0
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
       - GMAIL_PUBSUB_TOPIC=${GMAIL_PUBSUB_TOPIC}
       - GMAIL_PUBSUB_SUBSCRIPTION=${GMAIL_PUBSUB_SUBSCRIPTION}
-    networks:
-      - icarus-net
+      # Email classification routes here now, not Gemma cloud — this was the
+      # unconditional, per-email privacy leak; see LOCAL_LLM_URL on icarus-api.
+      - LOCAL_LLM_URL=http://127.0.0.1:8080/v1
     volumes:
       - ./backend:/app/backend:ro # Read-only source code mount for L1 restriction
       - ./workspace/memory:/workspace/memory
       - ./workspace/projects:/workspace/projects
     depends_on:
       - redis
-      - icarus-brain
     deploy:
       replicas: 0 # Scaled dynamically by orchestrator
 

@@ -53,6 +53,21 @@ class IcarusBot(commands.Bot):
             read_only = True
 
         async with message.channel.typing():
+            # Lazily created on the first tool call, then edited per call —
+            # nothing is sent for plain replies that never use a tool, so the
+            # common case is unchanged. Deleted before the real answer goes
+            # out, success or failure, so it never lingers as stale status.
+            status_message = {"msg": None}
+
+            async def on_activity(text: str):
+                if status_message["msg"] is None:
+                    status_message["msg"] = await message.channel.send(text)
+                else:
+                    try:
+                        await status_message["msg"].edit(content=text)
+                    except Exception as e:
+                        logger.warning(f"Failed to update status message: {e}")
+
             try:
                 content = message.content
                 if not is_dm:
@@ -60,7 +75,11 @@ class IcarusBot(commands.Bot):
                     content = content.replace(f'<@{self.user.id}>', '').replace(f'<@!{self.user.id}>', '').strip()
                 # Prefix with author identity so the model knows who is speaking
                 content = f"[User:{message.author.name} (id: {message.author.id})]: {content}"
-                response = await process_message("discord", str(message.author.id), content, chat_id=str(message.channel.id), read_only=read_only)
+                response = await process_message(
+                    "discord", str(message.author.id), content,
+                    chat_id=str(message.channel.id), read_only=read_only,
+                    on_activity=on_activity,
+                )
                 if response:
                     chunks = split_message(response)
                     for chunk in chunks:
@@ -68,6 +87,12 @@ class IcarusBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Error processing Discord message: {e}")
                 await message.channel.send(f"Error: {e}")
+            finally:
+                if status_message["msg"] is not None:
+                    try:
+                        await status_message["msg"].delete()
+                    except Exception as e:
+                        logger.warning(f"Failed to delete status message: {e}")
 
 bot = IcarusBot()
 

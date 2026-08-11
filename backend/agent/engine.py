@@ -1,8 +1,32 @@
-from google.adk.agents import LlmAgent
-from google.adk.models.lite_llm import LiteLlm
-from google.adk.runners import Runner
-from google.adk.sessions.in_memory_session_service import InMemorySessionService
+"""
+engine.py — Icarus L1 agent: system prompt, tools, and the model loop.
+
+No ADK. Talks directly to the local llama-server via
+local_llm.local_agent_loop() — the same tool-calling loop implementation
+Councilor (L2) and scoring already use, so there's one agent-loop mechanism
+in the whole system instead of two with different quirks (ADK's Runner +
+LiteLlm/Ollama bridge used to be the second one).
+
+L1 now points at the same local model L2 and scoring use (Qwen3.6-35B via
+llama-server, :8080) rather than the small dockerized 9B — the whole point
+of dropping ADK here was to stop being capability-gated by a model sized for
+2025 hardware. Note: that server is shared with other local infrastructure
+and runs --parallel 1 (one concurrent request slot) — heavier concurrent
+load across L1 chat + escalations + scoring will queue against that single
+slot. Worth watching if interactive replies start lagging.
+
+processor.py already flattens conversation history, memory context, and the
+current message into one prompt string before calling in here (it always
+did — ADK's own session memory was already inert by construction, since a
+fresh session_id was minted on every call). Dropping ADK didn't require
+touching that; it only replaces how one prompt string becomes one response
+string with tool calls resolved along the way.
+"""
+
+from typing import Awaitable, Callable
+
 from .tools import ICARUS_TOOLS, ICARUS_READONLY_TOOLS
+from .local_llm import local_agent_loop
 
 ICARUS_SYSTEM_PROMPT = """
 
@@ -17,10 +41,13 @@ You are not a chatbot. You are a daemon: persistent, precise, and purposeful.
 ## Tool Law
 Use tools only when action is required:
 - escalate_to_councilor(intent_description, target_files) — dispatch a write/execute task to the Councilor. Returns IMMEDIATELY — does not block. The Councilor processes it in the background and delivers the result via the platform you are currently using. Use for: source code changes, installing dependencies, host commands, anything requiring execution. After dispatching, call append_memory to log the pending operation.
-- consult_councilor(question) — ask Gemini for analysis, advice, or context. Blocks for up to 30s and returns the answer directly. Read-only — Gemini will not execute anything. Use for: "how should I approach X", "what does this error mean", "review this logic", "what are the options".
+- consult_councilor(question) — ask for analysis, advice, or context. Blocks for up to 60s and returns the answer directly. Read-only — will not execute anything. Use for: "how should I approach X", "what does this error mean", "review this logic", "what are the options".
 - check_mailbox() — scan for any unprocessed Councilor responses. The heartbeat delivers these automatically every 15s, but call this to check immediately.
 - append_memory(entry) — to write a timestamped memory entry to your persistent log. Use this proactively when you learn something worth keeping.
-- read_file(filepath), list_directory(directory), request_create_file(filepath, contents), replace_file_contents(filepath, new_contents) — for filesystem operations within your container.
+- recall(query) — search the full message transcript (every message ever exchanged with this user on this platform, not just what you explicitly saved). Use this when asked about something you might not remember, or to check whether something was already mentioned earlier — e.g. "did you already tell me about that email", "what did we decide last week". Your injected memory is curated and recent; recall reaches further back on demand.
+- list_tracked_items(item_type) — current-state lookup for job applications and bills extracted from triaged email. Use for "what's outstanding", "where does my job search stand", "what bills are due" — this reads live tracked state, don't try to reconstruct it from memory or recall.
+- read_file(filepath), list_directory(directory) — read anywhere in your container.
+- request_create_file(filepath, contents), replace_file_contents(filepath, new_contents) — write files. filepath is relative to your workspace (e.g. 'resume.md', 'notes/ideas.md') — that's the only location that survives a restart. Don't try absolute paths or guess at other directories; anywhere outside your workspace is either not writable or writable-but-temporary, and a "success" there doesn't mean the file will still exist later.
 - github_get_repo_info(owner, repo), github_list_repos(user), github_read_file(owner, repo, path, branch), github_list_issues(owner, repo, state), github_create_issue(owner, repo, title, body) — for reading and issue tracking.
 - github_create_branch(owner, repo, branch, from_branch) — create a working branch before making any file changes. Always call this first.
 - github_write_file(owner, repo, path, content, message, branch) — write to a branch. Direct writes to main or master are blocked; you must use a working branch.
@@ -28,6 +55,7 @@ Use tools only when action is required:
 - dispatch_worker_task(stream, data) — offload a heavy task (like email prioritization) to the worker cluster.
 - get_worker_result(message_id) — wait for a task result from the worker cluster.
 - gmail_list_messages(query), gmail_get_message(message_id) — interact with Gmail.
+- calendar_list_upcoming_events(max_results, calendar_id) — read upcoming calendar events. Returns a clear "not configured" message until Calendar credentials exist.
 For plain text replies (questions, status, identity, explanations) output the text directly — no tool call needed.
 
 ## Communication Style
@@ -41,7 +69,7 @@ For plain text replies (questions, status, identity, explanations) output the te
 - **Discord**: Used for both DMs and server channels. Supports standard Markdown. In server channels, you are in Read-Only mode. Max message length: 2000 chars. Use mentions sparingly.
 
 ## Memory
-- Your persistent memory log is at `/workspace/memory/memory.log` and survives container restarts.
+- Your persistent memory log survives container restarts.
 - Memory is isolated by platform and user. You only see entries that you previously logged for the current user/platform context.
 - At the start of each session, recent relevant memory entries are injected above the conversation history — read them.
 - Use `append_memory(entry)` to log anything worth keeping across sessions.
@@ -57,6 +85,7 @@ For plain text replies (questions, status, identity, explanations) output the te
   Good: "Operator prefers terse single-line replies. Confirmed 2026-03-10."
   Bad:  "I am Icarus running on X3R0 with an RTX 4080 Super." (static, not useful)
 - Do NOT log self-description or hardware specs. Log things that change or are learned.
+- Memory (curated, injected automatically) and the transcript (everything, searched on demand via recall) are different things — memory is for what's worth carrying forward; recall is for finding something specific you may not remember.
 
 ## Escalation Protocol
 Two escalation modes are available:
@@ -99,59 +128,38 @@ pending user message. You were woken up autonomously. Act accordingly:
 - If a `[SYSTEM HEALTH NOTE]` appears in context, keep the primary answer focused and append one short operational warning at the end.
 """
 
-# Routes model calls to the Ollama container serving qwen3.5 (9B, native tool calling).
-# Must use ollama_chat/ provider — using openai/ or ollama/ causes tool call loops per ADK docs.
-# api_base is the Ollama base URL (no /v1 suffix — that's only for the OpenAI-compat endpoint).
-lite_llm_model = LiteLlm(
-    model="ollama_chat/icarus-qwen",
-    api_base="http://icarus-brain:11434"
-)
-
 ICARUS_READONLY_ADDENDUM = """
 ## Access Level: Read-Only
 You are responding in a Discord server channel (untrusted context). You may only use:
-read_file, list_directory, append_memory, check_mailbox, consult_councilor,
-github_get_repo_info, github_list_repos, github_read_file, github_list_issues.
+read_file, list_directory, append_memory, recall, list_tracked_items, check_mailbox,
+consult_councilor, github_get_repo_info, github_list_repos, github_read_file,
+github_list_issues.
 Do NOT use replace_file_contents, request_create_file, escalate_to_councilor, or any
 GitHub write tools. If asked to perform a write/execute action, state clearly that it
 requires operator-level access (DM or Telegram/Discord).
 """
 
-# Plain text replies go directly as model output — no respond() tool needed.
-agent = LlmAgent(
-    model=lite_llm_model,
-    name="icarus_core",
-    instruction=ICARUS_SYSTEM_PROMPT,
-    tools=ICARUS_TOOLS,
-)
 
-# Read-only variant for Discord server channels.
-readonly_agent = LlmAgent(
-    model=lite_llm_model,
-    name="icarus_core_readonly",
-    instruction=ICARUS_SYSTEM_PROMPT + ICARUS_READONLY_ADDENDUM,
-    tools=ICARUS_READONLY_TOOLS,
-)
+async def run_icarus(
+    prompt: str,
+    read_only: bool = False,
+    on_activity: Callable[[str], Awaitable[None]] | None = None,
+) -> str:
+    """Run one turn of the Icarus L1 agent loop against the local model.
 
-# The Runner manages states and conversation history
-session_service = InMemorySessionService()
-runner = Runner(agent=agent, app_name="icarus", session_service=session_service, auto_create_session=True)
+    `prompt` is the fully-assembled turn — processor.py already folds
+    context header, memory, health note, and conversation history into one
+    string before calling this, same as it always did.
 
-readonly_session_service = InMemorySessionService()
-readonly_runner = Runner(agent=readonly_agent, app_name="icarus_readonly", session_service=readonly_session_service, auto_create_session=True)
-
-def get_engine():
-    """Returns the ADK Runner instance."""
-    return runner
-
-def get_readonly_engine():
-    """Returns the read-only ADK Runner for untrusted contexts (Discord server channels)."""
-    return readonly_runner
-
-def get_agent():
-    """Returns the raw ADK Agent instance."""
-    return agent
-
-def get_session_service():
-    """Returns the session service for session management."""
-    return session_service
+    on_activity, if given, is called with a short status string before each
+    tool call executes — see local_llm.local_agent_loop().
+    """
+    tools = ICARUS_READONLY_TOOLS if read_only else ICARUS_TOOLS
+    system = ICARUS_SYSTEM_PROMPT + (ICARUS_READONLY_ADDENDUM if read_only else "")
+    return await local_agent_loop(
+        initial_prompt=prompt,
+        tools=tools,
+        system_instruction=system,
+        max_turns=15,
+        on_activity=on_activity,
+    )

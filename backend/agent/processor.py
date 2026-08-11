@@ -2,17 +2,15 @@
 processor.py — Core message processing for Icarus L1 agent.
 
 Handles incoming messages from Telegram/Discord, injects memory context
-from the SQLite+FTS5 memory repository, runs the ADK agent, and persists
-conversation history in Redis.
+from the SQLite+FTS5 memory repository, runs the L1 agent loop (local model,
+no ADK — see engine.py), and persists conversation history in Redis.
 """
 
 import re
-import time
 import json
 import logging
-from google.adk.runners import Runner
-from google.genai.types import Content, Part
-from backend.agent.engine import get_engine, get_readonly_engine
+from typing import Awaitable, Callable
+from backend.agent.engine import run_icarus
 from backend.agent.telemetry_tools import fetch_latest_telemetry_snapshot
 from backend.agent.tools import current_platform, current_user_id, current_chat_id
 from backend.database.redis_connection import get_redis_client
@@ -149,19 +147,36 @@ async def process_message(
     text: str,
     chat_id: str = "0",
     read_only: bool = False,
+    on_activity: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
-    """Core message processing logic using ADK Runner."""
+    """Core message processing logic — runs the L1 agent loop against the local model.
+
+    on_activity, if given, is called with a short status string before each
+    tool call executes, so a caller (e.g. Discord) can show live progress
+    instead of going silent until the whole turn finishes.
+    """
     token_p = current_platform.set(platform)
     token_u = current_user_id.set(user_id)
     token_c = current_chat_id.set(str(chat_id))
 
     try:
-        runner: Runner = get_readonly_engine() if read_only else get_engine()
         history_id = f"{platform}_{user_id}"
 
         history = await get_chat_history(history_id)
         memory_context = await _load_memory_context(platform, user_id, query=text, read_only=read_only)
         health_note_context = await _build_proactive_health_note(text)
+
+        # Log the incoming turn to the permanent transcript unconditionally —
+        # before the run, not after, so it's captured even if the agent call
+        # below fails. This is what closes the "does head A know what head B
+        # did" gap: notifications and hydration prompts flow through this same
+        # path, so they're findable later via the recall tool regardless of
+        # whether any agent chose to append_memory about them.
+        try:
+            from backend.agent.transcript_repo import log_message
+            await log_message(platform, user_id, "user", text)
+        except Exception as e:
+            logger.warning(f"[transcript] Failed to log incoming message: {e}")
 
         # Identity and context headers
         context_header = (
@@ -179,24 +194,17 @@ async def process_message(
             + f"User: {text}"
         )
 
-        session_id = f"{platform}_{user_id}_{int(time.time())}"
-
-        message = Content(role="user", parts=[Part(text=full_prompt)])
-        response_text = ""
-        async for event in runner.run_async(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=message,
-        ):
-            if event.is_final_response() and event.content:
-                text_parts = [p.text for p in event.content.parts if hasattr(p, "text") and p.text]
-                response_text = text_parts[-1] if text_parts else ""
-                break
+        response_text = await run_icarus(full_prompt, read_only=read_only, on_activity=on_activity)
 
         if response_text:
             # Strip think tags if the model produces them
             response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
             await save_chat_history(history_id, (text, response_text))
+            try:
+                from backend.agent.transcript_repo import log_message
+                await log_message(platform, user_id, "assistant", response_text)
+            except Exception as e:
+                logger.warning(f"[transcript] Failed to log response: {e}")
 
         return response_text or "[No response]"
     finally:
