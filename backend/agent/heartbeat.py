@@ -56,6 +56,24 @@ async def _poll_mailbox():
         prompt = f"{prefix}\n\n{message}"
         logger.info(f"[heartbeat] Delivering {resp_type} response to {platform}:{chat_id}")
 
+        # Mailbox delivery is the fallback path (see councilor.py's
+        # _publish_response) — consultations answered directly to a
+        # blocking consult_councilor() call never pass through here, so
+        # this "delivered" event only fires for the escalation/no-listener
+        # cases that actually take this route.
+        try:
+            from backend.agent.activity_repo import publish_activity
+            ts = data.get("timestamp")
+            if ts is not None and resp_type in ("escalation", "consultation"):
+                thread_prefix = "esc" if resp_type == "escalation" else "consult"
+                await publish_activity(
+                    actor="icarus", event_type="delivered",
+                    action="delivered via mailbox heartbeat",
+                    thread_id=f"{thread_prefix}-{ts}", platform=platform, user_id=None,
+                )
+        except Exception as e:
+            logger.warning(f"[heartbeat] Failed to publish delivery activity event: {e}")
+
         # Lazy imports to avoid circular import at module load time
         from backend.routes.webhook import push_telegram_message
         from backend.agent.discord_bot import relay_councilor_mailbox_to_operator, push_discord_message

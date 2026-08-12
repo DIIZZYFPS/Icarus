@@ -450,22 +450,30 @@ async def process_consultation(data: dict):
 
     # Import here to avoid circular imports at module level
     from backend.agent.llm_router import generate
+    from backend.agent.activity_repo import publish_activity
 
     memory_ctx = _get_memory_context()
     system = CONSULTATION_SYSTEM_PROMPT
     if memory_ctx:
         system += "\n\n" + memory_ctx
 
+    started = time.monotonic()
     response = await generate(
         task_type="consultation",
         messages=[{"role": "user", "text": question}],
         system_instruction=system,
     )
+    elapsed = time.monotonic() - started
 
     _record_escalation("consultation", question, response[:100])
 
     # Publish response to Redis for the heartbeat to deliver
     await _publish_response(timestamp, "consultation", response, platform, chat_id)
+    await publish_activity(
+        actor="councilor", event_type="responded",
+        action=f"responded · {elapsed:.1f}s", detail=response,
+        thread_id=f"consult-{timestamp}", platform=platform, user_id=None,
+    )
     logger.info(f"Consultation complete ({len(response)} chars)")
 
 
@@ -484,15 +492,29 @@ async def process_escalation(data: dict):
     logger.info(f"Escalation [platform={platform}]: {intent[:200]}")
 
     from backend.agent.llm_router import agent_loop
+    from backend.agent.activity_repo import publish_activity
+
+    thread_id = f"esc-{timestamp}"
 
     worktree = _create_escalation_worktree(timestamp)
     if worktree is None:
         error_msg = "Escalation failed: could not create an isolated worktree to work in."
         await _publish_response(timestamp, "escalation", error_msg, platform, chat_id)
+        await publish_activity(
+            actor="councilor", event_type="failed",
+            action="failed — could not create worktree", detail=error_msg,
+            thread_id=thread_id, platform=platform, user_id=None, severity="critical",
+        )
         _notify(platform, chat_id, f"[Icarus Escalation Failed]\n\n{error_msg}")
         return
     worktree_path, branch_name = worktree
     tools = _make_tools(worktree_path)
+
+    await publish_activity(
+        actor="councilor", event_type="received",
+        action="received — opened worktree", detail=branch_name,
+        thread_id=thread_id, platform=platform, user_id=None,
+    )
 
     memory_ctx = _get_memory_context()
     system = ESCALATION_SYSTEM_PROMPT
@@ -527,6 +549,11 @@ async def process_escalation(data: dict):
 
             _record_escalation("escalation", intent, response[:100])
             await _publish_response(timestamp, "escalation", response, platform, chat_id)
+            await publish_activity(
+                actor="councilor", event_type="responded",
+                action="responded — patch applied" if pr_url else "responded — no changes landed",
+                detail=response, thread_id=thread_id, platform=platform, user_id=None,
+            )
 
             # Notify operator
             _notify(platform, chat_id, f"[Icarus Escalation Complete]\n\n{response}")
@@ -536,6 +563,11 @@ async def process_escalation(data: dict):
         # All retries exhausted
         error_msg = f"Escalation failed after {max_retries + 1} attempts.\n\nLast error:\n{last_error or response}"
         await _publish_response(timestamp, "escalation", error_msg, platform, chat_id)
+        await publish_activity(
+            actor="councilor", event_type="failed",
+            action=f"failed after {max_retries + 1} attempts", detail=error_msg,
+            thread_id=thread_id, platform=platform, user_id=None, severity="critical",
+        )
         _notify(platform, chat_id, f"[Icarus Escalation Failed]\n\n{error_msg}")
     finally:
         _cleanup_worktree(worktree_path)

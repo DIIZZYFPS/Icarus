@@ -6,12 +6,17 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from backend.database.connection import init_db
 from backend.routes import webhook
+from backend.routes import dashboard
 from backend.agent.heartbeat import run_heartbeat
 from backend.agent.discord_bot import run_discord_bot
 from backend.agent.gmail_watcher import run_gmail_watcher
 from backend.agent.metrics_consumer import run_metrics_consumer
+from backend.agent.activity_consumer import run_activity_consumer
+from backend.agent.calendar_watcher import run_calendar_watcher
+from backend.agent.spam_sweep import run_spam_sweep
 
 # Setup logging
 logging.basicConfig(
@@ -133,6 +138,9 @@ async def lifespan(app: FastAPI):
     discord_task = asyncio.create_task(run_discord_bot())
     supervisor_task = asyncio.create_task(run_supervisor())
     metrics_task = asyncio.create_task(run_metrics_consumer())
+    activity_task = asyncio.create_task(run_activity_consumer())
+    calendar_task = asyncio.create_task(run_calendar_watcher())
+    spam_sweep_task = asyncio.create_task(run_spam_sweep())
 
 
     # Start Gmail watcher if Pub/Sub is configured
@@ -146,6 +154,9 @@ async def lifespan(app: FastAPI):
     discord_task.cancel()
     supervisor_task.cancel()
     metrics_task.cancel()
+    activity_task.cancel()
+    calendar_task.cancel()
+    spam_sweep_task.cancel()
 
     if gmail_task:
         gmail_task.cancel()
@@ -155,6 +166,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Project Icarus API", lifespan=lifespan)
 
 app.include_router(webhook.router)
+app.include_router(dashboard.router)
+
+_DASHBOARD_DIR = Path(__file__).parent / "static" / "dashboard"
+if _DASHBOARD_DIR.exists():
+    app.mount("/dashboard", StaticFiles(directory=str(_DASHBOARD_DIR), html=True), name="dashboard")
 
 @app.get("/health")
 async def health_check():

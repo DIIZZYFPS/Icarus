@@ -119,6 +119,13 @@ async def consult_councilor(question: str) -> str:
         logger.error(error_msg)
         return error_msg
 
+    from backend.agent.activity_repo import publish_activity
+    await publish_activity(
+        actor="icarus", event_type="dispatch_consultation",
+        action="asked consult_councilor", detail=question,
+        thread_id=f"consult-{timestamp}", platform=platform, user_id=user_id,
+    )
+
     # Subscribe to the response channel for this specific request
     pubsub = redis.pubsub()
     response_channel = f"icarus:councilor:response:{timestamp}"
@@ -191,6 +198,14 @@ async def escalate_to_councilor(intent_description: str, target_files: List[str]
             f"Published escalation request (ts={timestamp}). "
             f"Councilor will notify via {(platform or 'unknown').capitalize()}."
         )
+
+        from backend.agent.activity_repo import publish_activity
+        await publish_activity(
+            actor="icarus", event_type="dispatch_escalation",
+            action="dispatched escalate_to_councilor", detail=intent_description,
+            thread_id=f"esc-{timestamp}", platform=platform, user_id=user_id,
+        )
+
         return (
             f"Escalation dispatched to the Councilor via Redis. "
             f"The result will be delivered via {(platform or 'unknown').capitalize()} when complete. "

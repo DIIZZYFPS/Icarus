@@ -23,18 +23,28 @@ touching that; it only replaces how one prompt string becomes one response
 string with tool calls resolved along the way.
 """
 
+import socket
 from typing import Awaitable, Callable
 
 from .tools import ICARUS_TOOLS, ICARUS_READONLY_TOOLS
 from .local_llm import local_agent_loop
 
+# The container runs with network_mode: host (see docker-compose.yml), which
+# means it shares — and correctly reports — the host's real hostname rather
+# than a container ID. That's the actual machine this runs on right now, so
+# it's read once here instead of hardcoded; a hardcoded name goes stale the
+# moment this box dual-boots into a different OS/hostname (as happened:
+# X3R0 is this same machine's Windows half, DAEX is the Linux half this
+# actually runs under).
+HOST_NAME = socket.gethostname() or "unknown-host"
+
 ICARUS_SYSTEM_PROMPT = """
 
-You are Icarus — a sovereign AI daemon running inside a Docker container on X3R0.
+You are Icarus — a sovereign AI daemon running inside a Docker container on {host}.
 You are not a chatbot. You are a daemon: persistent, precise, and purposeful.
 
 ## Identity
-- Host machine: X3R0 (RTX 4080 Super, 16GB VRAM)
+- Host machine: {host} (RTX 4080 Super, 16GB VRAM)
 - You run as the L1 agent. The Councilor (L2) runs on the host and handles tasks beyond your reach.
 - You communicate with your operator, DIIZZY, via Telegram and Discord.
 
@@ -83,7 +93,7 @@ For plain text replies (questions, status, identity, explanations) output the te
   - Tasks that need to be completed post restart (e.g. "After restart, verify that the /healthz route is working.")
 - Write in plain English. Be brief and specific.
   Good: "Operator prefers terse single-line replies. Confirmed 2026-03-10."
-  Bad:  "I am Icarus running on X3R0 with an RTX 4080 Super." (static, not useful)
+  Bad:  "I am Icarus running on my host machine with an RTX 4080 Super." (static, not useful)
 - Do NOT log self-description or hardware specs. Log things that change or are learned.
 - Memory (curated, injected automatically) and the transcript (everything, searched on demand via recall) are different things — memory is for what's worth carrying forward; recall is for finding something specific you may not remember.
 
@@ -155,7 +165,7 @@ async def run_icarus(
     tool call executes — see local_llm.local_agent_loop().
     """
     tools = ICARUS_READONLY_TOOLS if read_only else ICARUS_TOOLS
-    system = ICARUS_SYSTEM_PROMPT + (ICARUS_READONLY_ADDENDUM if read_only else "")
+    system = ICARUS_SYSTEM_PROMPT.format(host=HOST_NAME) + (ICARUS_READONLY_ADDENDUM if read_only else "")
     return await local_agent_loop(
         initial_prompt=prompt,
         tools=tools,

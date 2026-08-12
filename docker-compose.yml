@@ -62,8 +62,6 @@ services:
       - ./workspace/projects:/workspace/projects
     depends_on:
       - redis
-    deploy:
-      replicas: 0 # Scaled dynamically by orchestrator
 
 networks:
   icarus-net:

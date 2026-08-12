@@ -11,6 +11,7 @@ import re
 import json
 import logging
 from backend.agent.worker_base import WorkerBase
+from backend.agent.gmail_tools import extract_email_parts
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,28 @@ The JSON must contain exactly these fields:
 - "urgency": one of "low", "medium", "high", "critical"
 - "summary": one sentence summarizing the email
 - "action_needed": true or false (does the recipient need to do something?)
+- "sensitive": true or false — true if the subject/sender/content is sexually explicit,
+  a scam/phishing lure, or otherwise inappropriate to display verbatim in a log or
+  dashboard. This is independent of category — a piece of spam can be "other" and
+  "sensitive": true at the same time.
 - "details": an object with extracted info, or null if not applicable:
-  - For jobs: {{"company": "...", "status": "..."}} (e.g. status = "interview invite", "rejection", "offer", "OA sent", "application received")
+  - For jobs: {{"company": "...", "status": "...", "proposed_datetime": "..." or null}}
+    (status e.g. "interview invite", "rejection", "offer", "OA sent", "application received".
+    proposed_datetime: if the email proposes or confirms a specific interview date/time,
+    resolve it to ISO 8601 — "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" — using the email's own
+    Date header above to resolve relative phrases like "next Tuesday at 2pm". null if no
+    specific date/time is mentioned.)
   - For bills: {{"amount": "...", "due_date": "..."}} (e.g. "$120.00", "2026-03-25")
   - Otherwise: null
+
+Do not take an email's own claimed urgency at face value. Manufactured pressure —
+unexpected winnings/refunds requiring "confirmation", threats of account suspension,
+too-good-to-be-true offers, generic "act now" framing from an unfamiliar or
+suspicious sender — is a scam pattern, not real urgency. Score these "urgency": "low"
+and "action_needed": false regardless of how urgent the email tries to sound; the
+correct action is ignoring it, not doing what it asks. Reserve "high"/"critical" and
+"action_needed": true for urgency that holds up under skepticism — a real deadline
+from a known, legitimate sender.
 
 EMAIL:
 From: {sender}
@@ -110,67 +129,9 @@ class EmailTriageWorker(WorkerBase):
             "urgency": urg,
             "summary": str(classification.get("summary", ""))[:200],
             "action_needed": bool(classification.get("action_needed", False)),
+            "sensitive": bool(classification.get("sensitive", False)),
             "details": details,
         }
-
-    def _extract_email_parts(self, message: dict) -> tuple[str, str, str, str]:
-        """Extract sender, subject, date, and body from a Gmail message."""
-        headers = message.get("payload", {}).get("headers", [])
-        header_map = {h["name"].lower(): h["value"] for h in headers}
-
-        sender = header_map.get("from", "Unknown")
-        subject = header_map.get("subject", "(no subject)")
-        date = header_map.get("date", "Unknown")
-
-        # Try snippet first (fast), then decode body
-        body = message.get("snippet", "")
-        if not body:
-            payload = message.get("payload", {})
-            body = self._decode_body(payload)
-
-        return sender, subject, date, body
-
-    def _decode_body(self, payload: dict, depth: int = 0) -> str:
-        """Recursively decode message body from payload."""
-        if depth > 5:
-            return ""
-
-        # Direct body data
-        body_data = payload.get("body", {}).get("data", "")
-        if body_data:
-            import base64
-            try:
-                return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
-            except Exception:
-                return ""
-
-        # Multipart — look for text/plain first, then text/html
-        parts = payload.get("parts", [])
-        text_part = ""
-        for part in parts:
-            mime = part.get("mimeType", "")
-            if mime == "text/plain":
-                data = part.get("body", {}).get("data", "")
-                if data:
-                    import base64
-                    try:
-                        return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-                    except Exception:
-                        pass
-            elif mime == "text/html" and not text_part:
-                data = part.get("body", {}).get("data", "")
-                if data:
-                    import base64
-                    try:
-                        text_part = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-                    except Exception:
-                        pass
-            elif mime.startswith("multipart/"):
-                nested = self._decode_body(part, depth + 1)
-                if nested:
-                    return nested
-
-        return text_part
 
     def _normalize_key(self, text: str) -> str:
         """Collapse a free-text identifier into a stable-ish entity key."""
@@ -184,10 +145,12 @@ class EmailTriageWorker(WorkerBase):
         category = classification.get("category")
         details = classification.get("details") or {}
 
+        due_at = None
         if category == "jobs":
             company = details.get("company") or sender
             entity_key = self._normalize_key(company)
             state = details.get("status") or "unknown"
+            due_at = details.get("proposed_datetime") or None
         elif category == "bills":
             # No invoice/account number is extracted today — sender+due_date
             # is the best stable-ish identity available. A recurring bill
@@ -197,6 +160,7 @@ class EmailTriageWorker(WorkerBase):
             due_date = details.get("due_date") or "unknown-date"
             entity_key = self._normalize_key(f"{sender}-{due_date}")
             state = "unpaid"
+            due_at = details.get("due_date") or None
         else:
             return None
 
@@ -209,6 +173,7 @@ class EmailTriageWorker(WorkerBase):
             state=state,
             summary=classification.get("summary"),
             urgency=classification.get("urgency"),
+            due_at=due_at,
             payload=details or None,
             source="email_triage",
         )
@@ -280,7 +245,7 @@ class EmailTriageWorker(WorkerBase):
             return
 
         # 2. Extract email parts
-        sender, subject, date, body = self._extract_email_parts(message)
+        sender, subject, date, body = extract_email_parts(message)
         logger.info(f"[triage] Email from '{sender}': '{subject[:60]}'")
 
         # 3. Classify via LLM
@@ -291,11 +256,15 @@ class EmailTriageWorker(WorkerBase):
             classification = self._validate_classification(raw_classification)
         else:
             logger.warning(f"[triage] Classification failed for {message_id}, defaulting to 'other'")
+            # sensitive=True here is a deliberate fail-safe: the classifier
+            # didn't return a usable judgment, so content nature is unknown —
+            # mask rather than risk showing something inappropriate verbatim.
             classification = {
                 "category": "other",
                 "urgency": "low",
                 "summary": f"Email from {sender}: {subject}",
                 "action_needed": False,
+                "sensitive": True,
                 "details": None,
             }
 
@@ -306,6 +275,22 @@ class EmailTriageWorker(WorkerBase):
         logger.info(
             f"[triage] Classified: category={category}, urgency={urgency}, "
             f"action_needed={action_needed}"
+        )
+
+        thread_id = f"triage-{message_id}"
+        sensitive = classification.get("sensitive", False)
+        detail = (
+            f"[flagged sensitive — subject/sender withheld] → {category}, urgency={urgency}"
+            if sensitive else
+            f"\"{subject}\" from {sender} → {category}, urgency={urgency}"
+        )
+        from backend.agent.activity_repo import publish_activity
+        await publish_activity(
+            actor="triage", event_type="classified",
+            action="classified message",
+            detail=detail,
+            thread_id=thread_id,
+            severity="warning" if urgency in ("high", "critical") else "info",
         )
 
         # 4. Apply Gmail label
@@ -325,6 +310,13 @@ class EmailTriageWorker(WorkerBase):
         # to re-derive current state from scattered email mentions.
         try:
             tracked_item_id = await self._track_item(classification, sender, subject)
+            if tracked_item_id is not None:
+                await publish_activity(
+                    actor="triage", event_type="tracked",
+                    action="tracked_item upserted",
+                    detail=f"{category} · {classification.get('summary', '')}",
+                    thread_id=thread_id,
+                )
         except Exception as e:
             logger.error(f"[triage] Failed to upsert tracked item: {e}")
             tracked_item_id = None
@@ -332,6 +324,11 @@ class EmailTriageWorker(WorkerBase):
         # 6. Notify if actionable
         if urgency in ("high", "critical") or action_needed:
             await self._notify_discord(classification, sender, subject)
+            await publish_activity(
+                actor="system", event_type="notified",
+                action="notified operator", detail=subject,
+                thread_id=thread_id,
+            )
             if tracked_item_id is not None:
                 try:
                     from backend.agent.tracked_items_repo import mark_notified

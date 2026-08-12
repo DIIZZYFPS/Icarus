@@ -148,12 +148,29 @@ async def process_message(
     chat_id: str = "0",
     read_only: bool = False,
     on_activity: Callable[[str], Awaitable[None]] | None = None,
+    skip_history: bool = False,
 ) -> str:
     """Core message processing logic — runs the L1 agent loop against the local model.
 
     on_activity, if given, is called with a short status string before each
     tool call executes, so a caller (e.g. Discord) can show live progress
     instead of going silent until the whole turn finishes.
+
+    skip_history — for system-generated hydration prompts (a Councilor
+    mailbox relay, an email-notification relay): these are self-contained,
+    single-turn analyses, not a continuation of the user's own conversation.
+    Injecting recent chat turns ahead of them is actively harmful, not just
+    unnecessary — found via a real incident where two unrelated prior
+    "smoke test" exchanges sat immediately before a spam-notification
+    hydration prompt in the injected history, and the model pattern-matched
+    onto that instead of the actual new content, producing a response about
+    the wrong thing entirely while still "succeeding" mechanically. Doesn't
+    affect transcript logging (still unconditional) or the Redis session
+    history for the user's own turns (still read/written normally elsewhere)
+    — it only skips history for *this* call's own prompt assembly and skips
+    writing this call's (prompt, response) pair into that history, so a
+    hydration prompt can't itself become confusing context for the next
+    real user turn either.
     """
     token_p = current_platform.set(platform)
     token_u = current_user_id.set(user_id)
@@ -162,7 +179,7 @@ async def process_message(
     try:
         history_id = f"{platform}_{user_id}"
 
-        history = await get_chat_history(history_id)
+        history = [] if skip_history else await get_chat_history(history_id)
         memory_context = await _load_memory_context(platform, user_id, query=text, read_only=read_only)
         health_note_context = await _build_proactive_health_note(text)
 
@@ -199,7 +216,8 @@ async def process_message(
         if response_text:
             # Strip think tags if the model produces them
             response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
-            await save_chat_history(history_id, (text, response_text))
+            if not skip_history:
+                await save_chat_history(history_id, (text, response_text))
             try:
                 from backend.agent.transcript_repo import log_message
                 await log_message(platform, user_id, "assistant", response_text)

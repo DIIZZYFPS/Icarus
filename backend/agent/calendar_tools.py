@@ -112,15 +112,17 @@ async def calendar_list_upcoming_events(max_results: int = 10, calendar_id: str 
 
 async def sync_upcoming_events_to_tracked_items(
     platform: str, user_id: str, max_results: int = 25, calendar_id: str = "primary"
-) -> int:
+) -> tuple[int, list[dict]]:
     """Upsert upcoming calendar events into tracked_items, same substrate as
-    email-triage jobs/bills. Intended to be called periodically by a future
-    calendar watcher — not wired to run automatically yet, since no
-    credentials exist. Returns the number of events synced (0 if
-    unconfigured)."""
+    email-triage jobs/bills. Called periodically by calendar_watcher.py.
+    Returns (count synced, [{"id", "summary", "start"}, ...]) — every event
+    in the current window, not just new ones; the watcher itself diffs
+    against what it's already seen so it only narrates genuinely new
+    events instead of re-announcing the same list every poll. (0, []) if
+    unconfigured."""
     service = get_calendar_service()
     if not service:
-        return 0
+        return 0, []
 
     from backend.agent.tracked_items_repo import upsert_item
 
@@ -134,28 +136,31 @@ async def sync_upcoming_events_to_tracked_items(
         )
     except Exception as e:
         logger.error(f"[calendar] Sync failed to list events: {e}")
-        return 0
+        return 0, []
 
     events = results.get('items', [])
     synced = 0
+    synced_events = []
     for e in events:
         event_id = e.get('id')
         if not event_id:
             continue
         start = e.get('start', {}).get('dateTime') or e.get('start', {}).get('date')
+        summary = e.get('summary', '(no title)')
         await upsert_item(
             platform=platform, user_id=user_id,
             item_type="calendar_event", entity_key=_normalize_key(event_id),
             state="upcoming",
-            summary=e.get('summary', '(no title)'),
+            summary=summary,
             due_at=start,
             payload={"location": e.get("location"), "html_link": e.get("htmlLink")},
             source="calendar",
         )
         synced += 1
+        synced_events.append({"id": event_id, "summary": summary, "start": start})
 
     logger.info(f"[calendar] Synced {synced} upcoming events to tracked_items")
-    return synced
+    return synced, synced_events
 
 
 CALENDAR_TOOLS = [calendar_list_upcoming_events]

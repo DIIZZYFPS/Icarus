@@ -253,6 +253,91 @@ async def gmail_archive_message(message_id: str) -> bool:
         return False
 
 
+async def gmail_trash_message(message_id: str) -> bool:
+    """Move a message to Trash. Used by spam_sweep.py for high-confidence
+    junk found in Spam.
+
+    Deliberately trash, not permanent delete: permanent delete
+    (messages.delete) needs the full https://mail.google.com/ OAuth scope,
+    broader than the gmail.modify scope actually granted — and trashing
+    already achieves the real goal (out of the way) while leaving a 30-day
+    recovery window for free, in case the classifier is ever confidently
+    wrong. Gmail purges Trash (and Spam, for anything left there) on the
+    same 30-day schedule either way, so this only changes *where* the
+    30-day clock runs, not whether one exists."""
+    service = get_gmail_service()
+    if not service:
+        return False
+    try:
+        await _run_sync(
+            lambda: service.users().messages().trash(userId='me', id=message_id).execute()
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to trash message {message_id}: {e}")
+        return False
+
+
+# ── Message parsing (shared by the triage worker and the spam sweep) ────────
+
+def extract_email_parts(message: dict) -> tuple[str, str, str, str]:
+    """Extract sender, subject, date, and body from a Gmail message."""
+    headers = message.get("payload", {}).get("headers", [])
+    header_map = {h["name"].lower(): h["value"] for h in headers}
+
+    sender = header_map.get("from", "Unknown")
+    subject = header_map.get("subject", "(no subject)")
+    date = header_map.get("date", "Unknown")
+
+    # Try snippet first (fast), then decode body
+    body = message.get("snippet", "")
+    if not body:
+        payload = message.get("payload", {})
+        body = _decode_email_body(payload)
+
+    return sender, subject, date, body
+
+
+def _decode_email_body(payload: dict, depth: int = 0) -> str:
+    """Recursively decode message body from payload."""
+    if depth > 5:
+        return ""
+
+    # Direct body data
+    body_data = payload.get("body", {}).get("data", "")
+    if body_data:
+        try:
+            return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    # Multipart — look for text/plain first, then text/html
+    parts = payload.get("parts", [])
+    text_part = ""
+    for part in parts:
+        mime = part.get("mimeType", "")
+        if mime == "text/plain":
+            data = part.get("body", {}).get("data", "")
+            if data:
+                try:
+                    return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+        elif mime == "text/html" and not text_part:
+            data = part.get("body", {}).get("data", "")
+            if data:
+                try:
+                    text_part = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+        elif mime.startswith("multipart/"):
+            nested = _decode_email_body(part, depth + 1)
+            if nested:
+                return nested
+
+    return text_part
+
+
 # ── Push Notification Setup ──────────────────────────────────────────────────
 
 async def gmail_setup_watch(topic_name: str) -> dict | None:

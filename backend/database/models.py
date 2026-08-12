@@ -91,6 +91,36 @@ class TrackedItem(Base):
     )
 
 
+class ActivityEvent(Base):
+    """Structured record of one step in the system's live activity —
+    the substrate for the dashboard's relational Activity page. Distinct
+    from Transcript (which is the L1 chat's own turn history): this
+    captures cross-process handoffs — L1 dispatching to the Councilor, the
+    Councilor picking it up and responding, email triage classifying and
+    tracking an item, watchers syncing — so a multi-actor exchange can be
+    rendered as one connected thread instead of interleaved flat logs.
+
+    thread_id correlates related events across actors/processes (e.g. the
+    same value on an "icarus dispatched" row and the "councilor responded"
+    row that answers it) — same shape as the timestamp-keyed Redis channels
+    esc_tool.py/councilor.py already use for that purpose, just persisted.
+    Standalone events (a watcher's periodic sync, an unprompted heartbeat
+    finding) can leave thread_id null.
+    """
+    __tablename__ = 'activity_events'
+
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(String, nullable=True, index=True)
+    actor = Column(String, nullable=False, index=True)     # 'icarus', 'councilor', 'triage', 'system'
+    event_type = Column(String, nullable=False)            # short machine tag, e.g. 'dispatch_escalation'
+    action = Column(Text, nullable=False)                  # short human label, e.g. "dispatched escalate_to_councilor"
+    detail = Column(Text, nullable=True)                   # longer context (intent, response excerpt, ...)
+    severity = Column(String, default="info")              # 'info', 'warning', 'critical'
+    platform = Column(String, nullable=True)
+    user_id = Column(String, nullable=True)
+    created_at = Column(String, nullable=False, index=True)  # ISO 8601 timestamp
+
+
 class MemoryEntry(Base):
     __tablename__ = 'memory_entries'
 

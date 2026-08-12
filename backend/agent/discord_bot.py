@@ -185,6 +185,7 @@ async def relay_councilor_mailbox_to_operator(
         hydration_prompt,
         chat_id=effective_chat_id,
         read_only=False,
+        skip_history=True,
     )
 
     # If the model returns an empty string, still deliver the original mailbox payload.
@@ -217,6 +218,7 @@ async def relay_email_notification_to_operator(
         hydration_prompt,
         chat_id=effective_chat_id,
         read_only=False,
+        skip_history=True,
     )
 
     # If the model returns an empty string, still deliver the original classification.
