@@ -9,7 +9,6 @@ import os
 import re
 import asyncio
 import logging
-from datetime import datetime, timezone
 from contextvars import ContextVar
 from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
 from .github_tools import GITHUB_TOOLS
@@ -261,24 +260,6 @@ def append_memory(entry: str, visibility: str = "private") -> str:
         return f"Error logging memory: {str(e)}"
 
 
-def get_time() -> dict:
-    """Return the current UTC time from the system clock.
-
-    This reads directly from the OS clock — no in-memory sync, no drift.
-    Returns ISO 8601 timestamp and epoch float for programmatic use.
-
-    Returns:
-        dict with keys:
-            - utc_iso: ISO 8601 UTC timestamp (e.g. "2025-01-15T14:30:00Z")
-            - epoch_float: Unix epoch as a float (seconds since 1970-01-01)
-    """
-    now = datetime.now(timezone.utc)
-    return {
-        "utc_iso": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-        "epoch_float": now.timestamp(),
-    }
-
-
 # Master tool registry for the Google ADK
 ICARUS_TOOLS = [
     read_file,
@@ -297,7 +278,6 @@ ICARUS_TOOLS = [
     gmail_get_message,
     calendar_list_upcoming_events,
     get_telemetry_snapshot,
-    get_time,
     *GITHUB_TOOLS,
 ]
 
@@ -319,7 +299,6 @@ ICARUS_READONLY_TOOLS = [
     check_mailbox,
     consult_councilor,
     get_telemetry_snapshot,
-    get_time,
     github_get_repo_info,
     github_list_repos,
     github_read_file,
