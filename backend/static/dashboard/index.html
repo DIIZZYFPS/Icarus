@@ -1,3 +1,8 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Icarus Console</title>
 <style>
   :root {
@@ -192,12 +197,23 @@
   }
   .attn-item .due.soon { color: var(--warning); }
 
-  .cal-list { display: flex; flex-direction: column; gap: 10px; }
+  .cal-list { display: flex; flex-direction: column; gap: 18px; }
+  .cal-day-label {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--text-muted); margin: 0 0 8px;
+  }
+  .cal-day-label .conflict {
+    font-family: var(--serif); font-size: 13px; letter-spacing: normal; text-transform: none;
+    color: var(--warning); font-style: italic;
+  }
+  .cal-day-items { display: flex; flex-direction: column; gap: 8px; }
   .cal-item {
     display: flex; gap: 16px; align-items: baseline; font-family: var(--serif); font-size: 15.5px; padding: 2px 0;
   }
+  .cal-item.generic { opacity: 0.5; }
   .cal-item .time {
-    font-family: var(--mono); font-size: 12.5px; color: var(--icarus); width: 62px; flex: none;
+    font-family: var(--mono); font-size: 12.5px; color: var(--icarus); width: 58px; flex: none;
     font-variant-numeric: tabular-nums;
   }
   .cal-item .where { color: var(--text-faint); font-size: 13.5px; }
@@ -338,12 +354,31 @@
 
   @media (max-width: 860px) {
     .today-grid { grid-template-columns: 1fr; }
-    .ticker { border-left: none; border-top: 1px solid var(--hairline); padding-left: 0; padding-top: 24px; flex-direction: row; flex-wrap: wrap; }
+    .ticker {
+      border-left: none; border-top: 1px solid var(--hairline);
+      padding-left: 0; padding-top: 24px;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 22px 24px;
+    }
     .row { grid-template-columns: 78px 16px 1fr; }
     .row .tag { grid-column: 3; width: fit-content; margin-bottom: 4px; }
+    /* Masthead has 3 flex children (wordmark, clock/pill, tabs) — on a
+       phone there's only ever room for two side by side. Force tabs onto
+       their own row rather than leaving the 3-way wrap to chance. */
+    nav.tabs { flex-basis: 100%; }
   }
-  @media (max-width: 560px) { .shell { padding: 0 16px 60px; } }
+
+  @media (max-width: 600px) {
+    .shell { padding: 0 16px 60px; }
+    .dispatch h1 { font-size: 23px; }
+    .masthead-right { gap: 12px; }
+    .activity-head { flex-direction: column; align-items: flex-start; gap: 14px; }
+    .filters { width: 100%; }
+    .search { width: 100%; }
+    .ticker { grid-template-columns: 1fr 1fr; gap: 18px 16px; }
+  }
 </style>
+</head>
+<body>
 
 <div class="shell">
   <header class="masthead">
@@ -436,12 +471,45 @@
   tick();
   setInterval(tick, 1000);
 
-  function dispatchLabel(date) {
+  const OPERATOR_NAME = 'DIIZZY';
+  const URGENCY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+
+  function timeOfDayWord(date) {
     const h = date.getHours();
-    if (h >= 5 && h < 12) return 'Morning Dispatch';
-    if (h >= 12 && h < 17) return 'Afternoon Dispatch';
-    if (h >= 17 && h < 21) return 'Evening Dispatch';
-    return 'Night Dispatch';
+    if (h >= 5 && h < 12) return 'Morning';
+    if (h >= 12 && h < 17) return 'Afternoon';
+    if (h >= 17 && h < 21) return 'Evening';
+    return 'Night';
+  }
+
+  function dispatchLabel(date) { return timeOfDayWord(date) + ' Dispatch'; }
+
+  // The single most pressing attention item — soonest due date first, tied
+  // items broken by urgency. What actually makes the headline feel written
+  // for you instead of a stat: naming the thing, not counting the pile.
+  function pickTopAttentionItem(items) {
+    if (!items.length) return null;
+    return [...items].sort((a, b) => {
+      const aHas = !!a.due_at, bHas = !!b.due_at;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      if (aHas && bHas) {
+        const diff = new Date(a.due_at) - new Date(b.due_at);
+        if (diff) return diff;
+      }
+      const aRank = URGENCY_RANK[(a.urgency || '').toLowerCase()] ?? 4;
+      const bRank = URGENCY_RANK[(b.urgency || '').toLowerCase()] ?? 4;
+      return aRank - bRank;
+    })[0];
+  }
+
+  function buildHeadline(attnItems, now) {
+    const greeting = `${timeOfDayWord(now)}, ${OPERATOR_NAME}`;
+    if (attnItems.length === 0) return `${greeting} — nothing needs you right now.`;
+    const top = pickTopAttentionItem(attnItems);
+    const topPhrase = (top.summary || top.entity_key || 'Something').replace(/\.+$/, '');
+    const rest = attnItems.length - 1;
+    const tail = rest > 0 ? `, plus ${rest} more thing${rest === 1 ? '' : 's'} today` : '';
+    return `${greeting} — ${topPhrase}${tail}.`;
   }
 
   function fmtTime(iso) {
@@ -482,8 +550,7 @@
 
     const attnCount = data.attention.length;
     const calCount = data.calendar.length;
-    document.getElementById('dispatch-headline').textContent =
-      attnCount === 0 ? "Nothing needs you right now." : `${attnCount} thing${attnCount === 1 ? '' : 's'} need${attnCount === 1 ? 's' : ''} you today.`;
+    document.getElementById('dispatch-headline').textContent = buildHeadline(data.attention, now);
 
     const councilorNote = data.ticker.councilor
       ? `The Councilor last ${data.ticker.councilor.action} at ${fmtTime(data.ticker.councilor.created_at)}.`
@@ -496,7 +563,7 @@
     document.getElementById('attention-count').textContent = `Needs your attention · ${attnCount}`;
 
     renderAttention(data.attention);
-    renderCalendar(data.calendar);
+    renderCalendar(data.calendar, data.attention);
     renderTicker(data.ticker);
     renderReadiness(data.ticker.telemetry);
   }
@@ -525,18 +592,81 @@
     catch { return iso; }
   }
 
-  function renderCalendar(items) {
+  // Generic/recurring placeholder blocks — dimmed rather than hidden, same
+  // treatment the Activity page gives low-signal system events, so a real
+  // named meeting doesn't get lost among a wall of identical "Work Block"s.
+  const GENERIC_EVENT_RE = /^(work( block)?|busy|blocked?|focus time|lunch)$/i;
+
+  function dayKey(d) { return d.toDateString(); }
+
+  function dayLabel(d, todayKey, tomorrowKey) {
+    const key = dayKey(d);
+    if (key === todayKey) return 'Today';
+    if (key === tomorrowKey) return 'Tomorrow';
+    return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+
+  function renderCalendar(items, attentionItems) {
     const el = document.getElementById('calendar-list');
     if (items.length === 0) {
       el.outerHTML = '<div class="empty-note" id="calendar-list">No events synced yet.</div>';
       return;
     }
-    el.innerHTML = items.slice(0, 8).map(i => {
-      const when = i.due_at
-        ? new Date(i.due_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-        : '—';
-      const where = i.payload?.location ? `· ${i.payload.location}` : '';
-      return `<div class="cal-item"><span class="time">${escapeHtml(when)}</span> ${escapeHtml(i.summary || i.entity_key)} <span class="where">${escapeHtml(where)}</span></div>`;
+
+    // Same-day tracked items (jobs/bills with a due date) — surfaced as a
+    // conflict marker on the matching day header, same underlying signal
+    // the notification pipeline already computes deterministically, just
+    // shown here too instead of only in a Discord message.
+    const conflictsByDay = new Map();
+    for (const a of (attentionItems || [])) {
+      if (!a.due_at) continue;
+      const d = new Date(a.due_at);
+      if (isNaN(d)) continue;
+      const key = dayKey(d);
+      if (!conflictsByDay.has(key)) conflictsByDay.set(key, []);
+      conflictsByDay.get(key).push(a.summary || a.entity_key);
+    }
+
+    const now = new Date();
+    const todayKey = dayKey(now);
+    const tomorrowKey = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
+
+    // Group into ordered day buckets, capped at 5 days out so a partial
+    // day is never cut off mid-list the way a flat items.slice(0, N) would.
+    const days = [];
+    const byKey = new Map();
+    for (const i of items) {
+      if (!i.due_at) continue;
+      const d = new Date(i.due_at);
+      if (isNaN(d)) continue;
+      const key = dayKey(d);
+      let bucket = byKey.get(key);
+      if (!bucket) {
+        if (days.length >= 5) continue;
+        bucket = { date: d, key, events: [] };
+        byKey.set(key, bucket);
+        days.push(bucket);
+      }
+      bucket.events.push({ item: i, date: d });
+    }
+
+    el.innerHTML = days.map(day => {
+      const conflicts = conflictsByDay.get(day.key);
+      const conflictHtml = conflicts
+        ? `<span class="conflict">· ${escapeHtml(conflicts.join(', '))} same day</span>` : '';
+      const rows = day.events.map(({ item, date }) => {
+        const when = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const where = item.payload?.location ? `· ${item.payload.location}` : '';
+        const isGeneric = GENERIC_EVENT_RE.test((item.summary || '').trim());
+        return `<div class="cal-item${isGeneric ? ' generic' : ''}">
+          <span class="time">${escapeHtml(when)}</span> ${escapeHtml(item.summary || item.entity_key)}
+          <span class="where">${escapeHtml(where)}</span>
+        </div>`;
+      }).join('');
+      return `<div class="cal-day">
+        <p class="cal-day-label">${dayLabel(day.date, todayKey, tomorrowKey)}${conflictHtml}</p>
+        <div class="cal-day-items">${rows}</div>
+      </div>`;
     }).join('');
   }
 
@@ -720,3 +850,5 @@
   loadToday();
   loadActivityBackfill().then(connectActivityWs);
 </script>
+</body>
+</html>

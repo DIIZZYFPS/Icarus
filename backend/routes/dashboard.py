@@ -31,6 +31,37 @@ def _operator_user_id() -> str:
     return os.environ.get("DISCORD_OPERATOR_ID", "0")
 
 
+async def _get_model_display_name() -> str:
+    """The real loaded model name, read live from llama-server's own
+    /v1/models — not LOCAL_LLM_MODEL, which is just the placeholder string
+    ("local") sent in the request body's model field. llama.cpp is a
+    single-model server and ignores that field entirely, so it was never
+    the actual model identity; this asks the server what it actually
+    loaded instead of trusting a static env var that can drift the moment
+    the GGUF file changes. Falls back to the env var (or "unknown") if the
+    server's unreachable — a dashboard load should never break over this."""
+    import httpx
+
+    base_url = os.getenv("LOCAL_LLM_URL", "").rstrip("/")
+    fallback = os.getenv("LOCAL_LLM_MODEL", "") or "unknown"
+    if not base_url:
+        return fallback
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{base_url}/models")
+            resp.raise_for_status()
+            data = resp.json()
+        model_id = data["data"][0]["id"]
+        # e.g. "/home/diizzy/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf" -> "Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL"
+        name = os.path.basename(model_id)
+        if name.lower().endswith(".gguf"):
+            name = name[:-5]
+        return name or fallback
+    except Exception as e:
+        logger.warning(f"[dashboard] Failed to read live model name from llama-server: {e}")
+        return fallback
+
+
 @router.get("/api/activity/recent")
 async def activity_recent(limit: int = 150, actor: str | None = None):
     from backend.agent.activity_repo import list_recent_activity
@@ -63,6 +94,7 @@ async def today_snapshot():
     councilor_latest = await latest_activity_for_actor("councilor")
     triage_latest = await latest_activity_for_actor("triage")
     telemetry = await fetch_latest_telemetry_snapshot()
+    model_name = await _get_model_display_name()
 
     return {
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -75,7 +107,7 @@ async def today_snapshot():
             "heartbeat_interval_seconds": 15,
             "model": {
                 "url": os.getenv("LOCAL_LLM_URL", ""),
-                "name": os.getenv("LOCAL_LLM_MODEL", ""),
+                "name": model_name,
             },
             "telemetry": telemetry,
         },
