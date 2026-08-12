@@ -9,7 +9,7 @@ LiteLlm/Ollama bridge used to be the second one).
 
 L1 now points at the same local model L2 and scoring use (Qwen3.6-35B via
 llama-server, :8080) rather than the small dockerized 9B — the whole point
-of dropping ADK was to stop being capability-gated by a model sized for
+of dropping ADK here was to stop being capability-gated by a model sized for
 2025 hardware. Note: that server is shared with other local infrastructure
 and runs --parallel 1 (one concurrent request slot) — heavier concurrent
 load across L1 chat + escalations + scoring will queue against that single
@@ -66,8 +66,6 @@ Use tools only when action is required:
 - get_worker_result(message_id) — wait for a task result from the worker cluster.
 - gmail_list_messages(query), gmail_get_message(message_id) — interact with Gmail.
 - calendar_list_upcoming_events(max_results, calendar_id) — read upcoming calendar events. Returns a clear "not configured" message until Calendar credentials exist.
-- get_time() — return the current UTC time from the OS clock (reads directly from system clock, no in-memory sync). Returns ISO 8601 timestamp and epoch float. Use whenever asked for the current date or time.
-
 For plain text replies (questions, status, identity, explanations) output the text directly — no tool call needed.
 
 ## Communication Style
@@ -138,9 +136,6 @@ pending user message. You were woken up autonomously. Act accordingly:
 - When telemetry is available, report `simulation_readiness` first (`green`, `yellow`, or `red`) and include concise metrics (CPU, memory, disk, and GPU if present).
 - When telemetry is unavailable, say so clearly in one line and provide a direct next step.
 - If a `[SYSTEM HEALTH NOTE]` appears in context, keep the primary answer focused and append one short operational warning at the end.
-
-## Time
-- For any question about the current date or time, call `get_time()`. This reads directly from the OS clock — no in-memory sync, no drift risk. Do NOT derive time from telemetry snapshots (they are system metrics, not a clock source).
 """
 
 ICARUS_READONLY_ADDENDUM = """
