@@ -433,6 +433,131 @@ def _cleanup_worktree(worktree_path: Path):
         subprocess.run(["git", "worktree", "prune"], cwd=str(PROJECT_ROOT), capture_output=True)
 
 
+# ── Manual upgrade apply ────────────────────────────────────────────────────
+# Escalations only ever get as far as a PR against origin/main — on purpose,
+# per capability_registry.py, nothing here auto-merges. But once a human
+# merges that PR on GitHub, nothing pulls it onto the host or restarts the
+# containers either — the "upgrade" just sits merged-but-undeployed with no
+# way to apply it short of SSHing in and doing it by hand. These two request
+# types close that gap as an explicit, human-triggered action (never
+# automatic): check_pending_upgrade reports whether origin/main is ahead of
+# the host checkout, apply_pending_upgrade pulls and restarts/rebuilds.
+
+DEPENDENCY_FILES = {"backend/requirements.txt", "backend/Dockerfile"}
+DEPLOY_SERVICES = ["icarus-api", "email_triage"]
+_deploy_lock = asyncio.Lock()
+
+
+def _git(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+
+
+def _check_pending_upgrade() -> dict:
+    """Fetch origin/main and report whether the host checkout is behind it.
+    Runs synchronously — callers dispatch this via asyncio.to_thread."""
+    fetch = _git(["fetch", "origin", "main"])
+    if fetch.returncode != 0:
+        return {"pending": False, "error": f"git fetch failed: {fetch.stderr.strip()}"}
+
+    count = _git(["rev-list", "--count", "HEAD..origin/main"])
+    if count.returncode != 0:
+        return {"pending": False, "error": f"git rev-list failed: {count.stderr.strip()}"}
+    n = int(count.stdout.strip() or "0")
+    if n == 0:
+        return {"pending": False, "count": 0, "files": [], "commits": []}
+
+    files = [f for f in _git(["diff", "--name-only", "HEAD..origin/main"]).stdout.strip().split("\n") if f]
+    commits = [c for c in _git(["log", "--oneline", "HEAD..origin/main"]).stdout.strip().split("\n") if c]
+    return {"pending": True, "count": n, "files": files, "commits": commits}
+
+
+def _apply_pending_upgrade() -> str:
+    """Pull origin/main onto the host checkout and restart (or rebuild, if
+    dependencies changed) the affected containers. Synchronous — dispatched
+    via asyncio.to_thread. Refuses to run against a dirty checkout or a
+    history that can't fast-forward, so it never clobbers local state."""
+    dirty = _git(["status", "--porcelain"])
+    if dirty.stdout.strip():
+        return "Aborted: the host checkout has uncommitted changes. Resolve those before applying an upgrade."
+
+    status = _check_pending_upgrade()
+    if status.get("error"):
+        return f"Aborted: {status['error']}"
+    if not status["pending"]:
+        return "Nothing to apply — already up to date with origin/main."
+
+    merge = _git(["merge", "--ff-only", "origin/main"])
+    if merge.returncode != 0:
+        return f"Aborted: fast-forward merge failed — {merge.stderr.strip()}. Resolve manually on the host."
+
+    needs_rebuild = any(f in DEPENDENCY_FILES for f in status["files"])
+    compose_cmd = (
+        ["docker", "compose", "up", "-d", "--build", *DEPLOY_SERVICES]
+        if needs_rebuild
+        else ["docker", "compose", "restart", *DEPLOY_SERVICES]
+    )
+    action = "rebuilt and recreated" if needs_rebuild else "restarted"
+    try:
+        deploy = subprocess.run(compose_cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return f"Pulled {status['count']} commit(s), but the container {action} timed out after 300s — check the host."
+
+    if deploy.returncode != 0:
+        return (
+            f"Pulled {status['count']} commit(s) but the container {action} failed:\n"
+            f"{deploy.stderr.strip()[:500]}"
+        )
+
+    file_lines = ", ".join(status["files"][:15])
+    return (
+        f"Applied upgrade: pulled {status['count']} commit(s) from origin/main "
+        f"({file_lines}) and {action} {', '.join(DEPLOY_SERVICES)}."
+    )
+
+
+async def process_deploy_check(data: dict):
+    """Report whether origin/main has commits the host hasn't deployed yet."""
+    platform = data.get("platform")
+    chat_id = data.get("chat_id")
+    timestamp = data.get("timestamp", int(time.time()))
+
+    status = await asyncio.to_thread(_check_pending_upgrade)
+    if status.get("error"):
+        message = f"Could not check for pending upgrades: {status['error']}"
+    elif not status["pending"]:
+        message = "No pending upgrade — host checkout is up to date with origin/main."
+    else:
+        commit_lines = "\n".join(f"  {c}" for c in status["commits"][:10])
+        file_lines = ", ".join(status["files"][:15])
+        message = (
+            f"Pending upgrade: {status['count']} commit(s) on origin/main not yet applied.\n"
+            f"{commit_lines}\n"
+            f"Files: {file_lines}\n"
+            f"Call apply_pending_upgrade to deploy."
+        )
+    logger.info(f"Deploy check: {message[:200]}")
+    await _publish_response(timestamp, "deploy_check", message, platform, chat_id)
+
+
+async def process_deploy_apply(data: dict):
+    """Pull origin/main onto the host checkout and restart/rebuild as needed."""
+    platform = data.get("platform")
+    chat_id = data.get("chat_id")
+    timestamp = data.get("timestamp", int(time.time()))
+
+    if _deploy_lock.locked():
+        message = "An upgrade is already being applied — try again shortly."
+        await _publish_response(timestamp, "deploy_apply", message, platform, chat_id)
+        return
+
+    async with _deploy_lock:
+        logger.info("Applying pending upgrade...")
+        result = await asyncio.to_thread(_apply_pending_upgrade)
+        logger.info(f"Deploy apply result: {result[:200]}")
+        await _publish_response(timestamp, "deploy_apply", result, platform, chat_id)
+        _notify(platform, chat_id, f"[Icarus Upgrade]\n\n{result}")
+
+
 # ── Request processors ──────────────────────────────────────────────────────
 
 async def process_consultation(data: dict):
@@ -592,13 +717,13 @@ async def _get_redis():
 async def _publish_response(timestamp: int, resp_type: str, message: str, platform: str = None, chat_id: str = None):
     """Publish a response to Redis.
 
-    Escalations are always fire-and-forget — nobody's ever blocking on the
-    pub/sub channel for those, so the heartbeat mailbox list is their only
-    delivery path. Consultations are answered directly to whichever
-    consult_councilor() call is blocking on this timestamp's channel; only
-    fall back to the mailbox list if PUBLISH reports zero receivers (the
+    Escalations and deploy_apply are always fire-and-forget — nobody's ever
+    blocking on the pub/sub channel for those, so the heartbeat mailbox list
+    is their only delivery path. Consultations and deploy_check are answered
+    directly to whichever caller is blocking on this timestamp's channel;
+    only fall back to the mailbox list if PUBLISH reports zero receivers (the
     blocking call already hit its timeout, or something unusual happened) —
-    otherwise every consultation would get delivered twice: once directly,
+    otherwise every blocking call would get delivered twice: once directly,
     once again a few seconds later via the heartbeat, redundantly.
     """
     r = await _get_redis()
@@ -612,7 +737,7 @@ async def _publish_response(timestamp: int, resp_type: str, message: str, platfo
 
     receivers = await r.publish(f"icarus:councilor:response:{timestamp}", payload)
 
-    if resp_type != "consultation" or receivers == 0:
+    if resp_type not in ("consultation", "deploy_check") or receivers == 0:
         await r.lpush("icarus:councilor:responses", payload)
 
     logger.info(
@@ -637,6 +762,10 @@ async def _listen_for_requests():
 
             if req_type == "escalation":
                 await process_escalation(data)
+            elif req_type == "deploy_check":
+                await process_deploy_check(data)
+            elif req_type == "deploy_apply":
+                await process_deploy_apply(data)
             else:
                 await process_consultation(data)
 

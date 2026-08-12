@@ -10,7 +10,13 @@ import re
 import asyncio
 import logging
 from contextvars import ContextVar
-from .esc_tool import escalate_to_councilor, consult_councilor, check_mailbox
+from .esc_tool import (
+    escalate_to_councilor,
+    consult_councilor,
+    check_mailbox,
+    check_pending_upgrade,
+    apply_pending_upgrade,
+)
 from .github_tools import GITHUB_TOOLS
 from .orchestrator import dispatch_worker_task, get_worker_result
 from .gmail_tools import gmail_list_messages, gmail_get_message
@@ -272,6 +278,8 @@ ICARUS_TOOLS = [
     check_mailbox,
     consult_councilor,
     escalate_to_councilor,
+    check_pending_upgrade,
+    apply_pending_upgrade,
     dispatch_worker_task,
     get_worker_result,
     gmail_list_messages,
