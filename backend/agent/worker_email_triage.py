@@ -178,6 +178,39 @@ class EmailTriageWorker(WorkerBase):
             source="email_triage",
         )
 
+    def _parse_date_loose(self, text: str | None):
+        """Best-effort ISO 8601 parse. Returns None on anything that doesn't
+        parse cleanly — the calendar cross-reference just silently doesn't
+        fire in that case rather than guessing at a malformed date."""
+        if not text:
+            return None
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    async def _find_calendar_conflicts(self, due_at: str | None) -> list:
+        """Tracked calendar_event rows falling on the same calendar day as
+        due_at. Reads the local tracked_items table (kept in sync by
+        calendar_watcher.py every 15 min) rather than calling the Calendar
+        API directly — this runs on every actionable classification, so it
+        should stay a cheap local read, not a network round trip."""
+        target = self._parse_date_loose(due_at)
+        if not target:
+            return []
+
+        from backend.agent.tracked_items_repo import list_items
+        events = await list_items(
+            platform="discord",
+            user_id=os.environ.get("DISCORD_OPERATOR_ID", "0"),
+            item_type="calendar_event",
+        )
+        return [
+            e for e in events
+            if (d := self._parse_date_loose(e.due_at)) and d.date() == target.date()
+        ]
+
     async def _notify_discord(self, classification: dict, sender: str, subject: str):
         """Push notification to the Councilor response queue for heartbeat delivery.
 
@@ -199,12 +232,27 @@ class EmailTriageWorker(WorkerBase):
             f"Category: {category.capitalize()}",
             f"Summary: {summary}",
         ]
+        due_at = None
         if category == "jobs" and details:
             lines.append(f"Company: {details.get('company', 'Unknown')}")
             lines.append(f"Status: {details.get('status', 'Update')}")
+            due_at = details.get("proposed_datetime")
+            if due_at:
+                lines.append(f"Proposed time: {due_at}")
         elif category == "bills" and details:
             lines.append(f"Amount: {details.get('amount', 'Unknown')}")
             lines.append(f"Due: {details.get('due_date', 'Unknown')}")
+            due_at = details.get("due_date")
+
+        # Deterministic calendar cross-reference — don't leave this to the
+        # model deciding whether to call a tool mid-generation (unreliable,
+        # per the smoke-test bleed-through incident); just hand it the
+        # actual overlap as a fact, or nothing at all if there isn't one.
+        conflicts = await self._find_calendar_conflicts(due_at)
+        if conflicts:
+            lines.append("Same-day on your calendar:")
+            for c in conflicts:
+                lines.append(f"  - {c.summary} ({c.due_at})")
 
         classification_text = "\n".join(lines)
 
