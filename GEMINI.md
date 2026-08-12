@@ -20,6 +20,12 @@ requirement, not a preference: nothing routes to a cloud model by default.
   The worktree is committed, pushed, and PR'd from in place, then removed —
   the primary checkout is never touched.
 - **Workers**: Redis Streams-based task consumers with DLQ and retry logic
+- **Deploy**: escalations only ever land as a PR against `main` — nothing
+  auto-merges. Once a human merges it on GitHub, `deploy_check`/`deploy_apply`
+  requests (same Redis channel) are the only way to actually pull it onto the
+  host and restart/rebuild `icarus-api`/`email_triage`. Both are triggered
+  explicitly — L1 exposes them as `check_pending_upgrade()` /
+  `apply_pending_upgrade()` — never automatic.
 
 ## Communication
 

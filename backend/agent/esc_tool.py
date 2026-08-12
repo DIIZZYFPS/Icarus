@@ -155,6 +155,120 @@ async def consult_councilor(question: str) -> str:
     )
 
 
+async def check_pending_upgrade() -> str:
+    """Check whether the host checkout is behind origin/main — i.e. whether a
+    Councilor-authored PR has been merged on GitHub but never pulled onto the
+    host or applied to the running containers. Read-only; changes nothing.
+
+    This call blocks until the Councilor responds (up to 60 seconds).
+    Returns a summary of pending commits/files, or confirms there's nothing
+    to apply."""
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    timestamp = int(time.time())
+
+    redis = get_redis_client()
+
+    payload = json.dumps({
+        "type": "deploy_check",
+        "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
+    })
+
+    try:
+        await redis.publish("icarus:councilor:requests", payload)
+        logger.info(f"Published deploy_check request (ts={timestamp}). Awaiting response...")
+    except Exception as e:
+        error_msg = f"Failed to publish deploy_check request: {e}"
+        logger.error(error_msg)
+        return error_msg
+
+    pubsub = redis.pubsub()
+    response_channel = f"icarus:councilor:response:{timestamp}"
+    await pubsub.subscribe(response_channel)
+
+    try:
+        deadline = time.monotonic() + CONSULTATION_TIMEOUT_SECONDS
+        async for msg in pubsub.listen():
+            if time.monotonic() >= deadline:
+                break
+            if msg["type"] != "message":
+                continue
+            try:
+                data = json.loads(msg["data"])
+                return data.get("message", "(Councilor returned no message)")
+            except json.JSONDecodeError:
+                continue
+    finally:
+        await pubsub.unsubscribe(response_channel)
+        await pubsub.close()
+
+    return (
+        f"Councilor did not respond within {CONSULTATION_TIMEOUT_SECONDS} seconds. "
+        f"The request may still be processed — check your mailbox later."
+    )
+
+
+async def apply_pending_upgrade() -> str:
+    """Pull a merged Councilor upgrade from origin/main onto the host and
+    restart (or rebuild, if requirements.txt/Dockerfile changed) the running
+    containers — including the one you're running in.
+
+    Only call this when the operator has explicitly asked you to apply a
+    pending upgrade (ideally after check_pending_upgrade confirmed there is
+    one) — this restarts live infrastructure. This call returns IMMEDIATELY;
+    the Councilor performs the pull/restart in the background on the host and
+    notifies DIIZZY directly with the outcome. After calling this, log the
+    dispatch with append_memory."""
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    timestamp = int(time.time())
+
+    redis = get_redis_client()
+
+    payload = json.dumps({
+        "type": "deploy_apply",
+        "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
+    })
+
+    try:
+        await redis.publish("icarus:councilor:requests", payload)
+        logger.info(
+            f"Published deploy_apply request (ts={timestamp}). "
+            f"Councilor will notify via {(platform or 'unknown').capitalize()}."
+        )
+
+        from backend.agent.activity_repo import publish_activity
+        await publish_activity(
+            actor="icarus", event_type="dispatch_deploy",
+            action="dispatched apply_pending_upgrade", detail="apply pending upgrade",
+            thread_id=f"deploy-{timestamp}", platform=platform, user_id=user_id,
+        )
+
+        return (
+            f"Upgrade apply dispatched to the Councilor. It will pull origin/main and "
+            f"restart or rebuild the containers as needed, then notify you via "
+            f"{(platform or 'unknown').capitalize()} when done. Request timestamp: {timestamp}"
+        )
+    except Exception as e:
+        error_msg = f"Failed to dispatch upgrade apply: {e}"
+        logger.error(error_msg)
+        return error_msg
+
+
 async def escalate_to_councilor(intent_description: str, target_files: List[str]) -> str:
     """Dispatches a write/execute task to the L2 Supervisor (The Councilor).
 
