@@ -1,0 +1,51 @@
+{
+  "generated_utc": "2026-08-12T19:18:32.624928+00:00",
+  "cpu": {
+    "per_core": [
+      1.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "overall": 0.2,
+    "frequency_MHz": "3190",
+    "logical_cores": 24,
+    "physical_cores": 12
+  },
+  "memory": {
+    "total_gb": "61.88",
+    "available_gb": "39.15",
+    "used_gb": "22.73",
+    "percent_used": "36.7%"
+  },
+  "disk": {
+    "total_gb": "927.51",
+    "used_gb": "272.65",
+    "free_gb": "653.19",
+    "percent_used": "29.4%",
+    "read_mb": "30426.3",
+    "write_mb": "16343.8"
+  },
+  "gpu": null,
+  "simulation_readiness": null
+}
