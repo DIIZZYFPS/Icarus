@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.database.connection import init_db
 from backend.routes import webhook
 from backend.routes import dashboard
+from backend.routes import triage
 from backend.agent.heartbeat import run_heartbeat
 from backend.agent.discord_bot import run_discord_bot
 from backend.agent.gmail_watcher import run_gmail_watcher
@@ -167,6 +168,7 @@ app = FastAPI(title="Project Icarus API", lifespan=lifespan)
 
 app.include_router(webhook.router)
 app.include_router(dashboard.router)
+app.include_router(triage.router)
 
 _DASHBOARD_DIR = Path(__file__).parent / "static" / "dashboard"
 if _DASHBOARD_DIR.exists():

@@ -6,6 +6,10 @@ from backend.database.redis_connection import get_redis_client
 logger = logging.getLogger(__name__)
 
 LATEST_METRICS_KEY = "icarus:metrics:latest"
+# Mirrors metrics_consumer.SUMMARY_LIST_KEY — duplicated rather than imported,
+# same reasoning as LATEST_METRICS_KEY above: this module stays a thin Redis
+# reader with no dependency on the consumer's internals.
+SUMMARY_LIST_KEY = "icarus:metrics:summary"
 
 
 def _to_float(value):
@@ -43,6 +47,25 @@ async def fetch_latest_telemetry_snapshot() -> dict | None:
         return None
 
     return _normalize_snapshot(payload)
+
+
+async def fetch_recent_telemetry_history(limit: int = 20) -> list[dict]:
+    """Recent telemetry snapshots, oldest-first, for the dashboard's ticker
+    sparkline. The summary list is LPUSHed (newest at index 0), so this
+    reverses on the way out — a sparkline reads left-to-right as time moving
+    forward, same convention as the activity timeline."""
+    redis = get_redis_client()
+    raw_items = await redis.lrange(SUMMARY_LIST_KEY, 0, max(1, limit) - 1)
+    snapshots = []
+    for raw in raw_items:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            snapshots.append(_normalize_snapshot(payload))
+    snapshots.reverse()
+    return snapshots
 
 
 async def get_telemetry_snapshot() -> dict:

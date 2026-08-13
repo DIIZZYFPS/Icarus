@@ -16,11 +16,8 @@
     --text-faint: #665e4f;
 
     --icarus: #e9a23b;
-    --icarus-dim: #a8752c;
     --councilor: #7c8ce8;
-    --councilor-dim: #5a63a8;
     --triage: #3fae8a;
-    --triage-dim: #2c7d63;
     --system: #6b6252;
 
     --success: #5fbf77;
@@ -88,6 +85,17 @@
   }
   .wordmark .glyph { font-size: 18px; }
 
+  /* Boot-in: the mark traces itself once on load, schematic-style.
+     pathLength="1" on the <polygon> (set in the markup) remaps its
+     perimeter to a unit length regardless of actual geometry, so the dash
+     math below is generic instead of a measured magic number. */
+  .wordmark .tri-path {
+    stroke-dasharray: 1; stroke-dashoffset: 1;
+    animation: glyphDraw 0.9s cubic-bezier(.3,.6,.2,1) 0.15s forwards;
+  }
+  @keyframes glyphDraw { to { stroke-dashoffset: 0; } }
+  @media (prefers-reduced-motion: reduce) { .wordmark .tri-path { animation: none; stroke-dashoffset: 0; } }
+
   /* The same glyph as the wordmark, repurposed as a loading indicator —
      a slow burn rather than a generic spinner. */
   .loader {
@@ -144,6 +152,46 @@
   main.view { display: none; padding-top: 34px; }
   main.view.active { display: block; }
 
+  /* ── ENTRANCE ────────────────────────────────────────────────────
+     A "boot sequence" for content that just arrived over the wire — the
+     brief, the attention list, the ticker — floods in on a quick stagger
+     instead of snapping in all at once. Re-triggered any time loadToday()
+     actually resolves fresh data (including after a dismiss), via the
+     same remove-class/reflow/add-class idiom already used for the
+     readiness-pill's flash further down. Every animation here has a
+     reduced-motion escape hatch. */
+
+  @keyframes floodIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  /* --i is set per-item by the renderer (attention rows, calendar days,
+     ticker cards, meter rows) — a plain index multiplied into a small
+     delay is enough to read as "streaming in" without any JS timer loop. */
+  .flood-item {
+    opacity: 0;
+    animation: floodIn 0.55s cubic-bezier(.2,.7,.2,1) forwards;
+    animation-delay: calc(var(--i, 0) * 45ms);
+  }
+
+  @keyframes headlineWipe {
+    from { clip-path: inset(0 100% 0 0); }
+    to   { clip-path: inset(0 0 0 0); }
+  }
+  .dispatch h1.wipe-in { animation: headlineWipe 0.7s cubic-bezier(.3,.7,.2,1) both; }
+
+  @keyframes pillPulseOnce {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--pulse, var(--icarus)) 55%, transparent); }
+    100% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--pulse, var(--icarus)) 0%, transparent); }
+  }
+  .readiness-pill.pulse-once { animation: pillPulseOnce 0.9s ease-out; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .flood-item { animation: none; opacity: 1; }
+    .dispatch h1.wipe-in { animation: none; clip-path: none; }
+    .readiness-pill.pulse-once { animation: none; }
+  }
+
   /* ── TODAY ─────────────────────────────────────────────────────── */
 
   .today-grid { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 48px; }
@@ -180,8 +228,16 @@
 
   .attn-item {
     background: var(--surface); padding: 14px 16px;
-    display: grid; grid-template-columns: 3px 1fr auto; gap: 14px; align-items: center;
+    /* minmax(0, 1fr): the standing convention in this file for any single
+       flexible grid column, base definition included — not just inside
+       media queries. A naked `1fr` still carries a content-based automatic
+       minimum, so a long unbroken title (a long sender address, no spaces
+       to wrap at) can force the column past its track at *any* width, not
+       only ones a breakpoint targets. Costs nothing at full desktop width. */
+    display: grid; grid-template-columns: 3px minmax(0, 1fr) auto; gap: 14px; align-items: center;
+    transition: opacity 0.25s ease, transform 0.25s ease;
   }
+  .attn-item.dismissing { opacity: 0; transform: translateX(8px); }
 
   .attn-item .stripe { align-self: stretch; border-radius: 2px; }
   .attn-item .stripe.bill { background: var(--warning); }
@@ -192,10 +248,52 @@
   .attn-item .body .meta {
     font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); letter-spacing: 0.02em;
   }
+
+  /* Lives in .body rather than .attn-actions on purpose — .attn-actions is
+     already a tight due-date/dismiss-button row that's been the site of two
+     separate mobile overflow fixes this session; .body's column is the one
+     already proven safe to grow downward at any width, so a third control
+     goes there instead of risking a third squeeze. */
+  .attn-item .urgency-adjust { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+  .attn-item .urgency-adjust label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-faint);
+  }
+  .attn-item .urgency-select {
+    font-family: var(--mono); font-size: 11px; text-transform: capitalize;
+    background: var(--void); border: 1px solid var(--hairline); color: var(--text-muted);
+    padding: 4px 8px; border-radius: var(--radius); cursor: pointer;
+  }
+  .attn-item .urgency-select:hover { color: var(--text); border-color: var(--text-muted); }
+  .attn-item .urgency-select:disabled { opacity: 0.5; cursor: default; }
+
+  /* due + the dismiss button are one grid cell (.attn-actions) rather than
+     two separate `auto` tracks — on a narrow screen that's what lets them
+     drop to their own full-width row together instead of each fighting
+     the title for space in a cramped last column. */
+  .attn-item .attn-actions { display: flex; align-items: center; gap: 14px; }
   .attn-item .due {
     font-family: var(--mono); font-size: 12px; color: var(--text-muted); text-align: right; white-space: nowrap;
   }
   .attn-item .due.soon { color: var(--warning); }
+
+  .attn-item .dismiss-btn {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--text-faint); background: none; border: 1px solid var(--hairline);
+    border-radius: var(--radius); padding: 6px 10px; cursor: pointer; white-space: nowrap;
+  }
+  .attn-item .dismiss-btn:hover { color: var(--success); border-color: var(--success); }
+
+  .toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px;
+    background: var(--surface-raised); border: 1px solid var(--hairline); border-radius: var(--radius);
+    padding: 11px 16px; font-family: var(--mono); font-size: 12px; color: var(--text);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.45); z-index: 50;
+  }
+  .toast button {
+    background: none; border: none; color: var(--icarus); font-family: var(--mono);
+    font-size: 12px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; padding: 0;
+  }
 
   .cal-list { display: flex; flex-direction: column; gap: 18px; }
   .cal-day-label {
@@ -222,9 +320,153 @@
     border-left: 1px solid var(--hairline); padding-left: 26px;
     display: flex; flex-direction: column; gap: 26px;
   }
-  .ticker-item .eyebrow { margin-bottom: 6px; }
+  .ticker-item .eyebrow { margin-bottom: 6px; display: flex; align-items: center; }
   .ticker-item .val { font-family: var(--mono); font-size: 14px; color: var(--text); }
-  .ticker-item .sub { font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
+  /* overflow-wrap so an unbroken value with no wrap points (e.g. the local
+     model's http://host:port/v1 endpoint) breaks instead of forcing this
+     column past its track — same failure mode as the grid minmax(0, ...)
+     cases below, just a text run instead of a grid track. */
+  .ticker-item .sub { font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); margin-top: 2px; overflow-wrap: anywhere; }
+
+  /* Readiness word repeated inline next to the System eyebrow, same source
+     and same color function as the masthead pill — so the judgment and the
+     numbers behind it sit in the same place instead of opposite corners. */
+  .readiness-inline {
+    display: inline-flex; align-items: center; gap: 5px; margin-left: 8px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; text-transform: none;
+  }
+  .readiness-inline.success { color: var(--success); }
+  .readiness-inline.warning { color: var(--warning); }
+  .readiness-inline.critical { color: var(--critical); }
+
+  /* Turning this into a <button> for click/keyboard support pulled in the
+     UA button stylesheet, which sets its own `color` (buttontext, i.e.
+     near-black) that `font: inherit` doesn't touch — `font` shorthand
+     covers family/size/weight/style/line-height, never color. That's what
+     made "Nominal" render black-on-black. */
+  .readiness-pill { cursor: pointer; background: none; font: inherit; color: inherit; }
+  .readiness-pill:hover { border-color: var(--text-muted); }
+
+  /* Transition, not @keyframes — #ticker-system is also a .flood-item,
+     which drives its own entrance via the `animation` shorthand. `animation`
+     doesn't merge across rules: the higher-specificity #id.flash rule would
+     silently *replace* floodIn outright rather than layering on top of it,
+     which drops floodIn's forwards-held opacity:1 and un-masks flood-item's
+     own base opacity:0 — the card would go permanently invisible the moment
+     it was flashed. `transition` is a different property, so it coexists
+     with `animation` on the same element with no such collision. */
+  #ticker-system {
+    border-radius: var(--radius);
+    transition: background-color 1.3s ease-out;
+  }
+  #ticker-system.flash-tint { background-color: color-mix(in srgb, var(--icarus) 16%, transparent); transition: none; }
+  @media (prefers-reduced-motion: reduce) { #ticker-system { transition: none; } }
+
+  .meter-group { display: flex; flex-direction: column; gap: 7px; margin-top: 8px; }
+  .meter-row { display: grid; grid-template-columns: 28px 1fr 34px; align-items: center; gap: 8px; }
+  .meter-row .meter-label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; color: var(--text-faint);
+  }
+  /* display:flex only matters when a track holds two fills side by side
+     (the sender-reliability bars below) — a single-fill meter (CPU/GPU/
+     MEM/DSK) renders identically either way. */
+  .meter-track { height: 5px; border-radius: 3px; background: var(--hairline-soft); overflow: hidden; display: flex; }
+  .meter-fill { height: 100%; border-radius: 3px; background: var(--success); transition: width 0.5s ease; }
+  .meter-fill.warning { background: var(--warning); }
+  .meter-fill.critical { background: var(--critical); }
+  .meter-row .meter-val {
+    font-family: var(--mono); font-size: 11px; color: var(--text-muted); text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Single-series trend (pressure score over the last ~20 samples) — one
+     hue, thin line, translucent area for weight, per-point hover via native
+     <title> since a custom crosshair is overkill at sidebar width. */
+  .sparkline-wrap { margin-top: 12px; }
+  .sparkline-cap {
+    font-family: var(--mono); font-size: 10px; color: var(--text-faint); margin: 0 0 4px;
+  }
+  .sparkline { display: block; width: 100%; height: 28px; overflow: visible; }
+  .sparkline .area { fill: var(--icarus); opacity: 0.12; stroke: none; }
+  .sparkline .line {
+    fill: none; stroke: var(--icarus); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    transition: stroke-dashoffset 1s cubic-bezier(.2,.7,.2,1);
+  }
+  @media (prefers-reduced-motion: reduce) { .sparkline .line { transition: none; } }
+  .sparkline .pt { fill: var(--icarus); opacity: 0; }
+  .sparkline .pt:hover { opacity: 1; }
+
+  /* ── TRIAGE ────────────────────────────────────────────────────── */
+
+  .triage-queue {
+    display: flex; flex-direction: column; gap: 1px;
+    background: var(--hairline-soft); border: 1px solid var(--hairline-soft);
+    border-radius: var(--radius); overflow: hidden;
+  }
+
+  .triage-item { background: var(--surface); padding: 14px 16px; }
+  .triage-item .row-top {
+    /* Same minmax(0, 1fr) reasoning as .attn-item above. */
+    display: grid; grid-template-columns: 3px minmax(0, 1fr) auto; gap: 14px; align-items: center;
+  }
+  .triage-item .stripe { align-self: stretch; border-radius: 2px; }
+  .triage-item .stripe.inbox { background: var(--councilor); }
+  .triage-item .stripe.spam { background: var(--critical); }
+
+  .triage-item .body .title { font-family: var(--serif); font-size: 15.5px; margin: 0 0 3px; }
+  .triage-item .body .meta {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); letter-spacing: 0.02em;
+  }
+
+  .triage-actions { display: flex; gap: 8px; }
+  .triage-actions button {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+    background: none; border: 1px solid var(--hairline); border-radius: var(--radius);
+    padding: 6px 10px; cursor: pointer; white-space: nowrap; color: var(--text-faint);
+  }
+  .triage-actions .approve-btn:hover { color: var(--success); border-color: var(--success); }
+  .triage-actions .override-btn:hover { color: var(--warning); border-color: var(--warning); }
+  .triage-actions .override-btn[data-expanded="true"] { color: var(--warning); border-color: var(--warning); }
+
+  .triage-item .override-form {
+    margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--hairline-soft);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .triage-item .override-form .field-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .triage-item .override-form select,
+  .triage-item .override-form input {
+    font-family: var(--mono); font-size: 12px; background: var(--void);
+    border: 1px solid var(--hairline); color: var(--text); padding: 7px 10px;
+    border-radius: var(--radius);
+  }
+  .triage-item .override-form select { flex: 0 0 auto; }
+  .triage-item .override-form input[type="text"] { flex: 1 1 200px; }
+  .triage-item .override-form .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .triage-item .override-form .submit-override {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+    background: var(--warning); color: var(--void); border: none; border-radius: var(--radius);
+    padding: 7px 12px; cursor: pointer; font-weight: 600;
+  }
+  .triage-item .override-form .cancel-override {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+    background: none; color: var(--text-faint); border: 1px solid var(--hairline); border-radius: var(--radius);
+    padding: 7px 12px; cursor: pointer;
+  }
+
+  /* Sender reliability — same meter-row/meter-fill language as the System
+     ticker card's CPU/GPU/MEM/DSK bars, just a wider label column since
+     domain names don't fit a fixed 3-4 char slot. */
+  .sender-row { display: grid; grid-template-columns: 1fr 56px 68px; align-items: center; gap: 8px; }
+  .sender-row .sender-label {
+    font-family: var(--mono); font-size: 11px; color: var(--text-muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sender-row .sender-val {
+    font-family: var(--mono); font-size: 11px; color: var(--text-faint); text-align: right;
+    white-space: nowrap;
+  }
+  .sender-row .meter-fill.approved { background: var(--success); }
+  .sender-row .meter-fill.overridden { background: var(--critical); }
 
   /* ── ACTIVITY ──────────────────────────────────────────────────── */
 
@@ -326,6 +568,46 @@
   .row .detail .action.crit { color: var(--critical); }
   .row .detail .sub { color: var(--text-muted); font-size: 12px; white-space: pre-wrap; }
 
+  .row .detail .expand-toggle {
+    display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+    background: none; border: none; padding: 5px 0 0; margin: 0; cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
+  .row .detail .expand-toggle:hover { color: var(--icarus); }
+
+  /* Box-expand via the grid-template-rows 0fr/1fr trick rather than
+     max-height (which needs a guessed-too-large number) or display:none
+     (which can't transition at all) — a single-track grid animates its
+     track size smoothly, and the real content height falls out for free
+     since 1fr just means "this track's content size" here. Generic utility
+     — .collapse wraps exactly one child, which needs its own
+     overflow:hidden so content doesn't poke out mid-animation, and a
+     slightly-delayed opacity fade so it doesn't just abruptly appear the
+     instant there's room. Used by the Activity row detail expand and the
+     Triage tab's override form alike. */
+  .collapse {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.35s cubic-bezier(.3,.7,.2,1);
+  }
+  .collapse.expanded { grid-template-rows: 1fr; }
+  .collapse > * {
+    overflow: hidden; min-height: 0;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  .collapse.expanded > * { opacity: 1; transition-delay: 0.1s; }
+  @media (prefers-reduced-motion: reduce) {
+    .collapse, .collapse > * { transition: none; }
+  }
+
+  .row .detail .meta-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 5px 16px;
+    margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--hairline-soft);
+    font-size: 11px; color: var(--text-faint);
+  }
+  .row .detail .meta-grid b { color: var(--text-muted); font-weight: 500; }
+
   .thread.dim { border-style: dashed; background: transparent; --thread-bg: transparent; }
   .thread.dim .row { opacity: 0.6; }
 
@@ -353,14 +635,37 @@
   .thread[data-empty="true"] { display: none; }
 
   @media (max-width: 860px) {
-    .today-grid { grid-template-columns: 1fr; }
+    /* Global mobile rule, not Today-specific: `.today-grid` is the shared
+       2-column shell every tab drops content into (Today, Triage, and
+       whatever's next). A naked `1fr` track carries an implicit
+       min-width:auto — its size floors at the *un-shrunk* min-content of
+       whatever's inside, so one nowrap-heavy card (e.g. Triage's row-top
+       actions) silently blows the whole grid past the viewport instead of
+       wrapping. `minmax(0, 1fr)` is what the desktop rule already uses for
+       this same reason (see line ~200) — the collapse-to-one-column
+       override has to keep that same floor-of-0, or it just reintroduces
+       the bug it was trying to avoid. */
+    .today-grid { grid-template-columns: minmax(0, 1fr); }
     .ticker {
       border-left: none; border-top: 1px solid var(--hairline);
       padding-left: 0; padding-top: 24px;
-      display: grid; grid-template-columns: 1fr 1fr; gap: 22px 24px;
     }
-    .row { grid-template-columns: 78px 16px 1fr; }
+    /* The 2-up grid below is Today's ticker specifically (several small
+       CPU/GPU/MEM/DSK-style cards read fine side by side) — Triage's
+       `.ticker` holds one wide sender-reliability list that wants the full
+       row, so this is opted into per-view rather than being `.ticker`'s
+       default. Same minmax(0, ...) floor as above, for the same reason. */
+    #view-today .ticker {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px 24px;
+    }
+    .row { grid-template-columns: 78px 16px minmax(0, 1fr); }
     .row .tag { grid-column: 3; width: fit-content; margin-bottom: 4px; }
+    /* .detail is the 4th grid item but this breakpoint only defines 3
+       columns — with no explicit placement it auto-flows into row 2 at
+       column 1 (the timestamp's 78px track) rather than under the tag, so
+       every line wrapped inside a ~78px column instead of the row's real
+       width. Span the full row so it actually fills the card. */
+    .row .detail { grid-column: 1 / -1; }
     /* Masthead has 3 flex children (wordmark, clock/pill, tabs) — on a
        phone there's only ever room for two side by side. Force tabs onto
        their own row rather than leaving the 3-way wrap to chance. */
@@ -374,7 +679,38 @@
     .activity-head { flex-direction: column; align-items: flex-start; gap: 14px; }
     .filters { width: 100%; }
     .search { width: 100%; }
-    .ticker { grid-template-columns: 1fr 1fr; gap: 18px 16px; }
+    /* Same #view-today scoping as the 860px breakpoint above, same reason —
+       this rule re-tightens the gap at the narrower width, it isn't a
+       separate decision, so it has to carry the same scope or it silently
+       reintroduces the 2-up squeeze on Triage's sender-reliability list. */
+    #view-today .ticker { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px 16px; }
+
+    /* Same class of bug as .row .detail above: .attn-actions (due date +
+       Mark handled) is an `auto`-width column competing with the title for
+       space on a narrow screen, squeezing the title down to a couple of
+       characters per line. Drop it to its own full-width row under the
+       title instead, spread edge-to-edge. The Triage queue's row-top
+       (stripe/body/actions) has the identical shape — same fix, same
+       pattern, applied below rather than generalized into one shared
+       selector, since the two cards' internal class names still differ. */
+    /* minmax(0, 1fr), not bare 1fr, for the same reason as .today-grid
+       above — a long unbroken token in a title/subject (a sender address,
+       a URL-shaped subject line) is exactly the kind of content that hits
+       this, and a handful of real rows did during testing. The standing
+       rule for this file: any single flexible grid column at these
+       breakpoints gets the minmax(0, ...) floor, never a naked fr unit. */
+    .attn-item { grid-template-columns: 3px minmax(0, 1fr); row-gap: 10px; }
+    .attn-item .attn-actions { grid-column: 2; justify-content: space-between; }
+
+    .triage-item .row-top { grid-template-columns: 3px minmax(0, 1fr); row-gap: 10px; }
+    .triage-item .triage-actions { grid-column: 2; justify-content: flex-end; }
+
+    /* Two nowrap buttons ("Cancel" + "Submit correction") are the same
+       fixed-min-content shape that caused the row-top overflow above —
+       letting them wrap instead of forcing a shared line is cheap insurance
+       against the identical failure mode once a longer future label lands
+       here. */
+    .triage-item .override-form .form-actions { flex-wrap: wrap; }
   }
 </style>
 </head>
@@ -384,18 +720,21 @@
   <header class="masthead">
     <div class="wordmark">
       <svg class="glyph tri" viewBox="0 0 24 24" aria-hidden="true">
-        <polygon points="12,4 21,19 3,19" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+        <polygon points="12,4 21,19 3,19" pathLength="1" class="tri-path" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
       </svg>
       <span class="name">ICARUS</span>
       <span class="host" id="host-label">/ —</span>
     </div>
     <div class="masthead-right">
       <span class="clock" id="clock">—</span>
-      <span class="readiness-pill" id="readiness-pill"><span class="dot neutral"></span> No telemetry</span>
+      <button class="readiness-pill" id="readiness-pill" type="button" title="Jump to system telemetry">
+        <span class="dot neutral"></span> No telemetry
+      </button>
     </div>
     <nav class="tabs">
       <button class="active" data-view="today">Today</button>
       <button data-view="activity">Activity</button>
+      <button data-view="triage">Triage</button>
     </nav>
   </header>
 
@@ -449,6 +788,47 @@
       <p class="empty-note" id="timeline-empty"><svg class="loader tri" viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,4 21,19 3,19" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" /></svg> Loading activity…</p>
     </div>
   </main>
+
+  <!-- ─────────────────────── TRIAGE ─────────────────────── -->
+  <main class="view" id="view-triage">
+    <div class="today-grid">
+      <div class="triage-main">
+        <p class="eyebrow" id="triage-counts">Loading triage queue…</p>
+
+        <section class="block">
+          <p class="eyebrow">Needs your review</p>
+          <div class="triage-queue" id="triage-needs-review"></div>
+        </section>
+
+        <section class="block">
+          <div class="activity-head">
+            <p class="eyebrow">Recently classified</p>
+            <div class="filters">
+              <input class="search" id="triage-search" placeholder="search sender or subject…" />
+              <button class="chip" data-kind="all" data-active="true">All</button>
+              <button class="chip" data-kind="inbox">Inbox</button>
+              <button class="chip" data-kind="spam">Spam</button>
+            </div>
+          </div>
+          <div class="triage-queue" id="triage-recent"></div>
+        </section>
+      </div>
+
+      <aside class="ticker">
+        <div class="ticker-item">
+          <p class="eyebrow">Sender reliability</p>
+          <div class="meter-group" id="triage-senders"></div>
+        </div>
+      </aside>
+    </div>
+
+    <section class="block" style="margin-top: 40px;">
+      <p class="eyebrow">Lifecycle</p>
+      <div class="timeline" id="triage-timeline">
+        <p class="empty-note" id="triage-timeline-empty">Loading…</p>
+      </div>
+    </section>
+  </main>
 </div>
 
 <script>
@@ -473,6 +853,9 @@
 
   const OPERATOR_NAME = 'DIIZZY';
   const URGENCY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+  // Shared with the Triage tab's override form — moved up here now that
+  // Today's attention list also has an urgency control.
+  const URGENCY_OPTIONS = ["low", "medium", "high", "critical"];
 
   function timeOfDayWord(date) {
     const h = date.getHours();
@@ -484,12 +867,19 @@
 
   function dispatchLabel(date) { return timeOfDayWord(date) + ' Dispatch'; }
 
-  // The single most pressing attention item — soonest due date first, tied
-  // items broken by urgency. What actually makes the headline feel written
-  // for you instead of a stat: naming the thing, not counting the pile.
+  // The single most pressing attention item — critical urgency always wins
+  // outright (an undated critical item must never lose to a trivially-soon
+  // due date just because it has no deadline attached), then soonest due
+  // date, then remaining urgency as the tiebreak. What actually makes the
+  // headline feel written for you instead of a stat: naming the thing, not
+  // counting the pile.
   function pickTopAttentionItem(items) {
     if (!items.length) return null;
     return [...items].sort((a, b) => {
+      const aCrit = (a.urgency || '').toLowerCase() === 'critical';
+      const bCrit = (b.urgency || '').toLowerCase() === 'critical';
+      if (aCrit !== bCrit) return aCrit ? -1 : 1;
+
       const aHas = !!a.due_at, bHas = !!b.due_at;
       if (aHas !== bHas) return aHas ? -1 : 1;
       if (aHas && bHas) {
@@ -524,18 +914,64 @@
     }[c]));
   }
 
+  // Swaps a now-empty list container for the shared dashed-border
+  // placeholder, used by every list on the page that can render to zero
+  // items (Today's attention/calendar lists, both Triage queues). Keeps the
+  // same id on the replacement node so later getElementById/re-render calls
+  // against that id keep working unchanged.
+  function showEmptyState(id, message) {
+    const el = document.getElementById(id);
+    if (el) el.outerHTML = `<div class="empty-note" id="${id}">${escapeHtml(message)}</div>`;
+  }
+
+  // Single check reused by every JS-driven entrance effect below (the
+  // meter fill and the sparkline draw-in aren't pure CSS, so they need
+  // their own opt-out rather than relying on the stylesheet's media query).
+  const prefersReducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   // ── Today ─────────────────────────────────────────────────────────
-  // TEMP: artificial delay so the loader is actually visible on a fast
-  // local network — everything normally resolves in well under 100ms.
-  // Remove once you've seen it.
-  const DEBUG_LOAD_DELAY_MS = 1500;
-  const _debugDelay = () => new Promise(r => setTimeout(r, DEBUG_LOAD_DELAY_MS));
+  // Cached alongside attentionItems so a dismiss can recompute the headline
+  // and lede — both derived from attention count — without a fresh
+  // /api/today round trip. Everything else in the dispatch (date, calendar,
+  // councilor note) doesn't change when an item is dismissed, so it isn't
+  // touched here.
+  let dispatchNow = new Date();
+  let dispatchCalCount = 0;
+  let dispatchCouncilorNote = "";
+
+  // Live telemetry (see connectTelemetryWs/handleTelemetryUpdate) patches
+  // #ticker-system in place rather than re-fetching /api/today, but it
+  // still needs somewhere to get the *non*-telemetry ticker fields from if
+  // the card doesn't exist yet and has to be materialized for the first
+  // time (see handleTelemetryUpdate) — this is that cache. telemetryHistory
+  // is the rolling window the sparkline draws from; seeded from the initial
+  // snapshot's history so the line has continuity instead of starting over
+  // from a single point the moment the first live sample arrives.
+  let lastTickerData = null;
+  let telemetryHistory = [];
+
+  function refreshDispatchText() {
+    const attnCount = attentionItems.length;
+    const headline = document.getElementById('dispatch-headline');
+    headline.textContent = buildHeadline(attentionItems, dispatchNow);
+    document.getElementById('dispatch-lede').innerHTML =
+      `${attnCount} item${attnCount === 1 ? '' : 's'} tracked for attention, <span class="hl">${dispatchCalCount}</span> upcoming ` +
+      `calendar event${dispatchCalCount === 1 ? '' : 's'} synced. ${escapeHtml(dispatchCouncilorNote)}`;
+    document.getElementById('attention-count').textContent = `Needs your attention · ${attnCount}`;
+
+    // Re-trigger the wipe reveal every time the headline text actually
+    // changes (fresh load, or the count shifting after a dismiss) — the
+    // remove/reflow/add idiom is what makes a CSS animation replay instead
+    // of no-opping because the class was already present.
+    headline.classList.remove('wipe-in');
+    void headline.offsetWidth;
+    headline.classList.add('wipe-in');
+  }
 
   async function loadToday() {
     let data;
     try {
       const resp = await fetch('/api/today');
-      await _debugDelay();
       data = await resp.json();
     } catch (e) {
       document.getElementById('dispatch-headline').textContent = "Couldn't reach Icarus.";
@@ -543,49 +979,170 @@
       return;
     }
 
-    const now = new Date(data.date);
+    dispatchNow = new Date(data.date);
     document.getElementById('dispatch-date').textContent =
-      now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' }) + ' · ' + dispatchLabel(now);
+      dispatchNow.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' }) + ' · ' + dispatchLabel(dispatchNow);
     document.getElementById('host-label').textContent = '/ ' + (data.hostname || 'unknown-host');
 
-    const attnCount = data.attention.length;
-    const calCount = data.calendar.length;
-    document.getElementById('dispatch-headline').textContent = buildHeadline(data.attention, now);
-
-    const councilorNote = data.ticker.councilor
+    dispatchCalCount = data.calendar.length;
+    dispatchCouncilorNote = data.ticker.councilor
       ? `The Councilor last ${data.ticker.councilor.action} at ${fmtTime(data.ticker.councilor.created_at)}.`
       : "No Councilor activity recorded yet.";
-    document.getElementById('dispatch-lede').innerHTML =
-      `${attnCount} item${attnCount === 1 ? '' : 's'} tracked for attention, <span class="hl">${calCount}</span> upcoming ` +
-      `calendar event${calCount === 1 ? '' : 's'} synced. ${escapeHtml(councilorNote)}`;
 
     document.getElementById('byline-model').textContent = data.ticker.model?.name || "local model";
-    document.getElementById('attention-count').textContent = `Needs your attention · ${attnCount}`;
+
+    lastTickerData = data.ticker;
+    telemetryHistory = [...(data.ticker.telemetry_history || [])];
 
     renderAttention(data.attention);
+    refreshDispatchText();
     renderCalendar(data.calendar, data.attention);
     renderTicker(data.ticker);
     renderReadiness(data.ticker.telemetry);
   }
 
+  // Kept in sync with whatever renderAttention last drew, so a dismiss can
+  // splice one item out and re-render without a round trip to /api/today.
+  let attentionItems = [];
+
   function renderAttention(items) {
+    attentionItems = items;
     const el = document.getElementById('attention-list');
     if (items.length === 0) {
-      el.outerHTML = '<div class="empty-note" id="attention-list">Nothing outstanding.</div>';
+      showEmptyState('attention-list', 'Nothing outstanding.');
       return;
     }
-    el.innerHTML = items.map(i => {
+    el.innerHTML = items.map((i, idx) => {
       const stripe = i.item_type === 'bill' ? 'bill' : (i.item_type === 'job_application' ? 'job_application' : 'default');
       const title = i.summary || i.entity_key;
       const meta = `${i.item_type.replace('_', ' ')} · ${i.state}${i.source ? ' · via ' + i.source : ''}`;
       const due = i.due_at ? fmtDate(i.due_at) : 'no due date';
-      return `<div class="attn-item">
+      const urgency = (i.urgency || '').toLowerCase();
+      // Feeds POST /api/tracked-items/{id}/urgency — the "mark something as
+      // important that wasnt important before" correction. If this item
+      // came from email triage, the backend also records it against the
+      // TriageClassification that created it, same as an Override on the
+      // Triage tab, so the learning loop hears about it either way.
+      const urgencySelect = `<select id="urgency-${i.id}" class="urgency-select" data-item-id="${i.id}" data-prev-value="${urgency}" title="Adjust urgency">
+        ${URGENCY_OPTIONS.map(u => `<option value="${u}"${u === urgency ? ' selected' : ''}>${u}</option>`).join('')}
+      </select>`;
+      return `<div class="attn-item flood-item" style="--i:${idx}" data-id="${i.id}">
         <div class="stripe ${stripe}"></div>
-        <div class="body"><p class="title">${escapeHtml(title)}</p><p class="meta">${escapeHtml(meta)}</p></div>
-        <div class="due">${escapeHtml(due)}</div>
+        <div class="body">
+          <p class="title">${escapeHtml(title)}</p>
+          <p class="meta">${escapeHtml(meta)}</p>
+          <div class="urgency-adjust"><label for="urgency-${i.id}">Urgency</label>${urgencySelect}</div>
+        </div>
+        <div class="attn-actions">
+          <div class="due">${escapeHtml(due)}</div>
+          <button class="dismiss-btn" type="button" data-dismiss-id="${i.id}">Mark handled</button>
+        </div>
       </div>`;
     }).join('');
   }
+
+  // Ephemeral bottom-of-screen confirmation, with an optional undo action —
+  // dismissing is a one-click, easy-to-fat-finger action, so it needs a
+  // cheap way back rather than a confirm dialog up front.
+  let toastTimer = null;
+  function showToast(message, onUndo) {
+    document.querySelectorAll('.toast').forEach(t => t.remove());
+    if (toastTimer) clearTimeout(toastTimer);
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = `<span>${escapeHtml(message)}</span>` + (onUndo ? `<button type="button">Undo</button>` : '');
+    if (onUndo) toast.querySelector('button').addEventListener('click', () => { toast.remove(); onUndo(); });
+    document.body.appendChild(toast);
+    toastTimer = setTimeout(() => toast.remove(), 6000);
+  }
+
+  // Registered on the single document-level click router at the bottom of
+  // this script, alongside handleExpandToggleClick and
+  // handleTriageActionClick — kept as its own named function here (rather
+  // than inline) so it stays co-located with attentionItems/showToast, the
+  // state it actually operates on, instead of all three handlers' logic
+  // being relocated to one spot just to share one listener registration.
+  async function handleDismissClick(e) {
+    const btn = e.target.closest('.dismiss-btn');
+    if (!btn) return false;
+    // Disabling synchronously (before the await below) means a second click
+    // event on this exact button — a real double-click, or a retry from
+    // some automation driving the page — can't fire a second request for
+    // the same item while the first is still in flight.
+    if (btn.disabled) return true;
+    const id = Number(btn.dataset.dismissId);
+    const item = attentionItems.find(a => a.id === id);
+    const rowEl = btn.closest('.attn-item');
+    if (!item || !rowEl) return true;
+
+    btn.disabled = true;
+    rowEl.classList.add('dismissing');
+    try {
+      const resp = await fetch(`/api/tracked-items/${id}/dismiss`, { method: 'POST' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      btn.disabled = false;
+      rowEl.classList.remove('dismissing');
+      showToast("Couldn't mark that handled — try again.");
+      return true;
+    }
+
+    // Remove just this row in place rather than re-rendering the whole
+    // list — keeps every other row's DOM node (and any in-flight
+    // interaction with it) untouched by this one dismissal.
+    setTimeout(() => {
+      rowEl.remove();
+      attentionItems = attentionItems.filter(a => a.id !== id);
+      if (attentionItems.length === 0) {
+        showEmptyState('attention-list', 'Nothing outstanding.');
+      }
+      refreshDispatchText();
+    }, 220);
+
+    showToast(`Marked "${item.summary || item.entity_key}" handled.`, async () => {
+      try { await fetch(`/api/tracked-items/${id}/undismiss`, { method: 'POST' }); }
+      finally { loadToday(); }
+    });
+    return true;
+  }
+
+  // Urgency adjustment — a 'change' event, not a click, so it isn't part of
+  // the click router above; it's the reinforcement/correction half of the
+  // attention list, symmetric with Mark Handled. data-prev-value (set at
+  // render time, kept in sync on every successful change) is what lets a
+  // failed request revert the <select> to what the server still actually
+  // has, rather than leaving the UI showing a value that never saved.
+  document.addEventListener('change', async (e) => {
+    const sel = e.target.closest('.urgency-select');
+    if (!sel) return;
+    const id = Number(sel.dataset.itemId);
+    const item = attentionItems.find(a => a.id === id);
+    const previous = sel.dataset.prevValue || '';
+    const next = sel.value;
+    if (!item || next === previous) return;
+
+    sel.disabled = true;
+    try {
+      const resp = await fetch(`/api/tracked-items/${id}/urgency`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urgency: next }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      sel.value = previous;
+      sel.disabled = false;
+      showToast("Couldn't update urgency — try again.");
+      return;
+    }
+
+    item.urgency = next;
+    sel.dataset.prevValue = next;
+    sel.disabled = false;
+    // The headline picks its subject partly by urgency (see
+    // pickTopAttentionItem) — a change here can change what it says.
+    refreshDispatchText();
+    showToast(`Urgency set to ${next}.`);
+  });
 
   function fmtDate(iso) {
     try { return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' }); }
@@ -609,7 +1166,7 @@
   function renderCalendar(items, attentionItems) {
     const el = document.getElementById('calendar-list');
     if (items.length === 0) {
-      el.outerHTML = '<div class="empty-note" id="calendar-list">No events synced yet.</div>';
+      showEmptyState('calendar-list', 'No events synced yet.');
       return;
     }
 
@@ -650,7 +1207,7 @@
       bucket.events.push({ item: i, date: d });
     }
 
-    el.innerHTML = days.map(day => {
+    el.innerHTML = days.map((day, idx) => {
       const conflicts = conflictsByDay.get(day.key);
       const conflictHtml = conflicts
         ? `<span class="conflict">· ${escapeHtml(conflicts.join(', '))} same day</span>` : '';
@@ -663,11 +1220,142 @@
           <span class="where">${escapeHtml(where)}</span>
         </div>`;
       }).join('');
-      return `<div class="cal-day">
+      return `<div class="cal-day flood-item" style="--i:${idx}">
         <p class="cal-day-label">${dayLabel(day.date, todayKey, tomorrowKey)}${conflictHtml}</p>
         <div class="cal-day-items">${rows}</div>
       </div>`;
     }).join('');
+  }
+
+  // Single source of truth for the readiness word/color — consumed by both
+  // the masthead pill and the inline label on the System ticker card, so
+  // the judgment and the numbers behind it read as one signal, not two.
+  function readinessInfo(t) {
+    if (!t || !t.simulation_readiness) return { cls: 'neutral', label: 'No telemetry' };
+    const r = t.simulation_readiness.toLowerCase();
+    const cls = r === 'green' ? 'success' : (r === 'yellow' ? 'warning' : 'critical');
+    const label = r === 'green' ? 'Nominal' : (r === 'yellow' ? 'Elevated' : 'Critical');
+    return { cls, label };
+  }
+
+  // The small badge next to "System" on the ticker card — shared between
+  // the initial render and updateSystemReadinessInline's live-patch path
+  // below, rather than duplicating the markup in both places.
+  function readinessInlineHtml(t) {
+    const ready = readinessInfo(t);
+    return ready.cls !== 'neutral'
+      ? `<span class="readiness-inline ${ready.cls}"><span class="dot ${ready.cls}"></span>${ready.label}</span>` : '';
+  }
+
+  function meterClass(pct) {
+    if (pct >= 90) return 'critical';
+    if (pct >= 70) return 'warning';
+    return '';
+  }
+
+  // Renders at width:0 with the real value stashed in data-pct — a bar
+  // that's already at its target width on first paint has nothing to
+  // transition from. animateMeters() (called once the ticker is in the
+  // DOM) does the actual fill-in. `key` (data-metric) is what lets a live
+  // telemetry update (updateMeterRow, below) find this exact row again
+  // later without re-rendering the whole card — the grow-from-zero
+  // treatment here is a one-time entrance, not something a value tick every
+  // couple seconds should ever replay.
+  function meterRow(label, value, key) {
+    if (value == null || isNaN(value)) return '';
+    const pct = Math.max(0, Math.min(100, value));
+    return `<div class="meter-row" data-metric="${key}">
+      <span class="meter-label">${label}</span>
+      <div class="meter-track"><div class="meter-fill ${meterClass(pct)}" data-pct="${pct.toFixed(0)}" style="width:0"></div></div>
+      <span class="meter-val">${pct.toFixed(0)}%</span>
+    </div>`;
+  }
+
+  // Live-refresh counterpart to meterRow — patches an existing row's fill
+  // width/color and label in place. CSS's `.meter-fill { transition: width
+  // 0.5s ease }` is what makes this read as a gauge moving rather than a
+  // jump cut; no JS animation needed here at all, unlike the initial paint.
+  function updateMeterRow(key, value) {
+    const row = document.querySelector(`#ticker-system .meter-row[data-metric="${key}"]`);
+    if (!row || value == null || isNaN(value)) return;
+    const pct = Math.max(0, Math.min(100, value));
+    const fill = row.querySelector('.meter-fill');
+    fill.classList.remove('warning', 'critical');
+    const cls = meterClass(pct);
+    if (cls) fill.classList.add(cls);
+    fill.style.width = pct.toFixed(0) + '%';
+    fill.dataset.pct = pct.toFixed(0);
+    row.querySelector('.meter-val').textContent = pct.toFixed(0) + '%';
+  }
+
+  // Two rAFs, not one: the first just gets us to "after the width:0 paint
+  // has happened"; the actual style change needs the frame after that to
+  // reliably be seen as a change worth transitioning rather than collapsed
+  // into the initial paint. A single rAF flickers on some browsers.
+  function animateMeters(container) {
+    const fills = [...container.querySelectorAll('.meter-fill[data-pct]')];
+    if (fills.length === 0) return;
+    if (prefersReducedMotion()) {
+      fills.forEach(f => { f.style.width = f.dataset.pct + '%'; });
+      return;
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      fills.forEach((f, i) => {
+        f.style.transitionDelay = `${i * 80}ms`;
+        f.style.width = f.dataset.pct + '%';
+      });
+    }));
+  }
+
+  // Shared with updateTelemetrySparkline's slide-transition math below —
+  // hoisted so the two never drift apart the way two copies of the same
+  // magic numbers eventually do.
+  const SPARKLINE_W = 220, SPARKLINE_H = 28, SPARKLINE_PAD = 3;
+
+  // Compact trend line for load (pressure_score, falling back to cpu if a
+  // sample predates that field) over the last ~20 telemetry samples. Per-
+  // point hover uses a native <title> rather than a custom crosshair —
+  // proportionate for a sparkline this small, not worth the JS for it.
+  function sparklineHtml(history) {
+    if (!history || history.length < 2) return '';
+    const w = SPARKLINE_W, h = SPARKLINE_H, pad = SPARKLINE_PAD;
+    const values = history.map(s => s.pressure_score != null ? s.pressure_score * 100 : (s.cpu_percent ?? 0));
+    const min = Math.min(...values), max = Math.max(...values);
+    const range = (max - min) || 1;
+    const step = (w - pad * 2) / (values.length - 1);
+    const pts = values.map((v, i) => ({
+      x: pad + i * step,
+      y: pad + (1 - (v - min) / range) * (h - pad * 2),
+      v, ts: history[i].timestamp,
+    }));
+    const line = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    const area = `${pad},${h - pad} ${line} ${(w - pad).toFixed(1)},${h - pad}`;
+    const dots = pts.map(p =>
+      `<circle class="pt" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6"><title>${escapeHtml(fmtTime(p.ts))} — load ${p.v.toFixed(0)}%</title></circle>`
+    ).join('');
+    return `<div class="sparkline-wrap">
+      <p class="sparkline-cap">Load · last ${values.length} samples</p>
+      <svg class="sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+        <polygon class="area" points="${area}"></polygon>
+        <polyline class="line" points="${line}"></polyline>
+        ${dots}
+      </svg>
+    </div>`;
+  }
+
+  // Oscilloscope-style trace-in: the line's actual pixel length is only
+  // known once it's laid out, so this reads it back via getTotalLength()
+  // rather than trying to precompute it from the point math above.
+  function drawSparkline(container) {
+    const line = container.querySelector('.sparkline .line');
+    if (!line) return;
+    const len = line.getTotalLength();
+    if (prefersReducedMotion()) return;
+    line.style.strokeDasharray = `${len}`;
+    line.style.strokeDashoffset = `${len}`;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      line.style.strokeDashoffset = '0';
+    }));
   }
 
   function renderTicker(ticker) {
@@ -677,54 +1365,210 @@
     const t = ticker.telemetry;
 
     el.innerHTML = `
-      <div class="ticker-item">
+      <div class="ticker-item flood-item" style="--i:0">
         <p class="eyebrow">Councilor</p>
         <p class="val">${councilor ? escapeHtml(councilor.action) : 'no activity yet'}</p>
         <p class="sub">${councilor ? 'last ' + fmtTime(councilor.created_at) : ''}</p>
       </div>
-      <div class="ticker-item">
+      <div class="ticker-item flood-item" style="--i:1">
         <p class="eyebrow">Email triage</p>
         <p class="val">${triage ? escapeHtml(triage.action) : 'no activity yet'}</p>
         <p class="sub">${triage ? 'last ' + fmtTime(triage.created_at) : ''}</p>
       </div>
-      <div class="ticker-item">
+      <div class="ticker-item flood-item" style="--i:2">
         <p class="eyebrow">Heartbeat</p>
         <p class="val">every ${ticker.heartbeat_interval_seconds}s</p>
       </div>
-      <div class="ticker-item">
+      <div class="ticker-item flood-item" style="--i:3">
         <p class="eyebrow">Local model</p>
         <p class="val">${escapeHtml(ticker.model?.name || '—')}</p>
         <p class="sub">${escapeHtml(ticker.model?.url || '')}</p>
       </div>
       ${t ? `
-      <div class="ticker-item">
-        <p class="eyebrow">System</p>
-        <p class="val">cpu ${t.cpu_percent ?? '—'}% · gpu ${t.gpu_util_percent ?? '—'}%</p>
-        <p class="sub">mem ${t.memory_used_mb ?? '—'}/${t.memory_total_mb ?? '—'} MB</p>
+      <div class="ticker-item flood-item" style="--i:4" id="ticker-system">
+        <p class="eyebrow">System${readinessInlineHtml(t)}</p>
+        <div class="meter-group">
+          ${meterRow('CPU', t.cpu_percent, 'cpu')}
+          ${meterRow('GPU', t.gpu_util_percent, 'gpu')}
+          ${meterRow('MEM', t.memory_total_mb ? (t.memory_used_mb / t.memory_total_mb * 100) : null, 'mem')}
+          ${meterRow('DSK', t.disk_used_percent, 'dsk')}
+        </div>
+        ${sparklineHtml(ticker.telemetry_history)}
       </div>` : ''}
     `;
+
+    animateMeters(el);
+    drawSparkline(el);
   }
+
+  // Live-refresh counterpart to the sparkline half of renderTicker — reuses
+  // sparklineHtml's exact markup (same geometry math, zero duplication)
+  // rather than going through drawSparkline's stroke-dashoffset draw-in,
+  // which is a one-time entrance effect that would flash on every tick if
+  // replayed. What it draws every tick is a full recompute of every point
+  // (fresh min/max range, fresh x per index) — with the *positions*
+  // swapped wholesale like that, a plain markup swap reads as a jump cut,
+  // not data moving forward.
+  //
+  // Once the window is at full capacity, though, each new sample simply
+  // pushes one old sample out — same length before and after, so the new
+  // frame is just the old frame shifted one slot left, plus one new point
+  // at the right edge. That's exactly the shape a CSS transform can
+  // animate for free: draw the new frame offset one sample-step to the
+  // *right* first (which lines it up pixel-for-pixel with how the
+  // *previous* frame looked), then transition that offset back to 0 — the
+  // whole trace visibly scrolls left instead of snapping, the way an
+  // oscilloscope trace actually moves. Only valid once the sample count
+  // stops changing tick to tick (during the initial ramp-up to a full
+  // window, indices don't line up this way yet) — those early ticks still
+  // jump-cut, but that's a few seconds early in a session, not the steady
+  // state this runs in almost all the time.
+  function updateTelemetrySparkline(history) {
+    const card = document.getElementById('ticker-system');
+    if (!card) return;
+    const html = sparklineHtml(history);
+    if (!html) return;
+
+    const existing = card.querySelector('.sparkline-wrap');
+    const prevCount = existing ? Number(existing.dataset.count || 0) : 0;
+    const canSlide = prevCount > 0 && prevCount === history.length;
+
+    if (existing) existing.outerHTML = html;
+    else card.insertAdjacentHTML('beforeend', html);
+    const fresh = card.querySelector('.sparkline-wrap');
+    fresh.dataset.count = history.length;
+
+    if (canSlide && !prefersReducedMotion()) {
+      const svg = fresh.querySelector('.sparkline');
+      // step is computed in the SVG's internal 0–220 viewBox units, but
+      // `transform` moves it in real screen pixels — preserveAspectRatio
+      //="none" stretches that viewBox to whatever the card's actual
+      // rendered width is (rarely exactly 220px), so the unit step has to
+      // be rescaled by that same ratio or the slide drifts out of
+      // alignment with the data it's supposed to line up with.
+      const stepUnits = (SPARKLINE_W - SPARKLINE_PAD * 2) / (history.length - 1);
+      const scale = svg.getBoundingClientRect().width / SPARKLINE_W;
+      const stepPx = stepUnits * scale;
+      svg.style.transition = 'none';
+      svg.style.transform = `translateX(${stepPx}px)`;
+      // Same double-rAF idiom as animateMeters/drawSparkline above — the
+      // first rAF just lands after the offset state has actually painted;
+      // the transition-back needs to start on the frame *after* that to
+      // reliably be treated as a change worth animating.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        svg.style.transition = 'transform 1.8s linear';
+        svg.style.transform = 'translateX(0)';
+      }));
+    }
+  }
+
+  // Live-refresh counterpart to the readiness badge baked into renderTicker's
+  // eyebrow markup — readinessInlineHtml is the same shared builder, this
+  // just re-runs it against a fresh telemetry reading and swaps the result
+  // in (or adds/removes it, if readiness just crossed to/from "no data").
+  function updateSystemReadinessInline(t) {
+    const eyebrow = document.querySelector('#ticker-system > .eyebrow');
+    if (!eyebrow) return;
+    const existing = eyebrow.querySelector('.readiness-inline');
+    const html = readinessInlineHtml(t);
+    if (existing) existing.outerHTML = html;
+    else if (html) eyebrow.insertAdjacentHTML('beforeend', html);
+  }
+
+  // Entry point for every message off the telemetry WebSocket. If the
+  // System card doesn't exist yet — telemetry wasn't available the moment
+  // the page first loaded, so renderTicker never rendered it — this does
+  // one full render now that real data exists (using whatever non-telemetry
+  // ticker fields loadToday last cached) and lets that render's own
+  // animateMeters/drawSparkline handle the entrance; every update after
+  // that goes through the lightweight patch path, no re-render involved.
+  function handleTelemetryUpdate(t) {
+    telemetryHistory.push(t);
+    if (telemetryHistory.length > 20) telemetryHistory.shift();
+
+    if (!document.getElementById('ticker-system')) {
+      if (lastTickerData) {
+        renderTicker({ ...lastTickerData, telemetry: t, telemetry_history: telemetryHistory });
+      }
+      return;
+    }
+
+    updateMeterRow('cpu', t.cpu_percent);
+    updateMeterRow('gpu', t.gpu_util_percent);
+    updateMeterRow('mem', t.memory_total_mb ? (t.memory_used_mb / t.memory_total_mb * 100) : null);
+    updateMeterRow('dsk', t.disk_used_percent);
+    updateTelemetrySparkline(telemetryHistory);
+    updateSystemReadinessInline(t);
+    renderReadiness(t); // masthead pill — already gated against repeat pulses
+  }
+
+  function connectTelemetryWs() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws/telemetry`);
+    ws.onclose = () => setTimeout(connectTelemetryWs, 3000);
+    ws.onerror = () => ws.close();
+    ws.onmessage = (msg) => {
+      let t;
+      try { t = JSON.parse(msg.data); } catch { return; }
+      handleTelemetryUpdate(t);
+    };
+  }
+
+  // First real telemetry reading gets a one-shot pulse on the pill — after
+  // that, readings arrive too routinely (every heartbeat) for the same
+  // flourish to still read as signal rather than noise.
+  let readinessAnnounced = false;
 
   function renderReadiness(t) {
     const pill = document.getElementById('readiness-pill');
-    if (!t || !t.simulation_readiness) {
-      pill.innerHTML = '<span class="dot neutral"></span> No telemetry';
-      return;
-    }
-    const r = t.simulation_readiness.toLowerCase();
-    const cls = r === 'green' ? 'success' : (r === 'yellow' ? 'warning' : 'critical');
-    const label = r === 'green' ? 'Nominal' : (r === 'yellow' ? 'Elevated' : 'Critical');
+    const { cls, label } = readinessInfo(t);
     pill.innerHTML = `<span class="dot ${cls}"></span> ${label}`;
+
+    if (cls !== 'neutral' && !readinessAnnounced) {
+      readinessAnnounced = true;
+      pill.style.setProperty('--pulse', `var(--${cls})`);
+      pill.classList.remove('pulse-once');
+      void pill.offsetWidth;
+      pill.classList.add('pulse-once');
+    }
   }
 
-  // ── Activity ──────────────────────────────────────────────────────
-  // threadOrder: most-recently-updated thread first. Each thread is a DOM
-  // node keyed by thread_id (or a synthetic per-event key for standalone
-  // events with no thread_id, which render as single dashed rows).
-  const timelineEl = document.getElementById('timeline');
-  const emptyNote = document.getElementById('timeline-empty');
-  const threadEls = new Map(); // key -> element
-  let syntheticSeq = 0;
+  // Pill doubles as a jump link to the numbers backing its own judgment —
+  // same tinted-flash treatment the Activity timeline uses for new threads,
+  // just transition-driven instead of animation-driven (see the CSS comment
+  // on #ticker-system for why that distinction actually matters here).
+  // Jump straight to the tinted state (transition disabled), force a
+  // reflow so the browser commits that as the *starting* state, then drop
+  // the class — the transition takes over and eases it back to transparent.
+  document.getElementById('readiness-pill').addEventListener('click', () => {
+    document.querySelector('nav.tabs button[data-view="today"]').click();
+    const target = document.getElementById('ticker-system');
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.add('flash-tint');
+    void target.offsetWidth; // commit the instant tint before re-enabling the transition
+    target.classList.remove('flash-tint');
+  });
+
+  // ── Activity / Triage lifecycle (shared renderer) ───────────────────
+  // Expand/collapse is delegated at the document level rather than scoped
+  // to one timeline element — the handler only cares about the clicked
+  // button's own ancestors, and now there are two independent timelines
+  // (Activity's own, and the Triage tab's filtered lifecycle feed) that
+  // both render this same row shape. Registered on the shared click router
+  // at the bottom of this script — see handleDismissClick's comment.
+  function handleExpandToggleClick(e) {
+    const btn = e.target.closest('.expand-toggle');
+    if (!btn) return false;
+    const detail = btn.closest('.detail');
+    const sub = detail.querySelector('.sub');
+    const collapse = detail.querySelector('.collapse');
+    const expanding = !collapse.classList.contains('expanded');
+    collapse.classList.toggle('expanded', expanding);
+    btn.textContent = expanding ? 'Hide details' : 'Show details';
+    if (sub) sub.textContent = expanding ? sub.dataset.full : sub.dataset.short;
+    return true;
+  }
 
   function actorLabel(actor) { return ACTOR_TAGS[actor] || actor.slice(0, 3).toUpperCase(); }
 
@@ -733,16 +1577,43 @@
     triage: 'var(--triage)', system: 'var(--system)',
   };
 
+  // Every row can expand to its full (untruncated) detail plus a metadata
+  // strip — event id, type, severity, thread, platform/user, exact
+  // timestamp — everything list_recent_activity/publish_activity actually
+  // carry. NOTE: this is *event metadata*, not application logs — there's
+  // no log store the dashboard can read from yet (backend logs go to
+  // stdout only; see main.py's supervisor comment on the docker socket not
+  // being mounted). Pulling real logs by timestamp needs a log sink added
+  // first, which is a separate piece of work from this expand affordance.
   function rowHtml(ev, live) {
     const actionClass = ev.severity === 'critical' ? 'crit' : (ev.severity === 'warning' ? 'warn' :
       (['responded', 'delivered', 'tracked', 'notified', 'spam_trashed'].includes(ev.event_type) ? 'ok' : ''));
+    const fullDetail = ev.detail || '';
+    const shortDetail = fullDetail.length > 400 ? fullDetail.slice(0, 400) + '…' : fullDetail;
+    const metaRows = [
+      ['ID', ev.id ?? '—'],
+      ['Type', ev.event_type],
+      ['Severity', ev.severity],
+      ['Actor', ev.actor],
+      ev.thread_id ? ['Thread', ev.thread_id] : null,
+      ev.platform ? ['Platform', ev.platform] : null,
+      ev.user_id ? ['User', ev.user_id] : null,
+      ['Time', ev.created_at ? new Date(ev.created_at).toLocaleString() : '—'],
+    ].filter(Boolean);
+
     return `<div class="row${live ? ' row-enter' : ''}" data-actor="${ev.actor}">
       <span class="ts">${fmtTime(ev.created_at)}</span>
       <span class="lane"><span class="node"></span></span>
       <span class="tag">${actorLabel(ev.actor)}</span>
       <div class="detail">
         <p class="action ${actionClass}">${escapeHtml(ev.action)}</p>
-        ${ev.detail ? `<p class="sub">${escapeHtml(ev.detail.length > 400 ? ev.detail.slice(0, 400) + '…' : ev.detail)}</p>` : ''}
+        ${fullDetail ? `<p class="sub" data-short="${escapeHtml(shortDetail)}" data-full="${escapeHtml(fullDetail)}">${escapeHtml(shortDetail)}</p>` : ''}
+        <button class="expand-toggle" type="button">Show details</button>
+        <div class="collapse">
+          <div class="meta-grid">
+            ${metaRows.map(([k, v]) => `<span>${k} <b>${escapeHtml(String(v))}</b></span>`).join('')}
+          </div>
+        </div>
       </div>
     </div>`;
   }
@@ -756,49 +1627,104 @@
     return null;
   }
 
-  function upsertThread(ev, live = true) {
-    emptyNote.remove?.();
-    const key = ev.thread_id || `__standalone-${syntheticSeq++}`;
-    let el = threadEls.get(key);
+  // threadOrder: most-recently-updated thread first. Each thread is a DOM
+  // node keyed by thread_id (or a synthetic per-event key for standalone
+  // events with no thread_id, which render as single dashed rows).
+  // Factored into one factory rather than duplicated per timeline — the
+  // Activity tab and the Triage tab's lifecycle feed consume the exact same
+  // event shape off the exact same WebSocket, they just render into
+  // different DOM nodes and (for Triage) only a filtered subset of events.
+  //
+  // seq (upsertThread's 3rd arg) is only meaningful during the initial
+  // backfill — it's what turns a flat list of historical events into a
+  // quick top-to-bottom flood on first paint, distinct from thread-enter's
+  // per-event pop-in reserved for genuinely live activity.
+  function makeThreadRenderer(timelineEl, emptyNote) {
+    const threadEls = new Map(); // key -> element
+    let syntheticSeq = 0;
 
-    if (el) {
-      // Append the new row to the existing thread, then move the whole
-      // thread card to the top — most-recently-active thread leads.
-      const rowsWrap = el;
-      rowsWrap.insertAdjacentHTML('beforeend', rowHtml(ev, live));
-      timelineEl.prepend(rowsWrap);
-    } else {
-      const isStandalone = !ev.thread_id;
-      const label = threadLabelFor(ev.thread_id);
-      const wrap = document.createElement('div');
-      wrap.className = 'thread' + (isStandalone ? ' dim' : '') + (live ? ' thread-enter' : '');
-      wrap.dataset.key = key;
-      wrap.style.setProperty('--flash', ACTOR_FLASH[ev.actor] || 'var(--icarus)');
-      wrap.innerHTML = (label ? `<p class="thread-label">${label}</p>` : '') + rowHtml(ev, live);
-      timelineEl.prepend(wrap);
-      threadEls.set(key, wrap);
+    function upsertThread(ev, live = true, seq = null) {
+      emptyNote.remove?.();
+      const key = ev.thread_id || `__standalone-${syntheticSeq++}`;
+      let el = threadEls.get(key);
+
+      if (el) {
+        // Append the new row to the existing thread, then move the whole
+        // thread card to the top — most-recently-active thread leads.
+        const rowsWrap = el;
+        rowsWrap.insertAdjacentHTML('beforeend', rowHtml(ev, live));
+        timelineEl.prepend(rowsWrap);
+      } else {
+        const isStandalone = !ev.thread_id;
+        const label = threadLabelFor(ev.thread_id);
+        const wrap = document.createElement('div');
+        const isFlood = !live && seq !== null;
+        wrap.className = 'thread' + (isStandalone ? ' dim' : '') + (live ? ' thread-enter' : '') + (isFlood ? ' flood-item' : '');
+        wrap.dataset.key = key;
+        wrap.style.setProperty('--flash', ACTOR_FLASH[ev.actor] || 'var(--icarus)');
+        // Capped so a big backfill still finishes flooding in inside ~1.5s
+        // instead of a multi-second crawl — everything past the 30th just
+        // shares that tail delay rather than each getting its own slot.
+        if (isFlood) wrap.style.setProperty('--i', Math.min(seq, 30));
+        wrap.innerHTML = (label ? `<p class="thread-label">${label}</p>` : '') + rowHtml(ev, live);
+        timelineEl.prepend(wrap);
+        threadEls.set(key, wrap);
+      }
     }
-    applyFilters();
+
+    return { upsertThread };
+  }
+
+  const activityRenderer = makeThreadRenderer(document.getElementById('timeline'), document.getElementById('timeline-empty'));
+  const triageRenderer = makeThreadRenderer(document.getElementById('triage-timeline'), document.getElementById('triage-timeline-empty'));
+
+  function isTriageRelevant(ev) {
+    const t = ev.thread_id || '';
+    return t.startsWith('triage-') || t.startsWith('spam-');
   }
 
   function loadActivityBackfill() {
     return fetch('/api/activity/recent?limit=150')
       .then(r => r.json())
-      .then(data => _debugDelay().then(() => data))
       .then(data => {
         // Backfill arrives oldest-first; feed in order so thread ordering
         // (most-recent-first) comes out the same as the live path would.
-        // live=false — this is history, not new activity, so it renders in
-        // place without the pop-in animation reserved for the live feed.
-        for (const ev of data.events) upsertThread(ev, false);
-        if (data.events.length === 0) {
+        // live=false — this is history, not new activity, so it renders
+        // without thread-enter's pop-in; it gets the flood cascade instead.
+        // Each event is already placed in its final DOM position by the
+        // time any animation delay elapses (prepend is synchronous), so
+        // the stagger index is reversed here — the newest thread (last in
+        // this oldest-first array, but topmost on screen) gets the
+        // smallest delay, so the cascade reads top-to-bottom like text.
+        // The Triage renderer only sees a filtered subset, so it gets its
+        // own independent stagger index based on that subset's own size —
+        // not the full list's — or its cascade would have huge gaps.
+        const events = data.events;
+        const n = events.length;
+        const tn = events.filter(isTriageRelevant).length;
+        let triageSeq = 0;
+        events.forEach((ev, i) => {
+          activityRenderer.upsertThread(ev, false, n - 1 - i);
+          if (isTriageRelevant(ev)) {
+            triageRenderer.upsertThread(ev, false, tn - 1 - triageSeq);
+            triageSeq++;
+          }
+        });
+        applyFilters();
+        if (n === 0) {
           const note = document.getElementById('timeline-empty');
           if (note) note.innerHTML = "No activity yet — it'll appear here as Icarus, the Councilor, and email triage do things.";
+        }
+        if (tn === 0) {
+          const note = document.getElementById('triage-timeline-empty');
+          if (note) note.innerHTML = "No triage activity yet.";
         }
       })
       .catch(() => {
         const note = document.getElementById('timeline-empty');
         if (note) note.innerHTML = "Couldn't reach Icarus.";
+        const tnote = document.getElementById('triage-timeline-empty');
+        if (tnote) tnote.innerHTML = "Couldn't reach Icarus.";
       });
   }
 
@@ -815,25 +1741,46 @@
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (msg) => {
-      try { upsertThread(JSON.parse(msg.data)); } catch {}
+      let ev;
+      try { ev = JSON.parse(msg.data); } catch { return; }
+      activityRenderer.upsertThread(ev);
+      applyFilters();
+      if (isTriageRelevant(ev)) triageRenderer.upsertThread(ev);
     };
   }
 
-  // ── Filters ───────────────────────────────────────────────────────
-  const chips = document.querySelectorAll('.chip');
-  let activeActor = 'all';
-  chips.forEach(chip => {
-    chip.addEventListener('click', () => {
-      activeActor = chip.dataset.actor;
-      chips.forEach(c => c.dataset.active = (c === chip) ? 'true' : 'false');
-      applyFilters();
+  // Shared wiring for a row of mutually-exclusive filter chips — the same
+  // "one active at a time" behavior Activity's actor filter and Triage's
+  // kind filter both need, parameterized over which dataset key holds the
+  // option value and what happens when the selection changes. `chipList`
+  // must already be scoped to its own tab — see the bug note below.
+  function wireChips(chipList, key, onChange) {
+    chipList.forEach(chip => {
+      chip.addEventListener('click', () => {
+        chipList.forEach(c => c.dataset.active = (c === chip) ? 'true' : 'false');
+        onChange(chip.dataset[key]);
+      });
     });
+  }
+
+  // ── Filters ───────────────────────────────────────────────────────
+  // Scoped to #view-activity — the Triage tab's own lifecycle timeline has
+  // no search/chips of its own and must never be reached into by these.
+  // (This selector used to be the unscoped `.chip`, which silently pulled
+  // in Triage's kind chips too — clicking one there would flip Activity's
+  // own `data-active` states in the background since both tabs' chips
+  // shared one NodeList. Scoping it here is what the comment above always
+  // claimed was already true.)
+  let activeActor = 'all';
+  wireChips(document.querySelectorAll('#view-activity .chip'), 'actor', v => {
+    activeActor = v;
+    applyFilters();
   });
   document.getElementById('search').addEventListener('input', applyFilters);
 
   function applyFilters() {
     const q = document.getElementById('search').value.trim().toLowerCase();
-    document.querySelectorAll('.thread').forEach(thread => {
+    document.querySelectorAll('#view-activity .thread').forEach(thread => {
       let visible = 0;
       thread.querySelectorAll('.row').forEach(row => {
         const matchesActor = activeActor === 'all' || row.dataset.actor === activeActor;
@@ -846,9 +1793,281 @@
     });
   }
 
+  // ── Triage ────────────────────────────────────────────────────────
+  // Review-queue cards for the Triage tab — needs-review inbox/spam items
+  // and confidently-actioned-but-still-overridable spam. Approve/Override
+  // both call POST /api/triage/{id}/review; Override expands an inline
+  // correction form first (same .collapse box-expand the Activity row
+  // detail toggle uses) so a feedback note can teach the retrieval loop.
+
+  const CATEGORY_OPTIONS = ["jobs", "bills", "shopping", "social", "newsletters", "important", "other"];
+  const VERDICT_OPTIONS = ["confirmed_junk", "possibly_legitimate", "uncertain"];
+
+  function triageMetaLine(item) {
+    const conf = item.confidence != null ? `${Math.round(item.confidence * 100)}% confidence` : 'no confidence score';
+    const via = (item.action_taken && item.action_taken.length) ? item.action_taken.join(', ') : 'no action taken';
+    return item.kind === 'spam'
+      ? `spam · ${item.verdict || 'unknown'} · ${conf} · ${via}`
+      : `inbox · ${item.category || '?'}/${item.urgency || '?'} · ${conf} · ${via}`;
+  }
+
+  function overrideFormHtml(item) {
+    const fields = item.kind === 'spam'
+      ? `<select class="corrected-verdict">
+           ${VERDICT_OPTIONS.map(v => `<option value="${v}"${v === item.verdict ? ' selected' : ''}>${v}</option>`).join('')}
+         </select>`
+      : `<select class="corrected-category">
+           ${CATEGORY_OPTIONS.map(c => `<option value="${c}"${c === item.category ? ' selected' : ''}>${c}</option>`).join('')}
+         </select>
+         <select class="corrected-urgency">
+           ${URGENCY_OPTIONS.map(u => `<option value="${u}"${u === item.urgency ? ' selected' : ''}>${u}</option>`).join('')}
+         </select>`;
+    return `
+      <div class="field-row">${fields}</div>
+      <div class="field-row"><input type="text" class="feedback-note" placeholder="why? (optional — helps future classifications)" /></div>
+      <div class="form-actions">
+        <button type="button" class="cancel-override">Cancel</button>
+        <button type="button" class="submit-override">Submit correction</button>
+      </div>`;
+  }
+
+  function triageItemHtml(item, idx, showApprove) {
+    const title = item.sensitive ? '[sensitive — subject/sender withheld]' : escapeHtml(item.subject || item.sender || item.entity_key || 'Untitled');
+    const subtitle = item.sensitive ? '' : escapeHtml(item.sender) + ' · ';
+    return `<div class="triage-item flood-item" style="--i:${idx}" data-id="${item.id}" data-kind="${item.kind}">
+      <div class="row-top">
+        <div class="stripe ${item.kind}"></div>
+        <div class="body">
+          <p class="title">${title}</p>
+          <p class="meta">${subtitle}${escapeHtml(triageMetaLine(item))}</p>
+        </div>
+        <div class="triage-actions">
+          ${showApprove ? `<button type="button" class="approve-btn" data-triage-id="${item.id}">Approve</button>` : ''}
+          <button type="button" class="override-btn" data-triage-id="${item.id}">Override</button>
+        </div>
+      </div>
+      <div class="collapse">
+        <div class="override-form" data-kind="${item.kind}">${overrideFormHtml(item)}</div>
+      </div>
+    </div>`;
+  }
+
+  function renderTriageQueue(list, containerId, showApprove) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    if (list.length === 0) {
+      showEmptyState(containerId, 'Nothing here.');
+      return;
+    }
+    el.innerHTML = list.map((item, idx) => triageItemHtml(item, idx, showApprove)).join('');
+  }
+
+  async function loadTriageQueue() {
+    let data;
+    try {
+      const resp = await fetch('/api/triage/queue');
+      data = await resp.json();
+    } catch (e) {
+      document.getElementById('triage-counts').textContent = "Couldn't reach Icarus.";
+      return;
+    }
+    document.getElementById('triage-counts').textContent =
+      `${data.counts.needs_review} needing review · ${data.counts.inbox} inbox · ${data.counts.spam} spam`;
+    renderTriageQueue(data.needs_review, 'triage-needs-review', true);
+    // showApprove=true here too — any classification is correctable, not
+    // just the ones the model itself flagged as uncertain. A confidently
+    // wrong call is exactly the case a review queue gated on confidence
+    // alone would never surface.
+    renderTriageQueue(data.recent, 'triage-recent', true);
+    applyTriageRecentFilter();
+  }
+
+  // Two segments (approved green, overridden red) rather than one bar, so
+  // the meter reflects reinforcement and correction both — a sender with a
+  // long, mixed history reads differently from one that's simply "80%
+  // wrong," which a single override-rate bar would have collapsed to the
+  // same number either way.
+  function senderRowHtml(s, idx) {
+    const total = s.total || 1;
+    const approvedPct = Math.round((s.approved / total) * 100);
+    const overriddenPct = Math.round((s.overridden / total) * 100);
+    return `<div class="sender-row flood-item" style="--i:${idx}">
+      <span class="sender-label" title="${escapeHtml(s.sender_domain)}">${escapeHtml(s.sender_domain)}</span>
+      <div class="meter-track">
+        <div class="meter-fill approved" style="width:${approvedPct}%"></div>
+        <div class="meter-fill overridden" style="width:${overriddenPct}%"></div>
+      </div>
+      <span class="sender-val">${s.approved}✓ ${s.overridden}✗ / ${s.total}</span>
+    </div>`;
+  }
+
+  async function loadTriageSenders() {
+    let data;
+    try {
+      const resp = await fetch('/api/triage/senders');
+      data = await resp.json();
+    } catch (e) {
+      // Unlike loadToday/loadTriageQueue, this used to fail silently —
+      // the panel just stayed blank forever with no indication anything
+      // was wrong. Same failure-text treatment as everywhere else.
+      const el = document.getElementById('triage-senders');
+      if (el) el.innerHTML = '<p class="empty-note">Couldn\'t reach Icarus.</p>';
+      return;
+    }
+    const el = document.getElementById('triage-senders');
+    if (!el) return;
+    if (!data.senders.length) {
+      el.innerHTML = '<p class="empty-note">No classifications yet.</p>';
+      return;
+    }
+    el.innerHTML = data.senders.map((s, i) => senderRowHtml(s, i)).join('');
+  }
+
+  // ── Recently classified: search + kind filter ───────────────────────
+  // Client-side over the already-fetched batch — same rationale as the
+  // Activity tab's own filters, and this list is capped at 100 anyway.
+  let triageKindFilter = 'all';
+  wireChips(document.querySelectorAll('#view-triage .chip'), 'kind', v => {
+    triageKindFilter = v;
+    applyTriageRecentFilter();
+  });
+  document.getElementById('triage-search').addEventListener('input', applyTriageRecentFilter);
+
+  function applyTriageRecentFilter() {
+    const q = document.getElementById('triage-search').value.trim().toLowerCase();
+    document.querySelectorAll('#triage-recent .triage-item').forEach(item => {
+      const matchesKind = triageKindFilter === 'all' || item.dataset.kind === triageKindFilter;
+      const matchesText = !q || item.textContent.toLowerCase().includes(q);
+      item.hidden = !(matchesKind && matchesText);
+    });
+  }
+
+  // Vanishes the empty sections' fallback note once nothing's left in them
+  // — mirrors the attention list's empty-state swap on the Today tab.
+  function refreshTriageEmptyStates() {
+    if (document.getElementById('triage-needs-review')?.querySelectorAll('.triage-item').length === 0) {
+      showEmptyState('triage-needs-review', 'Nothing needs review right now.');
+    }
+    if (document.getElementById('triage-recent')?.querySelectorAll('.triage-item').length === 0) {
+      showEmptyState('triage-recent', 'Nothing classified yet.');
+    }
+  }
+
+  // Recomputes the header line from whatever's actually still in the DOM
+  // — same "don't let a summary go stale after an action" fix already
+  // applied to the Today tab's headline after a dismiss.
+  function refreshTriageCounts() {
+    const remaining = document.querySelectorAll('#triage-needs-review .triage-item');
+    const inbox = [...remaining].filter(el => el.dataset.kind === 'inbox').length;
+    const spam = remaining.length - inbox;
+    document.getElementById('triage-counts').textContent =
+      `${remaining.length} needing review · ${inbox} inbox · ${spam} spam`;
+  }
+
+  // Registered on the shared click router at the bottom of this script —
+  // see handleDismissClick's comment.
+  async function handleTriageActionClick(e) {
+    const overrideBtn = e.target.closest('.override-btn');
+    const cancelBtn = e.target.closest('.cancel-override');
+    const approveBtn = e.target.closest('.approve-btn');
+    const submitBtn = e.target.closest('.submit-override');
+    if (!overrideBtn && !cancelBtn && !approveBtn && !submitBtn) return false;
+
+    if (overrideBtn) {
+      const collapse = overrideBtn.closest('.triage-item').querySelector('.collapse');
+      const expanding = !collapse.classList.contains('expanded');
+      collapse.classList.toggle('expanded', expanding);
+      overrideBtn.dataset.expanded = expanding ? 'true' : 'false';
+      return true;
+    }
+
+    if (cancelBtn) {
+      const item = cancelBtn.closest('.triage-item');
+      item.querySelector('.collapse').classList.remove('expanded');
+      const ob = item.querySelector('.override-btn');
+      if (ob) ob.dataset.expanded = 'false';
+      return true;
+    }
+
+    if (approveBtn) {
+      const id = Number(approveBtn.dataset.triageId);
+      const item = approveBtn.closest('.triage-item');
+      approveBtn.disabled = true;
+      try {
+        const resp = await fetch(`/api/triage/${id}/review`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'approve' }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      } catch (err) {
+        approveBtn.disabled = false;
+        showToast("Couldn't approve — try again.");
+        return true;
+      }
+      item.remove();
+      refreshTriageEmptyStates();
+      refreshTriageCounts();
+      loadTriageSenders();
+      showToast('Approved.');
+      return true;
+    }
+
+    // submitBtn
+    const item = submitBtn.closest('.triage-item');
+    const id = Number(item.dataset.id);
+    const form = item.querySelector('.override-form');
+    const kind = form.dataset.kind;
+    const body = { action: 'override', feedback_note: form.querySelector('.feedback-note')?.value.trim() || null };
+    if (kind === 'spam') {
+      body.corrected_verdict = form.querySelector('.corrected-verdict')?.value || null;
+    } else {
+      body.corrected_category = form.querySelector('.corrected-category')?.value || null;
+      body.corrected_urgency = form.querySelector('.corrected-urgency')?.value || null;
+    }
+    submitBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/triage/${id}/review`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        throw new Error(errBody.detail || `HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      submitBtn.disabled = false;
+      showToast(err.message || "Couldn't record correction — try again.");
+      return true;
+    }
+    item.remove();
+    refreshTriageEmptyStates();
+    refreshTriageCounts();
+    loadTriageSenders();
+    showToast('Correction recorded.');
+    return true;
+  }
+
+  // Single delegated click router for the whole document, replacing what
+  // used to be three separate document-level 'click' listeners (dismiss,
+  // expand-toggle, triage actions) each independently walking
+  // e.target.closest() on every click regardless of relevance. The handler
+  // functions themselves stay defined next to the section/state they
+  // actually operate on (see each one's own comment) — only the
+  // registration is consolidated. First match wins; each handler returns
+  // true iff it recognized the click at all (including a no-op double-click
+  // on a disabled button), so a click can only ever be claimed by one.
+  document.addEventListener('click', async (e) => {
+    if (await handleDismissClick(e)) return;
+    if (handleExpandToggleClick(e)) return;
+    await handleTriageActionClick(e);
+  });
+
   // ── Boot ──────────────────────────────────────────────────────────
   loadToday();
   loadActivityBackfill().then(connectActivityWs);
+  loadTriageQueue();
+  loadTriageSenders();
+  connectTelemetryWs();
 </script>
 </body>
 </html>

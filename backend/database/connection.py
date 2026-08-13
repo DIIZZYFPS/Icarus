@@ -73,6 +73,22 @@ async def init_db():
         # Create all regular tables bound to the Base metadata
         await conn.run_sync(Base.metadata.create_all)
 
+        # create_all only creates missing *tables* — it never alters an
+        # existing one, so a tracked_items table from before the dismiss
+        # feature existed won't pick up these columns on its own. Add them
+        # defensively; SQLite has no "ADD COLUMN IF NOT EXISTS" on the
+        # versions this ships against, so a duplicate-column error is the
+        # expected/ignored outcome on every run after the first.
+        for ddl in (
+            "ALTER TABLE tracked_items ADD COLUMN dismissed INTEGER DEFAULT 0",
+            "ALTER TABLE tracked_items ADD COLUMN dismissed_at VARCHAR",
+            "ALTER TABLE tracked_items ADD COLUMN message_id VARCHAR",
+        ):
+            try:
+                await conn.execute(text(ddl))
+            except Exception:
+                pass  # column already exists
+
         # ── memory_entries FTS5 ──────────────────────────────────────────
         await conn.execute(text(
             "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts "
@@ -134,6 +150,30 @@ async def init_db():
                 ))
             except Exception as e:
                 logger.warning(f"[db] Failed to create transcript_vec table: {e}")
+
+        # ── triage correction index (FTS5 + optional vec0) ──────────────
+        # Deliberately NOT external-content + trigger-synced like memory_fts/
+        # transcript_fts above: triage_classifications gets a row for every
+        # classified email, but only *reviewed* rows are useful correction
+        # examples — indexing all of them would bury real corrections in
+        # noise. So both the FTS and vec side are written explicitly from
+        # application code (triage_repo.record_review()), not DB triggers —
+        # the same explicit-insert style transcript_vec already uses just
+        # above (embedding can't happen inside a synchronous SQL trigger
+        # anyway), just applied to the FTS side too so both indexes are
+        # written from one call site.
+        await conn.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS triage_corrections_fts "
+            "USING fts5(correction_text)"
+        ))
+        if VEC_AVAILABLE:
+            try:
+                await conn.execute(text(
+                    f"CREATE VIRTUAL TABLE IF NOT EXISTS triage_corrections_vec "
+                    f"USING vec0(embedding float[{EMBEDDING_DIM}])"
+                ))
+            except Exception as e:
+                logger.warning(f"[db] Failed to create triage_corrections_vec table: {e}")
 
 
 async def get_db():

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Float, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timezone
 
@@ -83,11 +83,70 @@ class TrackedItem(Base):
     source = Column(String, nullable=False)                  # 'email_triage', 'calendar', 'agent', ...
     notified = Column(Integer, default=0)                    # 0/1 — was the operator notified about the *current* state
     notified_at = Column(String, nullable=True)
+    dismissed = Column(Integer, default=0)                   # 0/1 — operator marked this handled from the dashboard
+    dismissed_at = Column(String, nullable=True)
+    message_id = Column(String, nullable=True, index=True)   # originating Gmail message, if any — links back to a
+                                                               # TriageClassification row for the correction learning loop
     created_at = Column(String, nullable=False)
     updated_at = Column(String, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('platform', 'user_id', 'item_type', 'entity_key', name='uq_tracked_item_identity'),
+    )
+
+
+class TriageClassification(Base):
+    """The one durable, reviewable record for both inbox email triage
+    (worker_email_triage.py) and spam-folder review (spam_sweep.py)
+    decisions — kind='inbox'|'spam'. Written once per message, at the end
+    of the pipeline that classified it, after Gmail side effects are known
+    so action_taken reflects what actually happened.
+
+    Distinct from ActivityEvent: that's an append-only narrated log with no
+    mutable review state. This is what the dashboard's Triage tab and the
+    correction-retrieval loop (triage_repo.py) both read and write —
+    reviewing a row here is what teaches future classifications.
+
+    thread_id is deliberately NOT a column — it's always
+    f"{kind}-{message_id}", identical to the scheme worker_email_triage.py/
+    spam_sweep.py already use for activity_events.thread_id, so storing it
+    separately would just risk it drifting out of sync. Derive it instead.
+
+    Uniqueness is (kind, message_id) — a Redis stream redelivery or a
+    retried spam sweep pass must upsert in place, never duplicate.
+    """
+    __tablename__ = 'triage_classifications'
+
+    id = Column(Integer, primary_key=True)
+    kind = Column(String, nullable=False, index=True)         # 'inbox' | 'spam'
+    message_id = Column(String, nullable=False, index=True)   # Gmail message id
+    sender = Column(String, nullable=False)
+    sender_domain = Column(String, nullable=True, index=True) # parsed once from sender, for reliability rollups
+    subject = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+
+    category = Column(String, nullable=True)        # inbox only
+    urgency = Column(String, nullable=True)          # inbox only
+    action_needed = Column(Integer, default=0)       # 0/1, inbox only
+    confidence = Column(Float, nullable=True)        # both kinds once CLASSIFY_PROMPT carries it; spam always has it
+    verdict = Column(String, nullable=True)          # spam only: confirmed_junk/possibly_legitimate/uncertain
+    sensitive = Column(Integer, default=0)           # 0/1
+
+    action_taken = Column(Text, nullable=True)       # JSON list, e.g. ["archived","tracked","notified"]
+    needs_review = Column(Integer, default=0, index=True)   # 0/1 — surfaced in the dashboard's silent-by-default queue
+
+    reviewed = Column(Integer, default=0, index=True)       # 0/1
+    review_action = Column(String, nullable=True)           # 'approved' | 'overridden'
+    corrected_category = Column(String, nullable=True)
+    corrected_urgency = Column(String, nullable=True)
+    corrected_verdict = Column(String, nullable=True)
+    feedback_note = Column(Text, nullable=True)
+
+    created_at = Column(String, nullable=False, index=True)
+    reviewed_at = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('kind', 'message_id', name='uq_triage_classification_identity'),
     )
 
 
