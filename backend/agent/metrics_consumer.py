@@ -11,6 +11,11 @@ METRICS_SOURCE_LIST = "icarus:metrics:sidecar"
 LATEST_KEY = "icarus:metrics:latest"
 SUMMARY_LIST_KEY = "icarus:metrics:summary"
 MAX_SUMMARY_ITEMS = 300
+# Same pub/sub-behind-a-WebSocket shape as activity_repo.ACTIVITY_CHANNEL —
+# the dashboard's /ws/telemetry route just subscribes and forwards. Every
+# stored summary gets published here too, so the ticker can update live
+# instead of only ever reflecting whatever was true at page load.
+TELEMETRY_CHANNEL = "icarus:telemetry"
 
 
 def _to_float(value, default=0.0):
@@ -73,6 +78,7 @@ async def _store_summary(payload: dict, score: float, readiness: str):
     await redis.set(LATEST_KEY, summary_json)
     await redis.lpush(SUMMARY_LIST_KEY, summary_json)
     await redis.ltrim(SUMMARY_LIST_KEY, 0, MAX_SUMMARY_ITEMS - 1)
+    await redis.publish(TELEMETRY_CHANNEL, summary_json)
 
     logger.info(
         "[metrics] %s readiness=%s score=%.3f cpu=%.1f%% mem=%.0f/%.0fMB disk=%.1f%%",

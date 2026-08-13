@@ -41,10 +41,16 @@ async def upsert_item(
     urgency: str | None = None,
     payload: dict | None = None,
     source: str = "agent",
+    message_id: str | None = None,
 ) -> int:
     """Create or update a tracked item. A state change resets `notified` to 0
     — the operator was told about the *previous* state, not this one, so a
-    fresh state change should be eligible to notify again."""
+    fresh state change should be eligible to notify again.
+
+    message_id links this item back to the TriageClassification row that
+    created it (see triage_repo.py) — same "latest wins" treatment as
+    summary/urgency/due_at below, so a later email about the same item
+    re-points the link at whichever message most recently touched it."""
     now = _now_iso()
     payload_json = json.dumps(payload) if payload is not None else None
 
@@ -63,7 +69,7 @@ async def upsert_item(
             row = TrackedItem(
                 platform=platform, user_id=user_id, item_type=item_type, entity_key=entity_key,
                 state=state, summary=summary, next_action=next_action, due_at=due_at,
-                urgency=urgency, payload=payload_json, source=source,
+                urgency=urgency, payload=payload_json, source=source, message_id=message_id,
                 notified=0, notified_at=None, created_at=now, updated_at=now,
             )
             session.add(row)
@@ -80,10 +86,18 @@ async def upsert_item(
                 row.urgency = urgency
             if payload_json is not None:
                 row.payload = payload_json
+            if message_id is not None:
+                row.message_id = message_id
             row.updated_at = now
             if state_changed:
                 row.notified = 0
                 row.notified_at = None
+                # A state change is a new development on this item — an
+                # earlier dismissal was about the state as it stood then,
+                # not this one, so it shouldn't keep hiding it from the
+                # dashboard's attention list.
+                row.dismissed = 0
+                row.dismissed_at = None
 
         await session.commit()
         await session.refresh(row)
@@ -106,6 +120,45 @@ async def mark_notified(item_id: int) -> None:
         row.notified = 1
         row.notified_at = now
         await session.commit()
+
+
+async def set_dismissed(item_id: int, dismissed: bool) -> bool:
+    """Mark a tracked item handled/unhandled from the dashboard. Returns
+    False if the item doesn't exist so the route can 404 instead of
+    silently no-op'ing."""
+    now = _now_iso()
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(TrackedItem).where(TrackedItem.id == item_id))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.dismissed = 1 if dismissed else 0
+        row.dismissed_at = now if dismissed else None
+        await session.commit()
+    return True
+
+
+async def get_by_id(item_id: int) -> TrackedItem | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(TrackedItem).where(TrackedItem.id == item_id))
+        return result.scalar_one_or_none()
+
+
+async def set_urgency(item_id: int, urgency: str) -> bool:
+    """Adjust a tracked item's urgency from the dashboard — the "lower
+    importance / mark important" correction. Returns False if the item
+    doesn't exist so the route can 404 instead of silently no-op'ing.
+    Doesn't touch dismissed/notified state — an urgency correction and a
+    "handled" state are independent facts about the item."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(TrackedItem).where(TrackedItem.id == item_id))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.urgency = urgency
+        row.updated_at = _now_iso()
+        await session.commit()
+    return True
 
 
 async def list_items(

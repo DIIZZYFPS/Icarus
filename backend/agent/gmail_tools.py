@@ -278,6 +278,27 @@ async def gmail_trash_message(message_id: str) -> bool:
         return False
 
 
+async def gmail_untrash_message(message_id: str) -> bool:
+    """Restore a message out of Trash. Mirrors gmail_trash_message's shape
+    exactly. Used by the dashboard Triage tab's override action when the
+    operator disagrees with a spam_sweep 'confirmed_junk' trash decision —
+    spam_sweep.py's own module docstring says the sweep itself never
+    auto-restores anything (a separate confidence judgment with its own
+    failure mode); this is a different, operator-triggered, human-in-the-
+    loop path, not a contradiction of that restraint."""
+    service = get_gmail_service()
+    if not service:
+        return False
+    try:
+        await _run_sync(
+            lambda: service.users().messages().untrash(userId='me', id=message_id).execute()
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to untrash message {message_id}: {e}")
+        return False
+
+
 # ── Message parsing (shared by the triage worker and the spam sweep) ────────
 
 def extract_email_parts(message: dict) -> tuple[str, str, str, str]:

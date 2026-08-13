@@ -18,6 +18,14 @@ that Gmail's filter was right, and this only acts in two situations —
     (uncertain, or confirmed_junk below the bar) is left alone; Gmail's own
     30-day purge handles cleanup regardless.
 
+Every outcome here is also persisted to triage_classifications (see
+triage_repo.py) for the dashboard's Triage tab. "Never auto-restore" above
+is still true of this sweep's own autonomous behavior — but the Triage tab
+lets the *operator* override a trash decision, which calls
+gmail_untrash_message directly. That's a separate, human-in-the-loop path,
+not a contradiction: the restraint here is specifically about the sweep
+never second-guessing itself unprompted.
+
 Dedup is a Redis key per message ID with a TTL matched to Gmail's own
 30-day Spam/Trash retention — after that, the message doesn't exist to
 re-classify anyway, so the key can just expire instead of growing forever.
@@ -49,7 +57,7 @@ Respond with a JSON object ONLY — no extra text, no markdown fences. Fields:
 - "reason": one short sentence
 
 Default to "confirmed_junk" for anything with bulk-marketing patterns, phishing indicators, adult/scam content, or generic unsolicited offers — that is the overwhelming majority of real Spam content. Only choose "possibly_legitimate" if the email reads as clearly personal or addressed specifically to the recipient by name with real context (a named human sender, a specific job title/company, a genuine reply-like structure). If you are not confident either way, choose "uncertain" rather than guessing.
-
+{corrections_block}
 EMAIL:
 From: {sender}
 Subject: {subject}
@@ -72,10 +80,12 @@ async def _mark_seen(redis, message_id: str) -> None:
     await redis.set(_seen_key(message_id), "1", ex=SEEN_KEY_TTL)
 
 
-async def _classify(sender: str, subject: str, date: str, body: str) -> dict | None:
+async def _classify(sender: str, subject: str, date: str, body: str, corrections_block: str = "") -> dict | None:
     from backend.agent.llm_router import generate
 
-    prompt = SPAM_SWEEP_PROMPT.format(sender=sender, subject=subject, date=date, body=body[:2000])
+    prompt = SPAM_SWEEP_PROMPT.format(
+        sender=sender, subject=subject, date=date, body=body[:2000], corrections_block=corrections_block
+    )
     try:
         response = await generate(task_type="scoring", messages=[{"role": "user", "text": prompt}], max_tokens=256)
         cleaned = re.sub(r'^```(?:json)?\s*', '', response.strip())
@@ -153,7 +163,12 @@ async def _sweep_once():
             continue
 
         sender, subject, date, body = extract_email_parts(message)
-        result = await _classify(sender, subject, date, body)
+
+        from backend.agent.triage_repo import find_similar_corrections, format_corrections_for_prompt
+        corrections = await find_similar_corrections(sender=sender, subject=subject, kind="spam", limit=3)
+        corrections_block = format_corrections_for_prompt(corrections)
+
+        result = await _classify(sender, subject, date, body, corrections_block)
         await _mark_seen(redis, message_id)
 
         if result is None:
@@ -165,6 +180,21 @@ async def _sweep_once():
             if result["sensitive"] else f"\"{subject}\" from {sender}"
         )
 
+        # Blended with this sender's own reviewed track record — a domain
+        # the operator has repeatedly pulled back out of "confirmed junk"
+        # drifts below the trash bar even on a message the model itself
+        # called confident, so the *action* itself (not just the review
+        # flag) responds to a pattern of mistakes. See
+        # triage_repo.adjusted_confidence's docstring.
+        from backend.agent.triage_repo import adjusted_confidence
+        confidence = await adjusted_confidence(result["confidence"], sender, kind="spam")
+
+        # Anything the sweep didn't confidently trash is worth a look on the
+        # Triage tab — confidently-trashed items are still overridable
+        # there, just not in the "needs attention" queue by default.
+        needs_review = result["verdict"] != "confirmed_junk" or confidence < TRASH_CONFIDENCE
+        action_taken: list[str] = []
+
         if result["verdict"] == "possibly_legitimate":
             await _notify_possibly_legitimate(sender, subject, result["reason"])
             await publish_activity(
@@ -174,20 +204,38 @@ async def _sweep_once():
                 thread_id=thread_id, severity="warning",
             )
             logger.info(f"[spam_sweep] Possibly legitimate: {subject[:60]!r} from {sender} — {result['reason']}")
+            action_taken = ["notified"]
 
-        elif result["verdict"] == "confirmed_junk" and result["confidence"] >= TRASH_CONFIDENCE:
+        elif result["verdict"] == "confirmed_junk" and confidence >= TRASH_CONFIDENCE:
             trashed = await gmail_trash_message(message_id)
             await publish_activity(
                 actor="triage", event_type="spam_trashed" if trashed else "spam_trash_failed",
                 action="trashed confirmed junk" if trashed else "failed to trash confirmed junk",
-                detail=f"{safe_subject_line} — confidence={result['confidence']:.2f}",
+                detail=f"{safe_subject_line} — confidence={confidence:.2f}",
                 thread_id=thread_id,
             )
-            logger.info(f"[spam_sweep] Trashed ({result['confidence']:.2f} confidence): {subject[:60]!r}")
+            logger.info(f"[spam_sweep] Trashed ({confidence:.2f} adjusted confidence): {subject[:60]!r}")
+            # Only claim "trashed" if it actually succeeded — the Triage
+            # tab's override action decides whether to call Gmail's untrash
+            # based on this list, and a failed trash has nothing to restore.
+            action_taken = ["trashed"] if trashed else ["trash_failed"]
 
         # else: uncertain, or confirmed_junk below the confidence bar —
-        # deliberately no action and no activity event. Gmail's own 30-day
-        # purge handles it either way; nothing here is worth narrating.
+        # deliberately no Discord ping and no activity event, same as
+        # before. Gmail's own 30-day purge handles it either way; nothing
+        # here is worth narrating out loud. It's still persisted below
+        # though, so it's not silently lost — just quietly queued.
+
+        try:
+            from backend.agent.triage_repo import record_classification
+            await record_classification(
+                kind="spam", message_id=message_id, sender=sender, subject=subject,
+                verdict=result["verdict"], confidence=confidence,
+                sensitive=result["sensitive"], action_taken=action_taken,
+                needs_review=needs_review,
+            )
+        except Exception as e:
+            logger.error(f"[spam_sweep] Failed to record TriageClassification: {e}")
 
 
 async def run_spam_sweep():

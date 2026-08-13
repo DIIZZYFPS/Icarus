@@ -383,7 +383,7 @@ class EmailTriageWorker(WorkerBase):
             logger.warning(f"[triage] Could not resolve label '{label_name}'")
 
         # 5. Archive out of inbox
-        # await gmail_archive_message(message_id)  # TEMP: disabled until rework (archives all emails including actionable ones)
+        await gmail_archive_message(message_id)
 
         # 5b. Persist structured lifecycle state (jobs/bills only) — this is
         # what a future "what am I missing" digest reads, instead of trying
