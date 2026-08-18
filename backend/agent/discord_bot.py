@@ -28,8 +28,8 @@ class IcarusBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        # Intentionally disabled: operator-only DM mode.
-        self.allowed_channel_id = None
+        # Server-channel access is opt-in through the deployment environment.
+        self.allowed_channel_id = _to_int_or_none(DISCORD_ALLOWED_CHANNEL_ID)
 
     async def on_ready(self):
         logger.info(
