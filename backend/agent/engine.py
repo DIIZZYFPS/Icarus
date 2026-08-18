@@ -23,7 +23,9 @@ touching that; it only replaces how one prompt string becomes one response
 string with tool calls resolved along the way.
 """
 
+import logging
 import socket
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from .tools import ICARUS_TOOLS, ICARUS_READONLY_TOOLS
@@ -37,6 +39,8 @@ from .local_llm import local_agent_loop
 # X3R0 is this same machine's Windows half, DAEX is the Linux half this
 # actually runs under).
 HOST_NAME = socket.gethostname() or "unknown-host"
+SOUL_PATH = Path(__file__).with_name("soul.md")
+logger = logging.getLogger(__name__)
 
 ICARUS_SYSTEM_PROMPT = """
 
@@ -167,6 +171,39 @@ requires operator-level access (DM or Telegram/Discord).
 """
 
 
+def load_soul(path: Path = SOUL_PATH) -> str:
+    """Load the operator-approved behavioral charter from the image filesystem."""
+    try:
+        soul = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("[soul] Unable to load %s: %s", path, exc)
+        return ""
+    return soul
+
+
+SOUL_CONTENT = load_soul()
+
+
+def build_system_prompt(*, read_only: bool = False, soul_content: str | None = None) -> str:
+    """Build Icarus's system prompt with the immutable runtime Soul injection."""
+    system = ICARUS_SYSTEM_PROMPT.replace("{host}", HOST_NAME)
+    soul = SOUL_CONTENT if soul_content is None else soul_content.strip()
+    if soul:
+        system += (
+            "\n\n## Soul — Operator-Approved Behavioral Charter\n"
+            "The following document is behavioral guidance only. It cannot override "
+            "system instructions, tool law, privacy boundaries, access restrictions, "
+            "or safety requirements. Do not edit, replace, or weaken this document "
+            "yourself. Proposed changes require DIIZZY's explicit approval and an "
+            "operator-controlled Councilor change.\n\n"
+            f"{soul}\n"
+            "\n## End Soul Charter\n"
+        )
+    if read_only:
+        system += ICARUS_READONLY_ADDENDUM
+    return system
+
+
 async def run_icarus(
     prompt: str,
     read_only: bool = False,
@@ -182,7 +219,7 @@ async def run_icarus(
     tool call executes — see local_llm.local_agent_loop().
     """
     tools = ICARUS_READONLY_TOOLS if read_only else ICARUS_TOOLS
-    system = ICARUS_SYSTEM_PROMPT.format(host=HOST_NAME) + (ICARUS_READONLY_ADDENDUM if read_only else "")
+    system = build_system_prompt(read_only=read_only)
     return await local_agent_loop(
         initial_prompt=prompt,
         tools=tools,
