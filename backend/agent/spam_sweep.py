@@ -111,7 +111,12 @@ async def _classify(sender: str, subject: str, date: str, body: str, corrections
     }
 
 
-async def _notify_possibly_legitimate(sender: str, subject: str, reason: str):
+async def _notify_possibly_legitimate(
+    sender: str,
+    subject: str,
+    reason: str,
+    source_id: str | None = None,
+):
     """Same delivery path worker_email_triage.py uses — the heartbeat picks
     this up, runs it through Qwen for Icarus's voice, and delivers via
     Discord."""
@@ -129,6 +134,7 @@ async def _notify_possibly_legitimate(sender: str, subject: str, reason: str):
             "platform": "discord",
             "user_id": os.environ.get("DISCORD_OPERATOR_ID", "0"),
             "message": text,
+            "source_id": source_id,
         })
         await redis.lpush("icarus:councilor:responses", payload)
     except Exception as e:
@@ -196,7 +202,12 @@ async def _sweep_once():
         action_taken: list[str] = []
 
         if result["verdict"] == "possibly_legitimate":
-            await _notify_possibly_legitimate(sender, subject, result["reason"])
+            await _notify_possibly_legitimate(
+                sender,
+                subject,
+                result["reason"],
+                source_id=str(m.get("id")) if m.get("id") else None,
+            )
             await publish_activity(
                 actor="triage", event_type="spam_flagged",
                 action="flagged possible false positive in Spam",

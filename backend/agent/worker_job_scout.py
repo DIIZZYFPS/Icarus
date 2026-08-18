@@ -260,7 +260,7 @@ class JobScoutWorker(WorkerBase):
             source="job_scout",
         )
 
-    async def _notify_discord(self, match: dict, stub: dict):
+    async def _notify_discord(self, match: dict, stub: dict, source_id: str | None = None):
         """Push notification to the Councilor response queue for heartbeat
         delivery — same pattern as worker_email_triage._notify_discord."""
         from backend.database.redis_connection import get_redis_client
@@ -286,6 +286,7 @@ class JobScoutWorker(WorkerBase):
                 "platform": "discord",
                 "user_id": os.environ.get("DISCORD_OPERATOR_ID", "0"),
                 "message": "\n".join(lines),
+                "source_id": source_id,
             })
             await redis.lpush("icarus:councilor:responses", response_payload)
             logger.info(f"[job_scout] Queued notification for {match['company']} / {match['role']}")
@@ -334,7 +335,7 @@ class JobScoutWorker(WorkerBase):
         await self.redis.set(f"icarus:email_score:{task_id}", json.dumps(result), ex=86400)
 
         if match["match_score"] >= NOTIFY_MATCH_SCORE:
-            await self._notify_discord(match, stub)
+            await self._notify_discord(match, stub, source_id=task_id)
 
 
 if __name__ == "__main__":

@@ -93,6 +93,7 @@ async def store_entry(
     user_id: str,
     entry: str,
     visibility: str = "private",
+    conversation_id: str | None = None,
     category: str | None = None,
     importance: float | None = None,
     source: str = "agent",
@@ -110,6 +111,7 @@ async def store_entry(
         row = MemoryEntry(
             platform=platform,
             user_id=user_id,
+            conversation_id=conversation_id if visibility != "global" else None,
             category=resolved_category,
             visibility=visibility,
             entry=entry,
@@ -127,7 +129,7 @@ async def store_entry(
 
     # Fire-and-forget compaction check (does not block the caller)
     if visibility == "private":
-        asyncio.create_task(_maybe_compact(platform, user_id))
+        asyncio.create_task(_maybe_compact(platform, user_id, conversation_id))
 
     return row_id
 
@@ -138,6 +140,7 @@ async def retrieve_relevant(
     query: str,
     limit: int = 30,
     read_only: bool = False,
+    conversation_id: str | None = None,
 ) -> list[MemoryEntry]:
     """Return up to `limit` MemoryEntry rows relevant to the query.
 
@@ -155,8 +158,10 @@ async def retrieve_relevant(
             try:
                 if read_only:
                     scope_clause = "me.visibility = 'global'"
+                elif conversation_id is None:
+                    scope_clause = "(me.visibility = 'global' OR (me.platform = :platform AND me.user_id = :user_id AND me.conversation_id IS NULL))"
                 else:
-                    scope_clause = "(me.visibility = 'global' OR (me.platform = :platform AND me.user_id = :user_id))"
+                    scope_clause = "(me.visibility = 'global' OR (me.platform = :platform AND me.user_id = :user_id AND me.conversation_id = :conversation_id))"
 
                 rows = await session.execute(text(f"""
                     SELECT me.id, me.platform, me.user_id, me.category, me.visibility,
@@ -174,6 +179,7 @@ async def retrieve_relevant(
                     "query": fts_query,
                     "platform": platform,
                     "user_id": user_id,
+                    "conversation_id": conversation_id,
                     "over_fetch": limit * 3,
                 })
                 raw_rows = rows.fetchall()
@@ -214,10 +220,23 @@ async def retrieve_relevant(
             # ── Fallback: recency + importance ───────────────────────────────
             if read_only:
                 scope_filter = MemoryEntry.visibility == 'global'
+            elif conversation_id is None:
+                scope_filter = or_(
+                    MemoryEntry.visibility == 'global',
+                    and_(
+                        MemoryEntry.platform == platform,
+                        MemoryEntry.user_id == user_id,
+                        MemoryEntry.conversation_id.is_(None),
+                    )
+                )
             else:
                 scope_filter = or_(
                     MemoryEntry.visibility == 'global',
-                    and_(MemoryEntry.platform == platform, MemoryEntry.user_id == user_id)
+                    and_(
+                        MemoryEntry.platform == platform,
+                        MemoryEntry.user_id == user_id,
+                        MemoryEntry.conversation_id == conversation_id,
+                    )
                 )
 
             result = await session.execute(
@@ -242,8 +261,13 @@ async def retrieve_relevant(
     return entries
 
 
-async def should_compact(platform: str, user_id: str, threshold: int = COMPACTION_THRESHOLD) -> bool:
-    """Return True if live non-summary entry count for this user exceeds threshold."""
+async def should_compact(
+    platform: str,
+    user_id: str,
+    threshold: int = COMPACTION_THRESHOLD,
+    conversation_id: str | None = None,
+) -> bool:
+    """Return True if live non-summary entry count for this scope exceeds threshold."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(func.count())
@@ -253,6 +277,9 @@ async def should_compact(platform: str, user_id: str, threshold: int = COMPACTIO
                 MemoryEntry.user_id == user_id,
                 MemoryEntry.compacted == 0,
                 MemoryEntry.category != 'summary',
+                MemoryEntry.conversation_id == conversation_id
+                if conversation_id is not None
+                else MemoryEntry.conversation_id.is_(None),
             )
         )
         count = result.scalar_one()
@@ -264,6 +291,7 @@ async def compact_user_memory(
     user_id: str,
     keep_recent: int = COMPACTION_KEEP_RECENT,
     summarize_fn: Callable[[str], Awaitable[str]] | None = None,
+    conversation_id: str | None = None,
 ) -> int:
     """Compact older memory entries by summarizing them via LLM.
 
@@ -285,6 +313,9 @@ async def compact_user_memory(
                 MemoryEntry.user_id == user_id,
                 MemoryEntry.compacted == 0,
                 MemoryEntry.category != 'summary',
+                MemoryEntry.conversation_id == conversation_id
+                if conversation_id is not None
+                else MemoryEntry.conversation_id.is_(None),
             )
             .order_by(MemoryEntry.importance.asc(), MemoryEntry.created_at.asc())
         )
@@ -323,6 +354,7 @@ async def compact_user_memory(
             summary_row = MemoryEntry(
                 platform=platform,
                 user_id=user_id,
+                conversation_id=conversation_id,
                 category='summary',
                 visibility=chunk_visibility,
                 entry=summary_text,
@@ -456,11 +488,15 @@ async def _default_summarize(text_block: str) -> str:
     )
 
 
-async def _maybe_compact(platform: str, user_id: str) -> None:
+async def _maybe_compact(
+    platform: str,
+    user_id: str,
+    conversation_id: str | None = None,
+) -> None:
     """Fire-and-forget wrapper: run compaction if threshold is exceeded."""
     try:
-        if await should_compact(platform, user_id):
-            count = await compact_user_memory(platform, user_id)
+        if await should_compact(platform, user_id, conversation_id=conversation_id):
+            count = await compact_user_memory(platform, user_id, conversation_id=conversation_id)
             if count:
                 logger.info(f"[memory_repo] Auto-compacted {count} entries for {platform}:{user_id}")
     except Exception as e:

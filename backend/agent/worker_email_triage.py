@@ -291,7 +291,13 @@ class EmailTriageWorker(WorkerBase):
             if (d := self._parse_date_loose(e.due_at)) and d.date() == target.date()
         ]
 
-    async def _notify_discord(self, classification: dict, sender: str, subject: str):
+    async def _notify_discord(
+        self,
+        classification: dict,
+        sender: str,
+        subject: str,
+        source_id: str | None = None,
+    ):
         """Push notification to the Councilor response queue for heartbeat delivery.
 
         Uses the same pattern as Councilor consultations — the heartbeat in icarus-api
@@ -343,6 +349,7 @@ class EmailTriageWorker(WorkerBase):
                 "platform": "discord",
                 "user_id": os.environ.get("DISCORD_OPERATOR_ID", "0"),
                 "message": classification_text,
+                "source_id": source_id,
             })
             await redis.lpush("icarus:councilor:responses", response_payload)
             logger.info(f"[triage] Queued notification for '{subject[:50]}'")
@@ -463,7 +470,7 @@ class EmailTriageWorker(WorkerBase):
         # 6. Notify if actionable
         notified = urgency in ("high", "critical") or action_needed
         if notified:
-            await self._notify_discord(classification, sender, subject)
+            await self._notify_discord(classification, sender, subject, source_id=message_id)
             await publish_activity(
                 actor="system", event_type="notified",
                 action="notified operator", detail=subject,

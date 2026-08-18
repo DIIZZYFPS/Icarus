@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 current_platform = ContextVar("current_platform", default="global")
 current_user_id = ContextVar("current_user_id", default="system")
 current_chat_id = ContextVar("current_chat_id", default="0")
+current_conversation_id = ContextVar("current_conversation_id", default="legacy")
+current_access_mode = ContextVar("current_access_mode", default="private")
 
 # Legacy path for migration detection
 MEMORY_LOG_PATH = "/workspace/memory/memory.log"
@@ -158,12 +160,22 @@ async def recall(query: str, limit: int = 8) -> str:
     """
     platform = current_platform.get()
     user_id = current_user_id.get()
-    logger.info(f"[tool:recall] platform={platform!r} user_id={user_id!r} query={query!r}")
+    conversation_id = current_conversation_id.get()
+    logger.info(
+        f"[tool:recall] platform={platform!r} user_id={user_id!r} "
+        f"conversation={conversation_id!r} query={query!r}"
+    )
 
     try:
         from backend.agent.transcript_repo import search
 
-        results = await search(platform=platform, user_id=user_id, query=query, limit=limit)
+        results = await search(
+            platform=platform,
+            user_id=user_id,
+            query=query,
+            limit=limit,
+            conversation_id=conversation_id,
+        )
         if not results:
             return "No matching messages found in the transcript."
 
@@ -188,6 +200,9 @@ async def list_tracked_items(item_type: str = "") -> str:
             "job_opportunity" (scored, not yet applied to), or "bill". Leave
             empty to list everything.
     """
+    if current_access_mode.get() == "server":
+        return "Private tracked items are unavailable in server channels."
+
     platform = current_platform.get()
     user_id = current_user_id.get()
     logger.info(f"[tool:list_tracked_items] platform={platform!r} user_id={user_id!r} item_type={item_type!r}")
@@ -225,6 +240,7 @@ def append_memory(entry: str, visibility: str = "private") -> str:
 
     platform = current_platform.get()
     user_id = current_user_id.get()
+    conversation_id = current_conversation_id.get()
 
     # Normalize visibility: if entry contains [GLOBAL] tag, treat as public
     if visibility == "public" or re.search(r"\[GLOBAL\]", entry, re.IGNORECASE):
@@ -245,6 +261,7 @@ def append_memory(entry: str, visibility: str = "private") -> str:
                     platform=platform,
                     user_id=user_id,
                     entry=entry,
+                    conversation_id=conversation_id,
                     visibility=resolved_visibility,
                     source="agent",
                 )
@@ -258,6 +275,7 @@ def append_memory(entry: str, visibility: str = "private") -> str:
                     platform=platform,
                     user_id=user_id,
                     entry=entry,
+                    conversation_id=conversation_id,
                     visibility=resolved_visibility,
                     source="agent",
                 )
