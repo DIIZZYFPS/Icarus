@@ -35,17 +35,31 @@ async def _poll_mailbox():
         chat_id = data.get("chat_id")
 
         # ── Email notification — run through Qwen for Icarus's voice ──────
-        if resp_type == "email_notification":
+        if resp_type in ("email_notification", "job_notification", "job_scout_notification"):
             import os
-            from backend.agent.discord_bot import relay_email_notification_to_operator
             user_id = data.get("user_id") or os.environ.get("DISCORD_OPERATOR_ID", "0")
 
             try:
-                # Use the ADK-based relay logic for Icarus's voice
-                await relay_email_notification_to_operator(message, str(user_id))
-                logger.info(f"[heartbeat] Email notification delivered via ADK relay")
+                from backend.agent.discord_bot import (
+                    relay_email_notification_to_operator,
+                    relay_job_notification_to_operator,
+                )
+                source_id = data.get("source_id") or data.get("message_id") or data.get("task_id")
+                if resp_type == "email_notification":
+                    await relay_email_notification_to_operator(
+                        message,
+                        str(user_id),
+                        source_id=str(source_id) if source_id else None,
+                    )
+                else:
+                    await relay_job_notification_to_operator(
+                        message,
+                        str(user_id),
+                        source_id=str(source_id) if source_id else None,
+                    )
+                logger.info(f"[heartbeat] {resp_type} delivered via notification relay")
             except Exception as e:
-                logger.error(f"[heartbeat] Email notification delivery failed: {e}")
+                logger.error(f"[heartbeat] {resp_type} delivery failed: {e}")
             continue
 
         if resp_type == "escalation":
@@ -76,7 +90,7 @@ async def _poll_mailbox():
 
         # Lazy imports to avoid circular import at module load time
         from backend.routes.webhook import push_telegram_message
-        from backend.agent.discord_bot import relay_councilor_mailbox_to_operator, push_discord_message
+        from backend.agent.discord_bot import relay_councilor_mailbox_to_operator
 
         if platform == "telegram" and chat_id:
             try:
@@ -89,13 +103,12 @@ async def _poll_mailbox():
                 discord_operator_id = os.environ.get("DISCORD_OPERATOR_ID", "0")
                 user_id = data.get("user_id") or discord_operator_id
 
-                if resp_type == "consultation":
-                    await relay_councilor_mailbox_to_operator(
-                        prompt, str(user_id),
-                        chat_id=str(chat_id) if chat_id else None,
-                    )
-                else:
-                    await push_discord_message(None, prompt, user_id=str(user_id))
+                await relay_councilor_mailbox_to_operator(
+                    prompt,
+                    str(user_id),
+                    chat_id=str(chat_id) if chat_id else None,
+                    source_id=str(data.get("timestamp")) if data.get("timestamp") else None,
+                )
             except Exception as e:
                 logger.error(f"[heartbeat] Discord delivery failed: {e}")
         else:

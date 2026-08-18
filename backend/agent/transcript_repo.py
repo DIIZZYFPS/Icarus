@@ -48,7 +48,13 @@ def _tokenize_query(query: str) -> str:
     return " ".join(result)
 
 
-async def log_message(platform: str, user_id: str, role: str, content: str) -> int:
+async def log_message(
+    platform: str,
+    user_id: str,
+    role: str,
+    content: str,
+    conversation_id: str | None = None,
+) -> int:
     """Append one message to the permanent transcript. Called unconditionally
     from processor.py for every turn — every notification, every hydration
     prompt, every reply, whether or not any agent thought to log it via
@@ -59,7 +65,14 @@ async def log_message(platform: str, user_id: str, role: str, content: str) -> i
 
     now = _now_iso()
     async with AsyncSessionLocal() as session:
-        row = Transcript(platform=platform, user_id=user_id, role=role, content=content, created_at=now)
+        row = Transcript(
+            platform=platform,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            created_at=now,
+        )
         session.add(row)
         await session.commit()
         await session.refresh(row)
@@ -81,27 +94,47 @@ async def log_message(platform: str, user_id: str, role: str, content: str) -> i
     return row_id
 
 
-async def _fts_search(platform: str, user_id: str, fts_query: str, limit: int) -> list[int]:
+async def _fts_search(
+    platform: str,
+    user_id: str,
+    conversation_id: str | None,
+    fts_query: str,
+    limit: int,
+) -> list[int]:
     if not fts_query:
         return []
     async with AsyncSessionLocal() as session:
         try:
-            rows = await session.execute(text("""
+            scope_clause = "t.conversation_id IS NULL" if conversation_id is None else "t.conversation_id = :conversation_id"
+            rows = await session.execute(text(f"""
                 SELECT t.id
                 FROM transcript_fts
                 JOIN transcript t ON t.id = transcript_fts.rowid
                 WHERE transcript_fts MATCH :query
                   AND t.platform = :platform AND t.user_id = :user_id
+                  AND {scope_clause}
                 ORDER BY bm25(transcript_fts)
                 LIMIT :limit
-            """), {"query": fts_query, "platform": platform, "user_id": user_id, "limit": limit})
+            """), {
+                "query": fts_query,
+                "platform": platform,
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "limit": limit,
+            })
             return [r[0] for r in rows.fetchall()]
         except Exception as e:
             logger.warning(f"[transcript] FTS search failed: {e}")
             return []
 
 
-async def _semantic_search(platform: str, user_id: str, query: str, limit: int) -> list[int]:
+async def _semantic_search(
+    platform: str,
+    user_id: str,
+    conversation_id: str | None,
+    query: str,
+    limit: int,
+) -> list[int]:
     if not db.VEC_AVAILABLE:
         return []
     vector = await local_embed(query)
@@ -111,17 +144,20 @@ async def _semantic_search(platform: str, user_id: str, query: str, limit: int) 
         try:
             # vec0 doesn't know about platform/user_id — over-fetch the KNN
             # pass and scope on our side.
-            rows = await session.execute(text("""
+            scope_clause = "t.conversation_id IS NULL" if conversation_id is None else "t.conversation_id = :conversation_id"
+            rows = await session.execute(text(f"""
                 SELECT t.id
                 FROM transcript_vec v
                 JOIN transcript t ON t.id = v.rowid
                 WHERE v.embedding MATCH :query AND k = :over_fetch
                   AND t.platform = :platform AND t.user_id = :user_id
+                  AND {scope_clause}
                 ORDER BY v.distance
                 LIMIT :limit
             """), {
                 "query": json.dumps(vector), "over_fetch": limit * 4,
-                "platform": platform, "user_id": user_id, "limit": limit,
+                "platform": platform, "user_id": user_id,
+                "conversation_id": conversation_id, "limit": limit,
             })
             return [r[0] for r in rows.fetchall()]
         except Exception as e:
@@ -140,7 +176,13 @@ def _reciprocal_rank_fusion(*ranked_lists: list[int], k: int = RRF_K) -> list[in
     return [doc_id for doc_id, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)]
 
 
-async def search(platform: str, user_id: str, query: str, limit: int = 10) -> list[Transcript]:
+async def search(
+    platform: str,
+    user_id: str,
+    query: str,
+    limit: int = 10,
+    conversation_id: str | None = None,
+) -> list[Transcript]:
     """Search the full transcript for messages relevant to `query`, scoped to
     one platform/user. Combines FTS5 keyword search with semantic similarity
     (when available) via reciprocal rank fusion. This is an on-demand lookup
@@ -148,15 +190,24 @@ async def search(platform: str, user_id: str, query: str, limit: int = 10) -> li
     fts_query = _tokenize_query(query)
     over_fetch = max(limit * 3, 10)
 
-    fts_ids = await _fts_search(platform, user_id, fts_query, over_fetch)
-    semantic_ids = await _semantic_search(platform, user_id, query, over_fetch)
+    fts_ids = await _fts_search(platform, user_id, conversation_id, fts_query, over_fetch)
+    semantic_ids = await _semantic_search(platform, user_id, conversation_id, query, over_fetch)
 
     merged_ids = _reciprocal_rank_fusion(fts_ids, semantic_ids)[:limit]
     if not merged_ids:
         return []
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Transcript).where(Transcript.id.in_(merged_ids)))
+        scope_filter = (
+            Transcript.conversation_id.is_(None)
+            if conversation_id is None
+            else Transcript.conversation_id == conversation_id
+        )
+        result = await session.execute(
+            select(Transcript)
+            .where(Transcript.id.in_(merged_ids))
+            .where(scope_filter)
+        )
         rows = {r.id: r for r in result.scalars().all()}
 
     return [rows[i] for i in merged_ids if i in rows]

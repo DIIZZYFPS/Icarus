@@ -2,6 +2,8 @@ import os
 import logging
 import discord
 from discord.ext import commands
+from backend.agent.conversation_context import build_conversation_id
+from backend.agent.notification_repo import bind_delivery, record_notification
 from backend.agent.processor import process_message
 from backend.utils import split_message
 
@@ -20,6 +22,7 @@ def _to_int_or_none(value) -> int | None:
     except (TypeError, ValueError):
         return None
 
+
 class IcarusBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -29,7 +32,10 @@ class IcarusBot(commands.Bot):
         self.allowed_channel_id = None
 
     async def on_ready(self):
-        logger.info(f"Logged in as {self.user} (ID: {self.user.id}), (allowed_channel_id={self.allowed_channel_id})")
+        logger.info(
+            f"Logged in as {self.user} (ID: {self.user.id}), "
+            f"(allowed_channel_id={self.allowed_channel_id})"
+        )
         logger.info("------")
 
     async def on_message(self, message):
@@ -51,6 +57,16 @@ class IcarusBot(commands.Bot):
             if self.user not in message.mentions:
                 return
             read_only = True
+
+        conversation_id = build_conversation_id(
+            platform="discord",
+            user_id=str(message.author.id),
+            chat_id=str(message.channel.id),
+            guild_id=str(message.guild.id) if message.guild is not None else None,
+        )
+        reply_to_message_id = None
+        if message.reference is not None and message.reference.message_id is not None:
+            reply_to_message_id = str(message.reference.message_id)
 
         async with message.channel.typing():
             # Lazily created on the first tool call, then edited per call —
@@ -76,9 +92,14 @@ class IcarusBot(commands.Bot):
                 # Prefix with author identity so the model knows who is speaking
                 content = f"[User:{message.author.name} (id: {message.author.id})]: {content}"
                 response = await process_message(
-                    "discord", str(message.author.id), content,
-                    chat_id=str(message.channel.id), read_only=read_only,
+                    "discord",
+                    str(message.author.id),
+                    content,
+                    chat_id=str(message.channel.id),
+                    read_only=read_only,
                     on_activity=on_activity,
+                    conversation_id=conversation_id,
+                    reply_to_message_id=reply_to_message_id,
                 )
                 if response:
                     chunks = split_message(response)
@@ -94,7 +115,9 @@ class IcarusBot(commands.Bot):
                     except Exception as e:
                         logger.warning(f"Failed to delete status message: {e}")
 
+
 bot = IcarusBot()
+
 
 async def run_discord_bot():
     if not DISCORD_BOT_TOKEN:
@@ -107,15 +130,9 @@ async def run_discord_bot():
     except Exception as e:
         logger.error(f"Failed to start Discord bot: {e}")
 
-# split_message imported from backend.utils
 
-async def push_discord_message(channel_id: int | None, text: str, user_id: str | None = None):
-    """Send a message to a Discord channel, or DM a user as fallback."""
-    if not bot.is_ready():
-        logger.warning("Discord bot not ready — cannot push message")
-        return
-
-    target_channel = None
+async def _resolve_discord_target(channel_id: int | None, user_id: str | None):
+    """Resolve a channel directly, or create the operator's DM channel."""
     numeric_channel_id = _to_int_or_none(channel_id)
     if numeric_channel_id is not None:
         target_channel = bot.get_channel(numeric_channel_id)
@@ -124,19 +141,15 @@ async def push_discord_message(channel_id: int | None, text: str, user_id: str |
                 target_channel = await bot.fetch_channel(numeric_channel_id)
             except Exception as e:
                 logger.warning(f"Failed to fetch Discord channel {numeric_channel_id}: {e}")
-
-    if target_channel:
-        chunks = split_message(text)
-        for chunk in chunks:
-            await target_channel.send(chunk)
-        return
+        if target_channel is not None:
+            return target_channel
 
     numeric_user_id = _to_int_or_none(user_id)
     if numeric_user_id is None:
         logger.error(
             f"Discord destination unresolved (channel_id={channel_id}, user_id={user_id})"
         )
-        return
+        return None
 
     user = bot.get_user(numeric_user_id)
     if user is None:
@@ -144,83 +157,179 @@ async def push_discord_message(channel_id: int | None, text: str, user_id: str |
             user = await bot.fetch_user(numeric_user_id)
         except Exception as e:
             logger.error(f"Discord user {numeric_user_id} not found for DM fallback: {e}")
-            return
+            return None
 
     try:
-        dm = user.dm_channel or await user.create_dm()
-        chunks = split_message(text)
-        for chunk in chunks:
-            await dm.send(chunk)
-        logger.info(f"Delivered Discord mailbox notification via DM to user {numeric_user_id}")
+        return user.dm_channel or await user.create_dm()
     except Exception as e:
-        logger.error(f"Failed to deliver Discord DM to user {numeric_user_id}: {e}")
+        logger.error(f"Failed to create Discord DM for user {numeric_user_id}: {e}")
+        return None
+
+
+async def push_discord_message(
+    channel_id: int | None,
+    text: str,
+    user_id: str | None = None,
+    reply_to_message_id: str | None = None,
+) -> list[str]:
+    """Send a message and return the sent Discord message IDs."""
+    if not bot.is_ready():
+        logger.warning("Discord bot not ready — cannot push message")
+        return []
+
+    target_channel = await _resolve_discord_target(channel_id, user_id)
+    if target_channel is None:
+        return []
+
+    sent_ids = []
+    for index, chunk in enumerate(split_message(text)):
+        send_kwargs = {}
+        if index == 0 and reply_to_message_id is not None:
+            send_kwargs["reference"] = discord.MessageReference(
+                message_id=int(reply_to_message_id),
+                channel_id=target_channel.id,
+            )
+        sent = await target_channel.send(chunk, **send_kwargs)
+        sent_ids.append(str(sent.id))
+    return sent_ids
+
 
 async def handle_discord_payload(channel_id: int, user_id: str, text: str):
     """Process Discord message and send response."""
-    response_text = await process_message("discord", user_id, text, chat_id=str(channel_id))
+    conversation_id = build_conversation_id(
+        platform="discord",
+        user_id=str(user_id),
+        chat_id=str(channel_id),
+    )
+    response_text = await process_message(
+        "discord",
+        user_id,
+        text,
+        chat_id=str(channel_id),
+        conversation_id=conversation_id,
+    )
     await push_discord_message(channel_id, response_text, user_id=user_id)
+
+
+async def _relay_notification(
+    *,
+    notification_type: str,
+    operator_user_id: str,
+    chat_id: str | None,
+    source_id: str | None,
+    hydration_prompt: str,
+    fallback_text: str,
+):
+    normalized_user_id = str(operator_user_id).strip() if operator_user_id is not None else ""
+    if not normalized_user_id:
+        logger.error("Cannot relay notification: missing Discord operator user ID")
+        return
+
+    target = await _resolve_discord_target(None, normalized_user_id)
+    if target is None:
+        return
+
+    dm_channel_id = str(target.id)
+    effective_chat_id = str(chat_id) if chat_id is not None else dm_channel_id
+    conversation_id = build_conversation_id(
+        platform="discord",
+        user_id=normalized_user_id,
+        chat_id=dm_channel_id,
+    )
+    response_text = await process_message(
+        "discord",
+        normalized_user_id,
+        hydration_prompt,
+        chat_id=effective_chat_id,
+        conversation_id=conversation_id,
+        read_only=False,
+        skip_history=True,
+    )
+
+    final_text = response_text if response_text else fallback_text
+    delivery_ids = await push_discord_message(int(dm_channel_id), final_text)
+    if not delivery_ids:
+        logger.warning(
+            "Notification response was not delivered; pending context was not recorded "
+            "for user=%s type=%s",
+            normalized_user_id,
+            notification_type,
+        )
+        return
+
+    notification_id = await record_notification(
+        conversation_id=conversation_id,
+        notification_type=notification_type,
+        source_id=source_id,
+        content=final_text,
+    )
+    await bind_delivery(notification_id, delivery_ids)
+    logger.info(
+        "Delivered %s notification to Discord DM user=%s notification_id=%s",
+        notification_type,
+        normalized_user_id,
+        notification_id,
+    )
 
 
 async def relay_councilor_mailbox_to_operator(
     mailbox_text: str,
     operator_user_id: str,
     chat_id: str | None = None,
+    source_id: str | None = None,
 ):
     """Hydrate the agent with Councilor mailbox output, then DM the operator."""
-    normalized_user_id = str(operator_user_id).strip() if operator_user_id is not None else ""
-    if not normalized_user_id:
-        logger.error("Cannot relay Councilor mailbox output: missing Discord operator user ID")
-        return
-
-    effective_chat_id = str(chat_id) if chat_id is not None else "0"
-    hydration_prompt = (
-        "[System: Councilor mailbox response received. Analyze it, decide what to do next, "
-        "and provide the operator with a concise actionable update.]\n\n"
-        f"{mailbox_text}"
+    await _relay_notification(
+        notification_type="councilor",
+        operator_user_id=operator_user_id,
+        chat_id=chat_id,
+        source_id=source_id,
+        hydration_prompt=(
+            "[System: Councilor mailbox response received. Analyze it, decide what to do next, "
+            "and provide the operator with a concise actionable update.]\n\n"
+            f"{mailbox_text}"
+        ),
+        fallback_text=mailbox_text,
     )
-
-    response_text = await process_message(
-        "discord",
-        normalized_user_id,
-        hydration_prompt,
-        chat_id=effective_chat_id,
-        read_only=False,
-        skip_history=True,
-    )
-
-    # If the model returns an empty string, still deliver the original mailbox payload.
-    final_text = response_text if response_text else mailbox_text
-    await push_discord_message(None, final_text, user_id=normalized_user_id)
 
 
 async def relay_email_notification_to_operator(
     email_text: str,
     operator_user_id: str,
     chat_id: str | None = None,
+    source_id: str | None = None,
 ):
     """Hydrate the agent with email triage output, then DM the operator."""
-    normalized_user_id = str(operator_user_id).strip() if operator_user_id is not None else ""
-    if not normalized_user_id:
-        logger.error("Cannot relay email notification: missing Discord operator user ID")
-        return
-
-    effective_chat_id = str(chat_id) if chat_id is not None else "0"
-    hydration_prompt = (
-        "[System: New email classified. Analyze the classification, decide if any immediate action is needed, "
-        "and provide the operator with a concise actionable update in your voice.]\n\n"
-        f"{email_text}"
+    await _relay_notification(
+        notification_type="email",
+        operator_user_id=operator_user_id,
+        chat_id=chat_id,
+        source_id=source_id,
+        hydration_prompt=(
+            "[System: New email classified. Analyze the classification, decide if any immediate action is needed, "
+            "and provide the operator with a concise actionable update in your voice.]\n\n"
+            f"{email_text}"
+        ),
+        fallback_text=f"📧 **Email Alert:**\n{email_text}",
     )
 
-    from backend.agent.processor import process_message
-    response_text = await process_message(
-        "discord",
-        normalized_user_id,
-        hydration_prompt,
-        chat_id=effective_chat_id,
-        read_only=False,
-        skip_history=True,
-    )
 
-    # If the model returns an empty string, still deliver the original classification.
-    final_text = response_text if response_text else f"📧 **Email Alert:**\n{email_text}"
-    await push_discord_message(None, final_text, user_id=normalized_user_id)
+async def relay_job_notification_to_operator(
+    job_text: str,
+    operator_user_id: str,
+    chat_id: str | None = None,
+    source_id: str | None = None,
+):
+    """Hydrate the agent with a scored job opportunity, then DM the operator."""
+    await _relay_notification(
+        notification_type="job",
+        operator_user_id=operator_user_id,
+        chat_id=chat_id,
+        source_id=source_id,
+        hydration_prompt=(
+            "[System: A new job opportunity was scored. Analyze the opportunity, explain why it matters, "
+            "and provide the operator with a concise actionable update in your voice.]\n\n"
+            f"{job_text}"
+        ),
+        fallback_text=f"💼 **Job Opportunity:**\n{job_text}",
+    )

@@ -24,6 +24,11 @@ def check_mailbox() -> str:
     to check immediately without waiting for the next cycle.
     Returns a summary of pending results, or confirms the mailbox is empty."""
     import asyncio
+    from backend.agent.tools import current_access_mode
+
+    if current_access_mode.get() == "server":
+        return "The private Councilor mailbox is unavailable in server channels."
+
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():

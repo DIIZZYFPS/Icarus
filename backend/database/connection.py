@@ -83,6 +83,8 @@ async def init_db():
             "ALTER TABLE tracked_items ADD COLUMN dismissed INTEGER DEFAULT 0",
             "ALTER TABLE tracked_items ADD COLUMN dismissed_at VARCHAR",
             "ALTER TABLE tracked_items ADD COLUMN message_id VARCHAR",
+            "ALTER TABLE transcript ADD COLUMN conversation_id VARCHAR",
+            "ALTER TABLE memory_entries ADD COLUMN conversation_id VARCHAR",
         ):
             try:
                 await conn.execute(text(ddl))

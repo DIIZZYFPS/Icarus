@@ -49,6 +49,7 @@ class Transcript(Base):
     id = Column(Integer, primary_key=True)
     platform = Column(String, nullable=False, index=True)
     user_id = Column(String, nullable=False, index=True)
+    conversation_id = Column(String, nullable=True, index=True)
     role = Column(String, nullable=False)  # 'user' or 'assistant'
     content = Column(Text, nullable=False)
     created_at = Column(String, nullable=False, index=True)  # ISO 8601 timestamp
@@ -186,6 +187,7 @@ class MemoryEntry(Base):
     id = Column(Integer, primary_key=True)
     platform = Column(String, nullable=False, index=True)
     user_id = Column(String, nullable=False, index=True)
+    conversation_id = Column(String, nullable=True, index=True)
     category = Column(String, nullable=True)
     visibility = Column(String, default="private")  # 'private' or 'global'
     entry = Column(Text, nullable=False)
