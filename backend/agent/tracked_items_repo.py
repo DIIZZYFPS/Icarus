@@ -144,6 +144,29 @@ async def get_by_id(item_id: int) -> TrackedItem | None:
         return result.scalar_one_or_none()
 
 
+async def get_by_identity(
+    platform: str, user_id: str, item_type: str, entity_key: str,
+) -> TrackedItem | None:
+    """Look up a single row by the same (platform, user_id, item_type,
+    entity_key) tuple upsert_item() dedups on — but read-only, and callable
+    with a *different* item_type than the one you're about to write. This is
+    what lets worker_email_triage.py check "is there already a scored
+    job_opportunity for this company+role" before deciding whether to
+    upsert_item(item_type="job_application", ...) — which would never find
+    it, since upsert_item's own lookup is scoped to the item_type you pass
+    it — or promote_to_application() the existing row instead."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(TrackedItem).where(
+                TrackedItem.platform == platform,
+                TrackedItem.user_id == user_id,
+                TrackedItem.item_type == item_type,
+                TrackedItem.entity_key == entity_key,
+            )
+        )
+        return result.scalar_one_or_none()
+
+
 async def set_urgency(item_id: int, urgency: str) -> bool:
     """Adjust a tracked item's urgency from the dashboard — the "lower
     importance / mark important" correction. Returns False if the item
@@ -158,6 +181,81 @@ async def set_urgency(item_id: int, urgency: str) -> bool:
         row.urgency = urgency
         row.updated_at = _now_iso()
         await session.commit()
+    return True
+
+
+async def promote_to_application(
+    item_id: int,
+    state: str = "applied",
+    summary: str | None = None,
+    due_at: str | None = None,
+    urgency: str | None = None,
+    payload: dict | None = None,
+    message_id: str | None = None,
+) -> bool:
+    """Flip a scored-but-not-applied-to item (item_type="job_opportunity",
+    worker_job_scout.py) into a real application (item_type="job_application",
+    worker_email_triage.py's territory) in place — same row, same entity_key,
+    not a new one. The optional fields are "latest wins" overrides, same
+    semantics as upsert_item()'s — pass them when triage is the caller (a
+    real confirmation email has a summary/state/due_at worth recording), omit
+    them when the dashboard's "Mark applied" button is the caller (nothing
+    new to say beyond the state change itself).
+
+    Callers: the dashboard's "Mark applied" button calls this directly by
+    item_id when the operator confirms manually. worker_email_triage.py calls
+    it when an inbound application-update email's (company, role) matches an
+    *existing* job_opportunity row — found via get_by_identity(), NOT via
+    upsert_item(), because upsert_item's own dedup lookup is scoped to the
+    item_type you pass it and item_type="job_application" will never match an
+    existing item_type="job_opportunity" row, no matter how identical the
+    entity_key is. That asymmetry is exactly why this function exists instead
+    of leaving it to upsert_item to "just work" — it doesn't, across types.
+
+    Returns False if the item doesn't exist or isn't currently a
+    job_opportunity, so the route/caller can 404/fall back instead of
+    silently no-op'ing."""
+    now = _now_iso()
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(TrackedItem).where(TrackedItem.id == item_id))
+        row = result.scalar_one_or_none()
+        if row is None or row.item_type != "job_opportunity":
+            return False
+        row.item_type = "job_application"
+        row.state = state
+        if summary is not None:
+            row.summary = summary
+        if due_at is not None:
+            row.due_at = due_at
+        if urgency is not None:
+            row.urgency = urgency
+        if payload is not None:
+            # MERGE, not replace — unlike upsert_item's payload overwrite
+            # (safe there: same item_type before and after, so it's always
+            # "the same kind of data, newer version"), a promotion combines
+            # two DIFFERENT kinds of data: the opportunity's match_score/
+            # tailoring_suggestions/link (still valuable after promotion —
+            # arguably more so, it's "why I applied") and the application
+            # email's company/role/status. A bare replace here silently
+            # deletes the scouting data the operator was just looking at.
+            # Confirmed live: an earlier version of this function replaced
+            # instead of merged and the job link vanished on promotion.
+            existing_payload = {}
+            if row.payload:
+                try:
+                    existing_payload = json.loads(row.payload)
+                except Exception:
+                    existing_payload = {}
+            row.payload = json.dumps({**existing_payload, **payload})
+        if message_id is not None:
+            row.message_id = message_id
+        row.notified = 0
+        row.notified_at = None
+        row.dismissed = 0
+        row.dismissed_at = None
+        row.updated_at = now
+        await session.commit()
+    logger.info(f"[tracked_items] promoted job_opportunity id={item_id} -> job_application (state={state})")
     return True
 
 

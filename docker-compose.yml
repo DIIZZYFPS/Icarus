@@ -63,6 +63,30 @@ services:
     depends_on:
       - redis
 
+  job_scout:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: icarus-worker # Shared image with api / email_triage
+    command: python -m backend.agent.worker_job_scout
+    restart: unless-stopped
+    network_mode: host # see icarus-api — same bridge-to-host firewall issue
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://127.0.0.1:6379/0
+      # Job-match scoring routes here, same as everything else — see
+      # LOCAL_LLM_URL on icarus-api.
+      - LOCAL_LLM_URL=http://127.0.0.1:8080/v1
+    volumes:
+      - ./backend:/app/backend:ro # Read-only source code mount for L1 restriction
+      - ./workspace/memory:/workspace/memory
+      # project_corpus.py's flagship-project resume fallback reads
+      # resume.md from here; GITHUB_TOKEN (for the corpus's actual GitHub
+      # reads) arrives via env_file above, no explicit line needed.
+      - ./workspace/projects:/workspace/projects
+    depends_on:
+      - redis
+
 networks:
   icarus-net:
     driver: bridge

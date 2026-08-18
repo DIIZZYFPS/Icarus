@@ -5,6 +5,7 @@ from backend.database.redis_connection import get_redis_client
 logger = logging.getLogger(__name__)
 
 EMAIL_TRIAGE_STREAM = "tasks:email_triage"
+JOB_SCOUT_STREAM = "tasks:job_scout"
 _STREAM_ALIASES = {
     "tasks:email_triage":  EMAIL_TRIAGE_STREAM,
     "tasks:email_priority": EMAIL_TRIAGE_STREAM,   # legacy alias
@@ -12,7 +13,14 @@ _STREAM_ALIASES = {
     "email_triage":         EMAIL_TRIAGE_STREAM,
     "email priority":       EMAIL_TRIAGE_STREAM,
     "emails":               EMAIL_TRIAGE_STREAM,
+    "tasks:job_scout":      JOB_SCOUT_STREAM,
+    "job_scout":            JOB_SCOUT_STREAM,
+    "job scout":            JOB_SCOUT_STREAM,
 }
+
+# Every stream an actual worker consumes from — the only "not non-standard"
+# targets. Add a new entry here alongside a new worker's own stream_name.
+_KNOWN_STREAMS = {EMAIL_TRIAGE_STREAM, JOB_SCOUT_STREAM}
 
 
 def _normalize_stream(stream: str) -> str:
@@ -27,11 +35,11 @@ def _normalize_stream(stream: str) -> str:
     normalized = _STREAM_ALIASES.get(raw.lower(), raw)
     if normalized != raw:
         logger.info("Normalizing worker stream '%s' -> '%s'", raw, normalized)
-    elif normalized != EMAIL_TRIAGE_STREAM:
+    elif normalized not in _KNOWN_STREAMS:
         logger.warning(
-            "Dispatching to non-standard stream '%s'. Worker listens on '%s'.",
+            "Dispatching to non-standard stream '%s'. Known streams: %s.",
             normalized,
-            EMAIL_TRIAGE_STREAM,
+            ", ".join(sorted(_KNOWN_STREAMS)),
         )
     return normalized
 

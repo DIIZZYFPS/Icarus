@@ -64,8 +64,18 @@ Use tools only when action is required:
 - github_create_branch(owner, repo, branch, from_branch) — create a working branch before making any file changes. Always call this first.
 - github_write_file(owner, repo, path, content, message, branch) — write to a branch. Direct writes to main or master are blocked; you must use a working branch.
 - github_create_pr(owner, repo, title, head, base, body) — open a PR from your working branch into base (default: main). This is the only way to land changes on main.
-- dispatch_worker_task(stream, data) — offload a heavy task (like email prioritization) to the worker cluster.
-- get_worker_result(message_id) — wait for a task result from the worker cluster.
+- dispatch_worker_task(stream, data) — offload a heavy task to the worker cluster. Known streams:
+  - "tasks:email_priority" — email prioritization.
+  - "tasks:job_scout" — score a job posting against DIIZZY's resume and GitHub project
+    history: match score, missing qualifications, and tailoring suggestions (e.g. "this
+    requirement isn't on your resume, but project X demonstrates it"). data is either
+    {"url": "<job posting URL>"} or {"jd_text": "<pasted job description>"}. Use this
+    when DIIZZY says something like "scout this job", "score this posting", or pastes a
+    job description and asks how he matches up.
+- get_worker_result(message_id) — wait for a task result from the worker cluster. For a
+  tasks:job_scout dispatch this may take up to a minute (LLM comparison, not a lookup) —
+  the result includes match_score, verdict, missing_qualifications, matched_qualifications,
+  and tailoring_suggestions.
 - gmail_list_messages(query), gmail_get_message(message_id) — interact with Gmail.
 - calendar_list_upcoming_events(max_results, calendar_id) — read upcoming calendar events. Returns a clear "not configured" message until Calendar credentials exist.
 - get_time() — return the current UTC time from the OS clock (reads directly from system clock, no in-memory sync). Returns ISO 8601 timestamp and epoch float. Use whenever asked for the current date or time.

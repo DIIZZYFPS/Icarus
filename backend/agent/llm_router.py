@@ -68,8 +68,14 @@ async def generate(
     if tier == "cloud":
         return await _cloud_generate(task_type, messages, system_instruction, max_tokens)
     # Scoring (structured extraction, e.g. email triage) doesn't benefit from
-    # reasoning and pays for it in latency/tokens — keep thinking on elsewhere.
-    enable_thinking = task_type != "scoring"
+    # reasoning and pays for it in latency/tokens — keep thinking on elsewhere,
+    # EXCEPT job_match: originally left thinking on for its analytical
+    # compare-against-resume task, but live-tested against this deployment's
+    # actual local model and reasoning alone burned 70-100+s of wall time on
+    # trivial prompts (real job_match prompts starved max_tokens entirely,
+    # returning empty content) — reasoning quality isn't worth eating the
+    # whole 120s budget before the model ever emits an answer.
+    enable_thinking = task_type not in ("scoring", "job_match")
     return await local_generate(
         messages, system_instruction=system_instruction, max_tokens=max_tokens,
         enable_thinking=enable_thinking,

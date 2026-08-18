@@ -83,7 +83,7 @@ async def today_snapshot():
     attention = [
         _serialize_tracked_item(i)
         for i in all_items
-        if i.item_type in ("job_application", "bill") and not i.dismissed
+        if i.item_type in ("job_application", "bill", "job_opportunity") and not i.dismissed
     ]
     calendar = [
         _serialize_tracked_item(i)
@@ -117,6 +117,24 @@ async def today_snapshot():
     }
 
 
+@router.get("/api/jobs")
+async def jobs_sheet():
+    """Full job pipeline — every job_application and job_opportunity row,
+    dismissed or not (unlike /api/today's attention list, which is
+    outstanding-only). Sorting/filtering happens client-side against this
+    one payload rather than round-tripping per column click."""
+    from backend.agent.tracked_items_repo import list_items
+
+    platform, user_id = DASHBOARD_PLATFORM, _operator_user_id()
+    all_items = await list_items(platform=platform, user_id=user_id)
+    items = [
+        _serialize_tracked_item(i)
+        for i in all_items
+        if i.item_type in ("job_application", "job_opportunity")
+    ]
+    return {"count": len(items), "items": items}
+
+
 @router.post("/api/tracked-items/{item_id}/dismiss")
 async def dismiss_tracked_item(item_id: int):
     from backend.agent.tracked_items_repo import set_dismissed
@@ -133,6 +151,19 @@ async def undismiss_tracked_item(item_id: int):
     if not ok:
         raise HTTPException(status_code=404, detail="Tracked item not found")
     return {"status": "ok", "id": item_id, "dismissed": False}
+
+
+@router.post("/api/tracked-items/{item_id}/promote")
+async def promote_tracked_item(item_id: int):
+    """Operator confirms they actually applied to a scored opportunity —
+    flips it from job_opportunity to job_application in place. See
+    tracked_items_repo.promote_to_application()'s docstring for why this
+    reuses the same row instead of creating a new one."""
+    from backend.agent.tracked_items_repo import promote_to_application
+    ok = await promote_to_application(item_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="job_opportunity not found")
+    return {"status": "ok", "id": item_id, "item_type": "job_application"}
 
 
 class UrgencyAdjustRequest(BaseModel):
@@ -192,6 +223,7 @@ def _serialize_tracked_item(item) -> dict:
         "payload": payload,
         "source": item.source,
         "updated_at": item.updated_at,
+        "dismissed": bool(item.dismissed),
     }
 
 

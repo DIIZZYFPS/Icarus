@@ -28,9 +28,18 @@ The JSON must contain exactly these fields:
   a scam/phishing lure, or otherwise inappropriate to display verbatim in a log or
   dashboard. This is independent of category — a piece of spam can be "other" and
   "sensitive": true at the same time.
+- "job_kind": only meaningful when "category" is "jobs" — one of "application_update" or
+  "digest". "application_update" means this email concerns the recipient's OWN specific
+  candidacy for one role — an application confirmation, OA, interview invite, rejection,
+  or offer. "digest" means a jobs-alert/newsletter email listing postings the recipient
+  might apply to, with no personal application status attached to any of them (e.g.
+  LinkedIn/Handshake/Simplify job-alert emails) — this is true even if the digest happens
+  to list only a single job. null for any other category.
 - "details": an object with extracted info, or null if not applicable:
-  - For jobs: {{"company": "...", "status": "...", "proposed_datetime": "..." or null}}
-    (status e.g. "interview invite", "rejection", "offer", "OA sent", "application received".
+  - For jobs: {{"company": "...", "role": "...", "status": "...", "proposed_datetime": "..." or null}}
+    (role: the job title/position, as stated or best inferred. status e.g. "interview
+    invite", "rejection", "offer", "OA sent", "application received" — for a "digest"
+    job_kind, status can be null since there's no single status.
     proposed_datetime: if the email proposes or confirms a specific interview date/time,
     resolve it to ISO 8601 — "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" — using the email's own
     Date header above to resolve relative phrases like "next Tuesday at 2pm". null if no
@@ -144,6 +153,19 @@ class EmailTriageWorker(WorkerBase):
         except (TypeError, ValueError):
             confidence = 0.0
 
+        # Only meaningful for category=="jobs". Default to "application_update" on a
+        # missing/invalid value rather than "digest" — this fails toward the *old*
+        # behavior (every jobs email tracked as an application), not a new one. The
+        # alternative default risks silently dropping a real interview invite if the
+        # model omits the field; an untracked digest is the lesser failure. Revisit
+        # once real review-queue volume shows how often the model actually omits this.
+        job_kind = classification.get("job_kind")
+        if cat == "jobs":
+            if job_kind not in ("application_update", "digest"):
+                job_kind = "application_update"
+        else:
+            job_kind = None
+
         return {
             "category": cat,
             "urgency": urg,
@@ -152,6 +174,7 @@ class EmailTriageWorker(WorkerBase):
             "sensitive": bool(classification.get("sensitive", False)),
             "details": details,
             "confidence": confidence,
+            "job_kind": job_kind,
         }
 
     def _normalize_key(self, text: str) -> str:
@@ -168,8 +191,17 @@ class EmailTriageWorker(WorkerBase):
 
         due_at = None
         if category == "jobs":
+            # Digests aren't about the recipient's own application — nothing here has
+            # a "current state" worth tracking, and upserting one would either create
+            # noise rows or (worse) stomp a real application's row if the entity_key
+            # happened to collide. See job_kind's docstring in CLASSIFY_PROMPT.
+            if classification.get("job_kind") == "digest":
+                return None
             company = details.get("company") or sender
-            entity_key = self._normalize_key(company)
+            role = details.get("role") or "unknown-role"
+            # Keyed on company+role, not company alone — two different roles at the
+            # same company must not collide onto one tracked_items row.
+            entity_key = self._normalize_key(f"{company}-{role}")
             state = details.get("status") or "unknown"
             due_at = details.get("proposed_datetime") or None
         elif category == "bills":
@@ -185,7 +217,33 @@ class EmailTriageWorker(WorkerBase):
         else:
             return None
 
-        from backend.agent.tracked_items_repo import upsert_item
+        from backend.agent.tracked_items_repo import upsert_item, get_by_identity, promote_to_application
+
+        # A real application-update email about a company+role job_scout
+        # already scored should land on THAT row, not spawn a second one.
+        # upsert_item's own dedup can't do this — its lookup is scoped to
+        # the item_type you pass it, so item_type="job_application" never
+        # matches an existing item_type="job_opportunity" row no matter how
+        # identical the entity_key is. Check explicitly, promote if found.
+        if category == "jobs":
+            platform, user_id = "discord", os.environ.get("DISCORD_OPERATOR_ID", "0")
+            existing_opportunity = await get_by_identity(
+                platform=platform, user_id=user_id,
+                item_type="job_opportunity", entity_key=entity_key,
+            )
+            if existing_opportunity is not None:
+                promoted = await promote_to_application(
+                    existing_opportunity.id, state=state,
+                    summary=classification.get("summary"),
+                    due_at=due_at, urgency=classification.get("urgency"),
+                    payload=details or None, message_id=message_id,
+                )
+                if promoted:
+                    return existing_opportunity.id
+                # Fell through (e.g. it stopped being a job_opportunity
+                # between the check and now) — fall back to a normal upsert
+                # below rather than silently dropping this classification.
+
         return await upsert_item(
             platform="discord",
             user_id=os.environ.get("DISCORD_OPERATOR_ID", "0"),
@@ -346,6 +404,7 @@ class EmailTriageWorker(WorkerBase):
                 "sensitive": True,
                 "details": None,
                 "confidence": None,
+                "job_kind": None,
             }
 
         category = classification["category"]

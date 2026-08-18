@@ -242,7 +242,135 @@
   .attn-item .stripe { align-self: stretch; border-radius: 2px; }
   .attn-item .stripe.bill { background: var(--warning); }
   .attn-item .stripe.job_application { background: var(--councilor); }
+  .attn-item .stripe.job_opportunity { background: var(--success); }
   .attn-item .stripe.default { background: var(--icarus); }
+
+  .attn-item .match-score {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.02em;
+    color: var(--success); margin-top: 2px;
+  }
+
+  .attn-item .promote-btn {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.02em;
+    background: none; border: 1px solid var(--hairline); color: var(--text-muted);
+    padding: 4px 10px; border-radius: var(--radius); cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .attn-item .promote-btn:hover { color: var(--success); border-color: var(--success); }
+
+  /* ── Jobs sheet ─────────────────────────────────────────────────── */
+  .jobs-dismissed-toggle {
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-muted);
+    letter-spacing: 0.02em; cursor: pointer; margin-left: auto;
+  }
+  .jobs-dismissed-toggle input { accent-color: var(--icarus); cursor: pointer; }
+
+  .jobs-table-wrap {
+    /* table-layout: fixed below + explicit <col> widths means the table
+       commits to the viewport's width instead of growing with its widest
+       cell — overflow-x stays only as a narrow-viewport safety net, not the
+       normal path. */
+    overflow-x: auto; border: 1px solid var(--hairline-soft); border-radius: var(--radius);
+    margin-top: 20px;
+  }
+  .jobs-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
+  .jobs-table thead { background: var(--hairline-soft); position: sticky; top: 0; }
+  .jobs-table th {
+    text-align: left; padding: 10px 12px; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint);
+    cursor: pointer; user-select: none; border-bottom: 1px solid var(--hairline);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .jobs-table th:hover { color: var(--text-muted); }
+  .jobs-table th.sorted::after { content: attr(data-arrow); margin-left: 5px; color: var(--icarus); }
+  .jobs-table td {
+    padding: 9px 12px; border-bottom: 1px solid var(--hairline-soft);
+    color: var(--text-muted); overflow-wrap: break-word;
+  }
+  .jobs-table tbody tr:hover { background: var(--surface); }
+  .jobs-table tbody tr:last-child td { border-bottom: none; }
+  .jobs-table td.company { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .jobs-table td.role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .jobs-table td.source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .jobs-table td.nowrap { white-space: nowrap; }
+  .jobs-table a.job-link { color: var(--icarus); text-decoration: none; }
+  .jobs-table a.job-link:hover { text-decoration: underline; }
+
+  /* Column widths — table-layout: fixed makes these authoritative, so every
+     column needs one or it falls back to unpredictable even division. Sums
+     to 100% across the non-fixed columns; expand-col takes a flat 32px. */
+  .jobs-table col.col-expand { width: 32px; }
+  .jobs-table col.col-company { width: 13%; }
+  .jobs-table col.col-role { width: 22%; }
+  .jobs-table col.col-type { width: 8%; }
+  .jobs-table col.col-stage { width: 10%; }
+  .jobs-table col.col-match { width: 7%; }
+  .jobs-table col.col-location { width: 12%; }
+  .jobs-table col.col-salary { width: 8%; }
+  .jobs-table col.col-source { width: 12%; }
+  .jobs-table col.col-updated { width: 8%; }
+
+  .jobs-pagination {
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    margin-top: 14px; font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+  }
+  .jobs-pagination button {
+    background: none; border: 1px solid var(--hairline); color: var(--text-muted);
+    padding: 5px 12px; border-radius: var(--radius); cursor: pointer;
+    font-family: var(--mono); font-size: 12px; transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .jobs-pagination button:hover:not(:disabled) { color: var(--icarus); border-color: var(--icarus); }
+  .jobs-pagination button:disabled { opacity: 0.35; cursor: default; }
+  .jobs-pagination[hidden] { display: none; }
+
+  .attn-show-more {
+    display: block; width: 100%; margin-top: 10px; padding: 10px;
+    background: none; border: 1px dashed var(--hairline); border-radius: var(--radius);
+    color: var(--text-muted); font-family: var(--mono); font-size: 12px; letter-spacing: 0.02em;
+    cursor: pointer; text-align: center; transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .attn-show-more:hover { color: var(--icarus); border-color: var(--icarus); }
+
+  .jobs-type-pill, .jobs-stage-pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.02em;
+  }
+  .jobs-type-pill.job_application { background: color-mix(in srgb, var(--councilor) 18%, transparent); color: var(--councilor); }
+  .jobs-type-pill.job_opportunity { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
+  .jobs-stage-pill { background: var(--hairline-soft); color: var(--text-muted); }
+
+  .jobs-match-score { font-family: var(--mono); }
+  .jobs-match-score.strong { color: var(--success); }
+  .jobs-match-score.partial { color: var(--warning); }
+  .jobs-match-score.weak { color: var(--text-faint); }
+
+  .jobs-table th.jobs-expand-col { cursor: default; width: 28px; padding-left: 12px; padding-right: 0; }
+  .jobs-table tr.jobs-row { cursor: pointer; }
+  .jobs-expand-toggle {
+    background: none; border: none; color: var(--text-faint); cursor: pointer;
+    font-size: 11px; padding: 2px 6px; line-height: 1; transition: transform 0.15s ease, color 0.15s ease;
+  }
+  .jobs-expand-toggle:hover { color: var(--icarus); }
+  tr.jobs-row.expanded .jobs-expand-toggle { transform: rotate(90deg); color: var(--icarus); }
+
+  .jobs-detail-row td {
+    background: var(--void); padding: 16px 18px 20px 42px; white-space: normal;
+    border-bottom: 1px solid var(--hairline-soft);
+  }
+  .jobs-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+  .jobs-detail-section .eyebrow {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-faint); margin: 0 0 6px;
+  }
+  .jobs-detail-section ul { margin: 0; padding-left: 18px; }
+  .jobs-detail-section li { margin-bottom: 5px; font-size: 13px; line-height: 1.45; }
+  .jobs-detail-section .none { color: var(--text-faint); font-style: italic; font-size: 13px; }
+  .jobs-detail-section.missing li { color: var(--warning); }
+  .jobs-detail-section.matched li { color: var(--text-muted); }
+  .jobs-detail-section.matched .evidence { display: block; color: var(--text-faint); font-size: 12px; margin-top: 1px; }
+  .jobs-detail-section.tailoring li { color: var(--success); }
+  .jobs-detail-summary { font-family: var(--serif); font-size: 14px; color: var(--text); margin: 0 0 14px; grid-column: 1 / -1; }
 
   .attn-item .body .title { font-family: var(--serif); font-size: 15.5px; margin: 0 0 3px; }
   .attn-item .body .meta {
@@ -735,6 +863,7 @@
       <button class="active" data-view="today">Today</button>
       <button data-view="activity">Activity</button>
       <button data-view="triage">Triage</button>
+      <button data-view="jobs">Jobs</button>
     </nav>
   </header>
 
@@ -828,6 +957,62 @@
         <p class="empty-note" id="triage-timeline-empty">Loading…</p>
       </div>
     </section>
+  </main>
+
+  <!-- ─────────────────────── JOBS ─────────────────────── -->
+  <main class="view" id="view-jobs">
+    <div class="activity-head">
+      <h1><span id="jobs-count">Loading job pipeline…</span></h1>
+      <div class="filters">
+        <input class="search" id="jobs-search" placeholder="search company or role…" />
+        <button class="chip" data-jobtype="all" data-active="true">All</button>
+        <button class="chip" data-jobtype="job_opportunity">Opportunities</button>
+        <button class="chip" data-jobtype="job_application">Applications</button>
+        <label class="jobs-dismissed-toggle">
+          <input type="checkbox" id="jobs-hide-dismissed" checked />
+          Hide dismissed
+        </label>
+      </div>
+    </div>
+
+    <div class="jobs-table-wrap">
+      <table class="jobs-table" id="jobs-table">
+        <colgroup>
+          <col class="col-expand" />
+          <col class="col-company" />
+          <col class="col-role" />
+          <col class="col-type" />
+          <col class="col-stage" />
+          <col class="col-match" />
+          <col class="col-location" />
+          <col class="col-salary" />
+          <col class="col-source" />
+          <col class="col-updated" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th class="jobs-expand-col"></th>
+            <th data-sort="company">Company</th>
+            <th data-sort="role">Role</th>
+            <th data-sort="item_type">Type</th>
+            <th data-sort="state">Stage</th>
+            <th data-sort="match_score">Match</th>
+            <th data-sort="location">Location</th>
+            <th data-sort="salary">Salary</th>
+            <th data-sort="source">Source</th>
+            <th data-sort="updated_at">Updated</th>
+          </tr>
+        </thead>
+        <tbody id="jobs-tbody"></tbody>
+      </table>
+      <p class="empty-note" id="jobs-empty" style="display:none;">No job pipeline items yet.</p>
+    </div>
+
+    <div class="jobs-pagination" id="jobs-pagination">
+      <button type="button" id="jobs-page-prev">‹ Prev</button>
+      <span id="jobs-page-label">Page 1 of 1</span>
+      <button type="button" id="jobs-page-next">Next ›</button>
+    </div>
   </main>
 </div>
 
@@ -958,6 +1143,7 @@
       `${attnCount} item${attnCount === 1 ? '' : 's'} tracked for attention, <span class="hl">${dispatchCalCount}</span> upcoming ` +
       `calendar event${dispatchCalCount === 1 ? '' : 's'} synced. ${escapeHtml(dispatchCouncilorNote)}`;
     document.getElementById('attention-count').textContent = `Needs your attention · ${attnCount}`;
+    refreshAttnShowMoreButton();
 
     // Re-trigger the wipe reveal every time the headline text actually
     // changes (fresh load, or the count shifting after a dismiss) — the
@@ -1005,15 +1191,31 @@
   // splice one item out and re-render without a round trip to /api/today.
   let attentionItems = [];
 
+  // With job_scout feeding this list continuously, "everything" can now run
+  // to 80+ rows — folded behind a "Show N more" rather than the page just
+  // growing downward forever. A click reveals the rest in one go (no
+  // further paging once you've asked to see more); a fresh /api/today load
+  // re-folds it, same as the dismiss/urgency state it already resets.
+  const ATTN_PAGE_SIZE = 5;
+  let attentionShowCount = ATTN_PAGE_SIZE;
+
   function renderAttention(items) {
     attentionItems = items;
+    attentionShowCount = ATTN_PAGE_SIZE;
+    renderAttentionList();
+  }
+
+  function renderAttentionList() {
     const el = document.getElementById('attention-list');
-    if (items.length === 0) {
+    if (attentionItems.length === 0) {
       showEmptyState('attention-list', 'Nothing outstanding.');
       return;
     }
-    el.innerHTML = items.map((i, idx) => {
-      const stripe = i.item_type === 'bill' ? 'bill' : (i.item_type === 'job_application' ? 'job_application' : 'default');
+    const shown = attentionItems.slice(0, attentionShowCount);
+    const remaining = attentionItems.length - shown.length;
+    el.innerHTML = shown.map((i, idx) => {
+      const isOpportunity = i.item_type === 'job_opportunity';
+      const stripe = i.item_type === 'bill' ? 'bill' : (i.item_type === 'job_application' ? 'job_application' : (isOpportunity ? 'job_opportunity' : 'default'));
       const title = i.summary || i.entity_key;
       const meta = `${i.item_type.replace('_', ' ')} · ${i.state}${i.source ? ' · via ' + i.source : ''}`;
       const due = i.due_at ? fmtDate(i.due_at) : 'no due date';
@@ -1026,19 +1228,60 @@
       const urgencySelect = `<select id="urgency-${i.id}" class="urgency-select" data-item-id="${i.id}" data-prev-value="${urgency}" title="Adjust urgency">
         ${URGENCY_OPTIONS.map(u => `<option value="${u}"${u === urgency ? ' selected' : ''}>${u}</option>`).join('')}
       </select>`;
+      // worker_job_scout.py's payload — match_score/verdict/missing quals —
+      // arrives already-parsed JSON per _serialize_tracked_item, no extra
+      // decoding needed here.
+      const matchScore = isOpportunity && typeof i.payload?.match_score === 'number'
+        ? `<p class="match-score">${Math.round(i.payload.match_score * 100)}% match${i.payload.missing_qualifications?.length ? ` · ${i.payload.missing_qualifications.length} gap${i.payload.missing_qualifications.length === 1 ? '' : 's'}` : ''}</p>`
+        : '';
+      const promoteBtn = isOpportunity
+        ? `<button class="promote-btn" type="button" data-promote-id="${i.id}">Mark applied</button>`
+        : '';
       return `<div class="attn-item flood-item" style="--i:${idx}" data-id="${i.id}">
         <div class="stripe ${stripe}"></div>
         <div class="body">
           <p class="title">${escapeHtml(title)}</p>
           <p class="meta">${escapeHtml(meta)}</p>
+          ${matchScore}
           <div class="urgency-adjust"><label for="urgency-${i.id}">Urgency</label>${urgencySelect}</div>
         </div>
         <div class="attn-actions">
           <div class="due">${escapeHtml(due)}</div>
+          ${promoteBtn}
           <button class="dismiss-btn" type="button" data-dismiss-id="${i.id}">Mark handled</button>
         </div>
       </div>`;
-    }).join('');
+    }).join('') + (remaining > 0 ? `<button class="attn-show-more" type="button">Show ${remaining} more</button>` : '');
+  }
+
+  // Called after any action that mutates attentionItems without going
+  // through renderAttentionList (dismiss/promote splice the array and
+  // remove their own DOM node directly, for the reasons in their own
+  // comments) — keeps the "Show N more" count from drifting stale by
+  // exactly the count of whatever was just handled.
+  function refreshAttnShowMoreButton() {
+    const el = document.getElementById('attention-list');
+    if (!el) return;
+    const shownRows = el.querySelectorAll('.attn-item').length;
+    const remaining = attentionItems.length - shownRows;
+    const btn = el.querySelector('.attn-show-more');
+    if (remaining > 0) {
+      const label = `Show ${remaining} more`;
+      if (btn) btn.textContent = label;
+      else el.insertAdjacentHTML('beforeend', `<button class="attn-show-more" type="button">${label}</button>`);
+    } else if (btn) {
+      btn.remove();
+    }
+  }
+
+  // Shared click router (see handleDismissClick's comment) — the button is
+  // regenerated by renderAttentionList/refreshAttnShowMoreButton, so a
+  // direct listener would be lost on the next redraw.
+  function handleAttnShowMoreClick(e) {
+    if (!e.target.closest('.attn-show-more')) return false;
+    attentionShowCount = attentionItems.length;
+    renderAttentionList();
+    return true;
   }
 
   // Ephemeral bottom-of-screen confirmation, with an optional undo action —
@@ -1086,6 +1329,7 @@
       showToast("Couldn't mark that handled — try again.");
       return true;
     }
+    loadJobs(); // keep the Jobs sheet's independent snapshot in sync
 
     // Remove just this row in place rather than re-rendering the whole
     // list — keeps every other row's DOM node (and any in-flight
@@ -1103,6 +1347,46 @@
       try { await fetch(`/api/tracked-items/${id}/undismiss`, { method: 'POST' }); }
       finally { loadToday(); }
     });
+    return true;
+  }
+
+  // Same click-router pattern as handleDismissClick, registered alongside it
+  // below. Only rendered for item_type === 'job_opportunity' (see
+  // renderAttention) — promoting flips it to a job_application in place, so
+  // it's removed from this list the same way a dismiss is; there's no
+  // "undo" here since there's no demote endpoint, unlike Mark Handled.
+  async function handlePromoteClick(e) {
+    const btn = e.target.closest('.promote-btn');
+    if (!btn) return false;
+    if (btn.disabled) return true;
+    const id = Number(btn.dataset.promoteId);
+    const item = attentionItems.find(a => a.id === id);
+    const rowEl = btn.closest('.attn-item');
+    if (!item || !rowEl) return true;
+
+    btn.disabled = true;
+    rowEl.classList.add('dismissing');
+    try {
+      const resp = await fetch(`/api/tracked-items/${id}/promote`, { method: 'POST' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      btn.disabled = false;
+      rowEl.classList.remove('dismissing');
+      showToast("Couldn't mark that applied — try again.");
+      return true;
+    }
+    loadJobs(); // keep the Jobs sheet's independent snapshot in sync
+
+    setTimeout(() => {
+      rowEl.remove();
+      attentionItems = attentionItems.filter(a => a.id !== id);
+      if (attentionItems.length === 0) {
+        showEmptyState('attention-list', 'Nothing outstanding.');
+      }
+      refreshDispatchText();
+    }, 220);
+
+    showToast(`Marked "${item.summary || item.entity_key}" applied.`);
     return true;
   }
 
@@ -2058,15 +2342,232 @@
   // on a disabled button), so a click can only ever be claimed by one.
   document.addEventListener('click', async (e) => {
     if (await handleDismissClick(e)) return;
+    if (await handlePromoteClick(e)) return;
+    if (handleAttnShowMoreClick(e)) return;
     if (handleExpandToggleClick(e)) return;
+    if (handleJobsExpandClick(e)) return;
     await handleTriageActionClick(e);
   });
+
+  // ── Jobs sheet ────────────────────────────────────────────────────
+  let jobsItems = [];
+  let jobsSort = { key: 'updated_at', dir: 'desc' };
+  let jobsTypeFilter = 'all';
+  // Row ids currently expanded to show tailoring advice — a Set, not a
+  // single value, so more than one row can be open, and it survives
+  // re-renders (sort/filter/reload) rather than resetting on every redraw.
+  let jobsExpandedIds = new Set();
+  const JOBS_PAGE_SIZE = 25;
+  let jobsPage = 1;
+
+  async function loadJobs() {
+    try {
+      const resp = await fetch('/api/jobs');
+      const data = await resp.json();
+      jobsItems = data.items || [];
+    } catch (err) {
+      document.getElementById('jobs-count').textContent = "Couldn't load job pipeline.";
+      return;
+    }
+    renderJobsTable();
+  }
+
+  // Flattens payload fields (set by worker_job_scout.py / triage's job
+  // tracking) onto the row once per load, so sort/render don't reach into
+  // JSON per cell per re-render. posting_source (e.g. "github_repo:owner/repo")
+  // is more specific than the top-level `source` column ("job_scout" /
+  // "email_triage") when present — prefer it.
+  function jobsRowFields(item) {
+    const p = item.payload || {};
+    return {
+      company: p.company || item.entity_key.split('-')[0] || '',
+      role: p.role || item.summary || item.entity_key,
+      match_score: typeof p.match_score === 'number' ? p.match_score : null,
+      location: p.location || '',
+      salary: p.salary || '',
+      link: p.link || '',
+      source: p.posting_source || item.source || '',
+      summary: item.summary || p.summary || '',
+      missing_qualifications: Array.isArray(p.missing_qualifications) ? p.missing_qualifications : [],
+      matched_qualifications: Array.isArray(p.matched_qualifications) ? p.matched_qualifications : [],
+      tailoring_suggestions: Array.isArray(p.tailoring_suggestions) ? p.tailoring_suggestions : [],
+    };
+  }
+
+  // Renders the expanded detail panel — persisted straight from
+  // worker_job_scout.py's payload (see jobsRowFields), preserved through a
+  // promotion by tracked_items_repo.promote_to_application()'s payload
+  // merge, so this is available on applications too, not just opportunities.
+  function jobsDetailRow(item, f) {
+    const hasAdvice = f.missing_qualifications.length || f.matched_qualifications.length || f.tailoring_suggestions.length;
+    const list = (items, empty) => items.length
+      ? `<ul>${items.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+      : `<p class="none">${escapeHtml(empty)}</p>`;
+    const matchedList = f.matched_qualifications.length
+      ? `<ul>${f.matched_qualifications.map(m => `<li>${escapeHtml(m.requirement || '')}<span class="evidence">${escapeHtml(m.evidence || '')}${m.evidence_source ? ' — ' + escapeHtml(m.evidence_source) : ''}</span></li>`).join('')}</ul>`
+      : `<p class="none">No specific matches recorded.</p>`;
+    const body = hasAdvice ? `
+      <div class="jobs-detail-grid">
+        <div class="jobs-detail-section missing">
+          <p class="eyebrow">Missing qualifications</p>
+          ${list(f.missing_qualifications, 'None flagged.')}
+        </div>
+        <div class="jobs-detail-section matched">
+          <p class="eyebrow">Matched qualifications</p>
+          ${matchedList}
+        </div>
+        <div class="jobs-detail-section tailoring">
+          <p class="eyebrow">Tailoring suggestions</p>
+          ${list(f.tailoring_suggestions, 'None suggested.')}
+        </div>
+      </div>` : `<p class="none">No scouting detail recorded for this item — likely added manually rather than scored by job_scout.</p>`;
+    return `<tr class="jobs-detail-row" data-detail-for="${item.id}">
+      <td colspan="10">
+        ${f.summary ? `<p class="jobs-detail-summary">${escapeHtml(f.summary)}</p>` : ''}
+        ${body}
+      </td>
+    </tr>`;
+  }
+
+  function renderJobsTable() {
+    const q = (document.getElementById('jobs-search')?.value || '').trim().toLowerCase();
+    const hideDismissed = document.getElementById('jobs-hide-dismissed')?.checked;
+
+    let rows = jobsItems.map(item => ({ item, f: jobsRowFields(item) }));
+
+    rows = rows.filter(({ item, f }) => {
+      if (jobsTypeFilter !== 'all' && item.item_type !== jobsTypeFilter) return false;
+      if (hideDismissed && item.dismissed) return false;
+      if (q && !`${f.company} ${f.role}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+
+    const { key, dir } = jobsSort;
+    const mul = dir === 'asc' ? 1 : -1;
+    const sortValue = (row) => {
+      if (key === 'match_score') return row.f.match_score ?? -1;
+      if (key === 'item_type' || key === 'state' || key === 'updated_at') return row.item[key] || '';
+      return (row.f[key] || '').toString().toLowerCase();
+    };
+    rows.sort((a, b) => {
+      const va = sortValue(a), vb = sortValue(b);
+      if (va < vb) return -1 * mul;
+      if (va > vb) return 1 * mul;
+      return 0;
+    });
+
+    document.querySelectorAll('#jobs-table th[data-sort]').forEach(th => {
+      const sorted = th.dataset.sort === key;
+      th.classList.toggle('sorted', sorted);
+      th.dataset.arrow = sorted ? (dir === 'asc' ? '▲' : '▼') : '';
+    });
+
+    // Paginated over the filtered+sorted set, not the raw jobsItems — page
+    // count follows whatever's actually visible under the current
+    // filter/search, not the full table. Clamp rather than reset so a
+    // background reload (loadJobs() after a dismiss elsewhere) that shrinks
+    // the last page doesn't strand you on a page that no longer exists.
+    const totalPages = Math.max(1, Math.ceil(rows.length / JOBS_PAGE_SIZE));
+    jobsPage = Math.min(Math.max(1, jobsPage), totalPages);
+    const pageStart = (jobsPage - 1) * JOBS_PAGE_SIZE;
+    const pageRows = rows.slice(pageStart, pageStart + JOBS_PAGE_SIZE);
+
+    const pagination = document.getElementById('jobs-pagination');
+    pagination.hidden = totalPages <= 1;
+    document.getElementById('jobs-page-label').textContent = `Page ${jobsPage} of ${totalPages} · ${rows.length} shown`;
+    document.getElementById('jobs-page-prev').disabled = jobsPage <= 1;
+    document.getElementById('jobs-page-next').disabled = jobsPage >= totalPages;
+
+    const tbody = document.getElementById('jobs-tbody');
+    const emptyNote = document.getElementById('jobs-empty');
+    if (rows.length === 0) {
+      tbody.innerHTML = '';
+      emptyNote.style.display = '';
+    } else {
+      emptyNote.style.display = 'none';
+      tbody.innerHTML = pageRows.map(({ item, f }) => {
+        const matchClass = f.match_score == null ? '' : f.match_score >= 0.75 ? 'strong' : f.match_score >= 0.45 ? 'partial' : 'weak';
+        const matchText = f.match_score == null ? '—' : `${Math.round(f.match_score * 100)}%`;
+        const roleCell = f.link
+          ? `<a class="job-link" href="${escapeHtml(f.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(f.role)}</a>`
+          : escapeHtml(f.role);
+        const typeLabel = item.item_type === 'job_application' ? 'Applied' : 'Opportunity';
+        const expanded = jobsExpandedIds.has(item.id);
+        const mainRow = `<tr class="jobs-row${expanded ? ' expanded' : ''}" data-expand-id="${item.id}">
+          <td><button class="jobs-expand-toggle" type="button" data-expand-id="${item.id}" aria-label="Toggle detail">▸</button></td>
+          <td class="company" title="${escapeHtml(f.company)}">${escapeHtml(f.company)}</td>
+          <td class="role" title="${escapeHtml(f.role)}">${roleCell}</td>
+          <td class="nowrap"><span class="jobs-type-pill ${item.item_type}">${typeLabel}</span></td>
+          <td class="nowrap"><span class="jobs-stage-pill">${escapeHtml((item.state || '').replace(/_/g, ' '))}</span></td>
+          <td class="nowrap"><span class="jobs-match-score ${matchClass}">${matchText}</span></td>
+          <td>${escapeHtml(f.location) || '—'}</td>
+          <td class="nowrap">${escapeHtml(f.salary) || '—'}</td>
+          <td class="source" title="${escapeHtml(f.source)}">${escapeHtml(f.source) || '—'}</td>
+          <td class="nowrap">${escapeHtml(fmtDate(item.updated_at))}</td>
+        </tr>`;
+        return expanded ? mainRow + jobsDetailRow(item, f) : mainRow;
+      }).join('');
+    }
+
+    const appCount = jobsItems.filter(i => i.item_type === 'job_application').length;
+    const oppCount = jobsItems.filter(i => i.item_type === 'job_opportunity').length;
+    document.getElementById('jobs-count').textContent =
+      `${jobsItems.length} tracked · ${appCount} applied · ${oppCount} scored opportunities`;
+  }
+
+  // Registered on the shared click router (see handleDismissClick's
+  // comment) rather than a direct listener — tbody rows are replaced
+  // wholesale on every renderJobsTable() call, so anything bound directly
+  // to a row would be lost on the next re-render. Bails out on a click
+  // inside the role's <a href> so the link still navigates normally instead
+  // of also toggling the row underneath it.
+  function handleJobsExpandClick(e) {
+    if (e.target.closest('a.job-link')) return false;
+    const row = e.target.closest('.jobs-row');
+    if (!row) return false;
+    const id = Number(row.dataset.expandId);
+    if (jobsExpandedIds.has(id)) jobsExpandedIds.delete(id);
+    else jobsExpandedIds.add(id);
+    renderJobsTable();
+    return true;
+  }
+
+  document.querySelectorAll('#jobs-table th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (jobsSort.key === key) {
+        jobsSort.dir = jobsSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        // Numeric/date columns read more naturally starting high-to-low;
+        // text columns starting A-to-Z.
+        jobsSort = { key, dir: (key === 'updated_at' || key === 'match_score') ? 'desc' : 'asc' };
+      }
+      jobsPage = 1; // re-sorting while stranded on page 6 would just show an empty page
+      renderJobsTable();
+    });
+  });
+
+  document.querySelectorAll('#view-jobs .chip[data-jobtype]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#view-jobs .chip[data-jobtype]').forEach(c => c.removeAttribute('data-active'));
+      chip.dataset.active = 'true';
+      jobsTypeFilter = chip.dataset.jobtype;
+      jobsPage = 1;
+      renderJobsTable();
+    });
+  });
+
+  document.getElementById('jobs-search')?.addEventListener('input', () => { jobsPage = 1; renderJobsTable(); });
+  document.getElementById('jobs-hide-dismissed')?.addEventListener('change', () => { jobsPage = 1; renderJobsTable(); });
+  document.getElementById('jobs-page-prev')?.addEventListener('click', () => { jobsPage -= 1; renderJobsTable(); });
+  document.getElementById('jobs-page-next')?.addEventListener('click', () => { jobsPage += 1; renderJobsTable(); });
 
   // ── Boot ──────────────────────────────────────────────────────────
   loadToday();
   loadActivityBackfill().then(connectActivityWs);
   loadTriageQueue();
   loadTriageSenders();
+  loadJobs();
   connectTelemetryWs();
 </script>
 </body>

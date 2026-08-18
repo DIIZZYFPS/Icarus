@@ -176,14 +176,16 @@ async def recall(query: str, limit: int = 8) -> str:
 
 async def list_tracked_items(item_type: str = "") -> str:
     """List structured, stateful items tracked on your behalf — job
-    applications and bills extracted from triaged email, most recently
-    updated first. Use this for "what's outstanding", "where do things
-    stand with my job search", "what bills are due" — it reads current
-    state directly rather than trying to reconstruct it from scattered
-    email mentions.
+    applications and bills extracted from triaged email, plus scored job
+    opportunities from job_scout (see dispatch_worker_task's tasks:job_scout
+    stream) — most recently updated first. Use this for "what's outstanding",
+    "where do things stand with my job search", "what bills are due", "what
+    opportunities have you scored" — it reads current state directly rather
+    than trying to reconstruct it from scattered email mentions.
 
     Args:
-        item_type: Optional filter — "job_application" or "bill". Leave
+        item_type: Optional filter — "job_application" (applied to),
+            "job_opportunity" (scored, not yet applied to), or "bill". Leave
             empty to list everything.
     """
     platform = current_platform.get()
