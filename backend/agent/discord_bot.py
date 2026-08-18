@@ -263,7 +263,7 @@ async def _relay_notification(
         source_id=source_id,
         content=final_text,
     )
-    await bind_delivery(notification_id, delivery_ids[0])
+    await bind_delivery(notification_id, delivery_ids)
     logger.info(
         "Delivered %s notification to Discord DM user=%s notification_id=%s",
         notification_type,

@@ -70,7 +70,10 @@ class NotificationContextTests(unittest.IsolatedAsyncioTestCase):
             source_id="mail-2",
             content="Reply target",
         )
-        await notification_repo.bind_delivery(notification_id, "discord-message-9")
+        await notification_repo.bind_delivery(
+            notification_id,
+            ["discord-message-8", "discord-message-9"],
+        )
 
         self.assertIsNone(
             await notification_repo.get_pending_notification(
@@ -78,6 +81,12 @@ class NotificationContextTests(unittest.IsolatedAsyncioTestCase):
                 reply_to_message_id="discord-message-other",
             )
         )
+        result = await notification_repo.get_pending_notification(
+            conversation_id=scope,
+            reply_to_message_id="discord-message-8",
+        )
+        self.assertEqual(result["content"], "Reply target")
+
         result = await notification_repo.get_pending_notification(
             conversation_id=scope,
             reply_to_message_id="discord-message-9",
@@ -94,6 +103,30 @@ class NotificationContextTests(unittest.IsolatedAsyncioTestCase):
         )
         await notification_repo.consume_notification(notification_id)
         self.assertIsNone(await notification_repo.get_pending_notification(conversation_id=scope))
+
+    async def test_duplicate_record_does_not_reopen_consumed_notification(self):
+        scope = "discord:dm:42"
+        notification_id = await notification_repo.record_notification(
+            conversation_id=scope,
+            notification_type="email",
+            source_id="mail-idempotent",
+            content="Original content",
+        )
+        await notification_repo.bind_delivery(notification_id, ["discord-message-10"])
+        await notification_repo.consume_notification(notification_id)
+
+        duplicate_id = await notification_repo.record_notification(
+            conversation_id=scope,
+            notification_type="email",
+            source_id="mail-idempotent",
+            content="Retry content",
+        )
+
+        self.assertEqual(duplicate_id, notification_id)
+        self.assertIsNone(await notification_repo.get_pending_notification(conversation_id=scope))
+        stored = self.redis.hashes[notification_repo._record_key(notification_id)]
+        self.assertEqual(stored["delivery_message_ids"], '["discord-message-10"]')
+        self.assertTrue(stored["consumed_at"])
 
     async def test_other_scope_cannot_read_dm_notification(self):
         await notification_repo.record_notification(
