@@ -15,6 +15,7 @@ from typing import Callable, Awaitable
 from sqlalchemy import select, update, text, func, or_, and_
 from backend.database.connection import AsyncSessionLocal
 from backend.database.models import MemoryEntry
+from backend.agent.model_bank import get_model_context_length
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +25,33 @@ SCORE_IMPORTANCE_WEIGHT = 0.3
 SCORE_RECENCY_WEIGHT    = 0.2
 
 # ── Compaction settings ──────────────────────────────────────────────────────
-COMPACTION_THRESHOLD  = 100   # live entries per user before compaction fires
-COMPACTION_CHUNK_SIZE = 20    # max entries per summarization call
-COMPACTION_KEEP_RECENT = 30   # always keep the N most recent entries live
+# Token-aware, not row-count-aware: a scope full of terse one-liners and a
+# scope full of paragraph-length entries hit very different real costs at
+# the same row count, so row count alone was never the right trigger. No
+# local tokenizer is wired up (this runs against Qwen, not an OpenAI vocab
+# tiktoken would model), so token counts here are a standard chars/4
+# approximation — good enough to gate a threshold, not meant to be exact.
+#
+# The thresholds themselves scale off the model's own context length (see
+# model_bank.get_model_context_length()) rather than a hand-picked constant
+# — a number hardcoded against one context size silently stops making sense
+# the moment the GGUF or its --ctx-size changes.
+CHARS_PER_TOKEN = 4
+COMPACTION_TOKEN_THRESHOLD_FRACTION    = 0.5   # trigger once live memory's estimated
+                                                # footprint reaches half the model's context
+COMPACTION_CHUNK_TOKEN_BUDGET_FRACTION = 0.15  # cap each summarization call's input at ~15%
+                                                # of context — leaves room for the compaction
+                                                # prompt, the summary output, and the chars/4
+                                                # estimate's own slack
+COMPACTION_ROW_CEILING = 300  # backstop: fires past this many rows regardless of the token
+                               # estimate, so a flood of tiny entries can't grow the live set
+                               # unboundedly just because each one looks cheap.
+COMPACTION_KEEP_HEAD   = 10   # oldest entries always kept live — foundational/anchor context
+COMPACTION_KEEP_RECENT = 30   # newest entries always kept live — recent context
+COMPACTION_PIN_IMPORTANCE = 1.9  # entries at/above this importance are exempt from
+                                  # compaction wherever they fall — a "critical"/"never"/
+                                  # "always" fact doesn't get summarized away just because
+                                  # it aged out of the recency window.
 
 # ── Auto-category heuristics ─────────────────────────────────────────────────
 _CATEGORY_RULES = [
@@ -71,6 +96,78 @@ def _auto_importance(entry: str) -> float:
     return max(0.1, min(2.0, importance))
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough chars/4 token estimate — no local tokenizer wired up, so this is
+    a budget gate, not an exact count."""
+    return max(1, len(text) // CHARS_PER_TOKEN)
+
+
+async def get_compaction_token_threshold() -> int:
+    """Live-derived trigger threshold — a fraction of the model's actual
+    context length, not a fixed constant. See get_model_context_length()."""
+    context_length = await get_model_context_length()
+    return int(context_length * COMPACTION_TOKEN_THRESHOLD_FRACTION)
+
+
+async def get_compaction_chunk_token_budget() -> int:
+    """Live-derived per-summarization-call budget — a fraction of the
+    model's actual context length, not a fixed constant."""
+    context_length = await get_model_context_length()
+    return int(context_length * COMPACTION_CHUNK_TOKEN_BUDGET_FRACTION)
+
+
+def _to_int_or_none(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _notify_session(platform: str, user_id: str, chat_id: str | None, text: str) -> None:
+    """Best-effort status push into the session compaction ran for — not the
+    operator's DM the way escalation/consultation results get relayed,
+    literally the platform/chat the compacted entries came from, so a
+    Discord server channel gets its own status message there too, not
+    redirected somewhere private. Never raises: a notification hiccup must
+    not abort compaction itself."""
+    try:
+        if platform == "telegram":
+            from backend.routes.webhook import push_telegram_message
+            target = _to_int_or_none(chat_id) or _to_int_or_none(user_id)
+            if target:
+                await push_telegram_message(target, text)
+        elif platform == "discord":
+            from backend.agent.discord_bot import push_discord_message
+            await push_discord_message(_to_int_or_none(chat_id), text, user_id=user_id)
+        # platform in ("global", "system", ...): no live session to notify — skip.
+    except Exception as e:
+        logger.warning(f"[memory_repo] Compaction status notification failed: {e}")
+
+
+def _chunk_by_token_budget(
+    entries: list["MemoryEntry"], token_budget: int
+) -> list[list["MemoryEntry"]]:
+    """Greedily group entries into chunks that stay under an estimated token
+    budget, instead of a fixed row count — a handful of long entries and a
+    pile of short ones shouldn't produce the same-sized call to the
+    summarizer. A single entry that alone exceeds the budget still becomes
+    its own chunk rather than being dropped or split."""
+    chunks: list[list[MemoryEntry]] = []
+    current: list[MemoryEntry] = []
+    current_tokens = 0
+    for entry in entries:
+        entry_tokens = _estimate_tokens(entry.entry)
+        if current and current_tokens + entry_tokens > token_budget:
+            chunks.append(current)
+            current = []
+            current_tokens = 0
+        current.append(entry)
+        current_tokens += entry_tokens
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _tokenize_query(query: str) -> str:
     """Produce a space-separated FTS5 query string from the user message.
     Strips punctuation, lowercases, deduplicates, and drops single-char tokens."""
@@ -97,11 +194,16 @@ async def store_entry(
     category: str | None = None,
     importance: float | None = None,
     source: str = "agent",
+    chat_id: str | None = None,
 ) -> int:
     """Insert a new MemoryEntry row. Returns the new row id.
 
     Category and importance are auto-detected from entry text when not provided.
-    Fires a fire-and-forget compaction task if the live count exceeds the threshold.
+    Fires a fire-and-forget compaction task if the live set exceeds the
+    threshold. chat_id is the raw transport chat/channel id (not the
+    conversation_id) — passed through only so a triggered compaction can
+    post its status into the session it's compacting, not persisted on the
+    row itself.
     """
     now = _now_iso()
     resolved_category   = category   if category   is not None else _auto_category(entry)
@@ -129,7 +231,7 @@ async def store_entry(
 
     # Fire-and-forget compaction check (does not block the caller)
     if visibility == "private":
-        asyncio.create_task(_maybe_compact(platform, user_id, conversation_id))
+        asyncio.create_task(_maybe_compact(platform, user_id, conversation_id, chat_id))
 
     return row_id
 
@@ -264,13 +366,26 @@ async def retrieve_relevant(
 async def should_compact(
     platform: str,
     user_id: str,
-    threshold: int = COMPACTION_THRESHOLD,
+    token_threshold: int | None = None,
+    row_ceiling: int = COMPACTION_ROW_CEILING,
     conversation_id: str | None = None,
 ) -> bool:
-    """Return True if live non-summary entry count for this scope exceeds threshold."""
+    """Return True if this scope's live, non-summary entries have grown past
+    the estimated token threshold, or past a hard row-count backstop
+    regardless of token estimate (a flood of tiny entries shouldn't be able
+    to grow the live set unboundedly just because each one looks cheap).
+    token_threshold defaults to a fraction of the model's live-resolved
+    context length (get_compaction_token_threshold()) rather than a fixed
+    constant — pass one explicitly to override."""
+    if token_threshold is None:
+        token_threshold = await get_compaction_token_threshold()
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(func.count())
+            select(
+                func.count(),
+                func.coalesce(func.sum(func.length(MemoryEntry.entry)), 0),
+            )
             .select_from(MemoryEntry)
             .where(
                 MemoryEntry.platform == platform,
@@ -282,30 +397,55 @@ async def should_compact(
                 else MemoryEntry.conversation_id.is_(None),
             )
         )
-        count = result.scalar_one()
-    return count >= threshold
+        count, total_chars = result.one()
+
+    if count >= row_ceiling:
+        return True
+    return (total_chars // CHARS_PER_TOKEN) >= token_threshold
 
 
 async def compact_user_memory(
     platform: str,
     user_id: str,
     keep_recent: int = COMPACTION_KEEP_RECENT,
+    keep_head: int = COMPACTION_KEEP_HEAD,
+    token_budget: int | None = None,
     summarize_fn: Callable[[str], Awaitable[str]] | None = None,
     conversation_id: str | None = None,
+    chat_id: str | None = None,
 ) -> int:
-    """Compact older memory entries by summarizing them via LLM.
+    """Compact the middle of a scope's memory by summarizing it via LLM.
 
-    Selects all non-compacted, non-summary entries ordered by importance ASC,
-    created_at ASC (least important oldest first). Skips the `keep_recent` most
-    recently created entries. Chunks the rest and summarizes each chunk.
+    The oldest `keep_head` entries (foundational/anchor context — the
+    closest thing this log has to a system prompt) and the newest
+    `keep_recent` entries ("the last messages") stay live, untouched;
+    everything chronologically between them is what's eligible for
+    summarization. This mirrors how conversational context compaction
+    normally works — protect the beginning and the end, compact the middle —
+    rather than the old behavior of picking off whichever entries scored
+    lowest on importance regardless of where they fell in time. Entries at
+    or above COMPACTION_PIN_IMPORTANCE are exempt even inside the middle
+    span. Chunks are sized by an estimated token budget rather than a fixed
+    row count, so a handful of long entries don't get crammed into one
+    oversized summarization call the way a fixed row count would allow.
+
+    Posts a best-effort status update into the originating session (see
+    _notify_session) when compaction starts and again when it finishes.
+    chat_id is the raw transport chat/channel id, not the conversation_id —
+    it's only used for that notification, never persisted.
+
+    token_budget defaults to a fraction of the model's live-resolved context
+    length (get_compaction_chunk_token_budget()) rather than a fixed
+    constant — pass one explicitly to override.
 
     Returns the number of entries compacted (marked compacted=1).
     """
     if summarize_fn is None:
         summarize_fn = _default_summarize
+    if token_budget is None:
+        token_budget = await get_compaction_chunk_token_budget()
 
     async with AsyncSessionLocal() as session:
-        # Get all live non-summary entries, least important + oldest first
         result = await session.execute(
             select(MemoryEntry)
             .where(
@@ -317,24 +457,33 @@ async def compact_user_memory(
                 if conversation_id is not None
                 else MemoryEntry.conversation_id.is_(None),
             )
-            .order_by(MemoryEntry.importance.asc(), MemoryEntry.created_at.asc())
+            .order_by(MemoryEntry.created_at.asc(), MemoryEntry.id.asc())
         )
         all_entries = list(result.scalars().all())
 
-    if len(all_entries) <= keep_recent:
+    if len(all_entries) <= keep_head + keep_recent:
         return 0
 
-    # Keep the most recent `keep_recent` entries live regardless
-    to_compact = all_entries[:-keep_recent] if keep_recent > 0 else all_entries
+    middle = (
+        all_entries[keep_head: len(all_entries) - keep_recent]
+        if keep_recent > 0
+        else all_entries[keep_head:]
+    )
+    to_compact = [e for e in middle if e.importance < COMPACTION_PIN_IMPORTANCE]
 
     if not to_compact:
         return 0
 
-    total_compacted = 0
+    await _notify_session(
+        platform, user_id, chat_id,
+        f"🗜️ Compacting memory — summarizing {len(to_compact)} older entries to keep "
+        f"things lean. Recent context and pinned facts are untouched.",
+    )
 
-    # Chunk and summarize
-    for i in range(0, len(to_compact), COMPACTION_CHUNK_SIZE):
-        chunk = to_compact[i:i + COMPACTION_CHUNK_SIZE]
+    total_compacted = 0
+    chunks_written = 0
+
+    for chunk in _chunk_by_token_budget(to_compact, token_budget):
         text_block = "\n".join(
             f"[{e.created_at}] [{e.category.upper()}] {e.entry}" for e in chunk
         )
@@ -376,7 +525,15 @@ async def compact_user_memory(
             await session.commit()
 
         total_compacted += len(chunk)
+        chunks_written += 1
         logger.info(f"[memory_repo] Compacted {len(chunk)} entries for {platform}:{user_id}")
+
+    if total_compacted:
+        await _notify_session(
+            platform, user_id, chat_id,
+            f"✅ Memory compaction done — {total_compacted} entries folded into "
+            f"{chunks_written} summary note(s).",
+        )
 
     return total_compacted
 
@@ -492,11 +649,14 @@ async def _maybe_compact(
     platform: str,
     user_id: str,
     conversation_id: str | None = None,
+    chat_id: str | None = None,
 ) -> None:
     """Fire-and-forget wrapper: run compaction if threshold is exceeded."""
     try:
         if await should_compact(platform, user_id, conversation_id=conversation_id):
-            count = await compact_user_memory(platform, user_id, conversation_id=conversation_id)
+            count = await compact_user_memory(
+                platform, user_id, conversation_id=conversation_id, chat_id=chat_id,
+            )
             if count:
                 logger.info(f"[memory_repo] Auto-compacted {count} entries for {platform}:{user_id}")
     except Exception as e:

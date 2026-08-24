@@ -23,6 +23,7 @@ from .orchestrator import dispatch_worker_task, get_worker_result
 from .gmail_tools import gmail_list_messages, gmail_get_message
 from .calendar_tools import calendar_list_upcoming_events
 from .telemetry_tools import get_telemetry_snapshot
+from .websearch_tools import web_search, web_extract
 
 logger = logging.getLogger(__name__)
 
@@ -235,17 +236,36 @@ def append_memory(entry: str, visibility: str = "private") -> str:
         entry: The memory entry to store.
         visibility: 'public' to store as global (visible to all contexts),
                     'private' to store scoped to the current platform/user (default).
+                    In an untrusted server context, global visibility is
+                    silently downgraded to private — it's never trusted with
+                    an entry that would surface in the operator's own DMs.
     """
     logger.info(f"[tool:append_memory] entry={entry!r} visibility={visibility!r}")
 
     platform = current_platform.get()
     user_id = current_user_id.get()
     conversation_id = current_conversation_id.get()
+    chat_id = current_chat_id.get()
+    access_mode = current_access_mode.get()
 
     # Normalize visibility: if entry contains [GLOBAL] tag, treat as public
-    if visibility == "public" or re.search(r"\[GLOBAL\]", entry, re.IGNORECASE):
+    wants_global = visibility == "public" or re.search(r"\[GLOBAL\]", entry, re.IGNORECASE)
+    entry = re.sub(r"\[GLOBAL\]", "", entry, flags=re.IGNORECASE).strip()
+
+    if wants_global and access_mode == "server":
+        # Global-visibility entries are injected into every future context,
+        # including the operator's private DMs (see memory_repo.retrieve_relevant).
+        # A server channel is untrusted input — enforce this as a capability,
+        # not a prompt instruction, same reasoning as WORKSPACE_WRITE_ROOT
+        # above: an untrusted server member could otherwise plant a [GLOBAL]
+        # entry that later surfaces inside the operator's own conversations.
+        resolved_visibility = "private"
+        logger.warning(
+            f"[tool:append_memory] blocked global-visibility write from server "
+            f"context (platform={platform!r} user={user_id!r}); stored as private"
+        )
+    elif wants_global:
         resolved_visibility = "global"
-        entry = re.sub(r"\[GLOBAL\]", "", entry, flags=re.IGNORECASE).strip()
     else:
         resolved_visibility = "private"
 
@@ -264,6 +284,7 @@ def append_memory(entry: str, visibility: str = "private") -> str:
                     conversation_id=conversation_id,
                     visibility=resolved_visibility,
                     source="agent",
+                    chat_id=chat_id,
                 )
             )
             # Can't await here since this is sync — but the task will execute
@@ -278,6 +299,7 @@ def append_memory(entry: str, visibility: str = "private") -> str:
                     conversation_id=conversation_id,
                     visibility=resolved_visibility,
                     source="agent",
+                    chat_id=chat_id,
                 )
             )
             logger.info(f"[tool:append_memory] stored entry id={row_id}")
@@ -325,6 +347,8 @@ ICARUS_TOOLS = [
     gmail_get_message,
     calendar_list_upcoming_events,
     get_telemetry_snapshot,
+    web_search,
+    web_extract,
     get_time,
     *GITHUB_TOOLS,
 ]
@@ -347,6 +371,8 @@ ICARUS_READONLY_TOOLS = [
     check_mailbox,
     consult_councilor,
     get_telemetry_snapshot,
+    web_search,
+    web_extract,
     get_time,
     github_get_repo_info,
     github_list_repos,

@@ -20,6 +20,8 @@ docker-compose.yml).
 import os
 import re
 import json
+import base64
+import asyncio
 import inspect
 import logging
 import typing
@@ -33,6 +35,16 @@ LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://127.0.0.1:8080/v1").rstrip("/
 LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local")
 LOCAL_LLM_TIMEOUT = float(os.getenv("LOCAL_LLM_TIMEOUT", "120"))
 
+# The main model's llama-server was started with --mmproj (see
+# start_qwen.sh), so it accepts OpenAI-style image_url content blocks. Two
+# safety caps here: image fetches are capped in size (a Discord CDN URL is
+# trusted-ish but there's no reason to pull down something huge), and the
+# number of images per turn is capped since --parallel 1 means one image-
+# heavy turn blocks every other request on the box until it's done.
+_IMAGE_DOWNLOAD_TIMEOUT = 20.0
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES_PER_TURN = 4
+
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
@@ -45,13 +57,48 @@ def _strip_reasoning(text: str) -> str:
     return _THINK_TAG_RE.sub("", text).strip()
 
 
-def _to_openai_messages(messages: list[dict], system_instruction: str | None) -> list[dict]:
+async def _fetch_image_as_data_uri(url: str) -> str | None:
+    """Download an image (e.g. a Discord attachment URL) and return it as a
+    base64 data: URI for the vision-capable /v1/chat/completions endpoint.
+    Returns None on any failure — a bad/oversized/non-image attachment
+    should degrade the turn to text-only, not fail it outright."""
+    try:
+        async with httpx.AsyncClient(timeout=_IMAGE_DOWNLOAD_TIMEOUT) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "").split(";")[0].strip()
+            if not content_type.startswith("image/"):
+                logger.warning(f"[local_llm] Skipping non-image attachment ({content_type or 'unknown'}): {url}")
+                return None
+            data = resp.content
+            if len(data) > _MAX_IMAGE_BYTES:
+                logger.warning(f"[local_llm] Skipping oversized image ({len(data)} bytes): {url}")
+                return None
+            b64 = base64.b64encode(data).decode("ascii")
+            return f"data:{content_type};base64,{b64}"
+    except Exception as e:
+        logger.warning(f"[local_llm] Failed to fetch image {url}: {e}")
+        return None
+
+
+def _to_openai_messages(
+    messages: list[dict],
+    system_instruction: str | None,
+    image_data_uris: list[str] | None = None,
+) -> list[dict]:
     payload = []
     if system_instruction:
         payload.append({"role": "system", "content": system_instruction})
-    for msg in messages:
+    last_index = len(messages) - 1
+    for i, msg in enumerate(messages):
         role = "assistant" if msg["role"] == "model" else msg["role"]
-        payload.append({"role": role, "content": msg["text"]})
+        text = msg["text"]
+        if image_data_uris and i == last_index and role == "user":
+            content = [{"type": "text", "text": text}]
+            content += [{"type": "image_url", "image_url": {"url": uri}} for uri in image_data_uris]
+            payload.append({"role": role, "content": content})
+        else:
+            payload.append({"role": role, "content": text})
     return payload
 
 
@@ -204,6 +251,7 @@ async def local_agent_loop(
     context_messages: list[dict] | None = None,
     enable_thinking: bool = True,
     on_activity: Callable[[str], Awaitable[None]] | None = None,
+    image_urls: list[str] | None = None,
 ) -> str:
     """Multi-turn tool-calling loop against the local llama-server.
 
@@ -216,13 +264,42 @@ async def local_agent_loop(
     message, say) instead of going silent until the whole loop finishes.
     Failures in the callback are logged and swallowed; they never interrupt
     the actual tool execution.
+
+    image_urls: image URLs (e.g. Discord attachment CDN links) to attach to
+    initial_prompt as vision content blocks. Fetched and base64-encoded here
+    since the local llama-server has no way to reach out and fetch a remote
+    URL itself. Capped at MAX_IMAGES_PER_TURN; a failed individual fetch is
+    dropped rather than failing the whole turn. Requires the model's
+    llama-server to have been started with --mmproj (see start_qwen.sh) —
+    if it wasn't, the server will error on the image_url content block.
     """
+    image_data_uris = None
+    if image_urls:
+        capped_urls = image_urls[:MAX_IMAGES_PER_TURN]
+        if len(image_urls) > MAX_IMAGES_PER_TURN:
+            logger.warning(
+                f"[local_llm] {len(image_urls)} images attached, only using the first {MAX_IMAGES_PER_TURN}"
+            )
+        fetched = await asyncio.gather(*(_fetch_image_as_data_uri(u) for u in capped_urls))
+        image_data_uris = [uri for uri in fetched if uri] or None
+
     messages = _to_openai_messages(
         (context_messages or []) + [{"role": "user", "text": initial_prompt}],
         system_instruction,
+        image_data_uris=image_data_uris,
     )
     tool_schemas = [_tool_schema(fn) for fn in tools]
     tool_map = {fn.__name__: fn for fn in tools}
+
+    # MTP speculative decoding can crash on requests carrying image content
+    # (see start_qwen.sh) — disable it for every turn of a turn-carrying
+    # image, since the image stays in `messages` across the whole loop, not
+    # just turn 0. NOTE: as of the current llama-server build this override
+    # was not observed to actually suppress MTP in a smoke test (draft
+    # tokens were still accepted) — kept here as the documented mitigation,
+    # but don't treat this as a confirmed fix if a real image ever crashes
+    # the server; the fallback is disabling --spec-type on the server itself.
+    has_images = bool(image_data_uris)
 
     async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
         for turn in range(max_turns):
@@ -233,6 +310,8 @@ async def local_agent_loop(
                 "max_tokens": 8192,
                 "chat_template_kwargs": {"enable_thinking": enable_thinking},
             }
+            if has_images:
+                body["speculative.n_max"] = 0
             try:
                 resp = await client.post(f"{LOCAL_LLM_URL}/chat/completions", json=body)
                 resp.raise_for_status()

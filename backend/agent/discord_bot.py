@@ -13,6 +13,10 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DISCORD_ALLOWED_CHANNEL_ID = os.environ.get("DISCORD_ALLOWED_CHANNEL_ID")
 DISCORD_OPERATOR_ID = int(os.environ.get("DISCORD_OPERATOR_ID", "0"))
 
+# Discord doesn't always set Attachment.content_type (depends on client/CDN
+# response), so fall back to the filename extension.
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
 
 def _to_int_or_none(value) -> int | None:
     if value is None:
@@ -21,6 +25,17 @@ def _to_int_or_none(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_image_attachment(attachment) -> bool:
+    if attachment.content_type and attachment.content_type.startswith("image/"):
+        return True
+    return attachment.filename.lower().endswith(_IMAGE_EXTENSIONS)
+
+
+def _extract_image_urls(message) -> list[str] | None:
+    urls = [a.url for a in message.attachments if _is_image_attachment(a)]
+    return urls or None
 
 
 class IcarusBot(commands.Bot):
@@ -91,6 +106,7 @@ class IcarusBot(commands.Bot):
                     content = content.replace(f'<@{self.user.id}>', '').replace(f'<@!{self.user.id}>', '').strip()
                 # Prefix with author identity so the model knows who is speaking
                 content = f"[User:{message.author.name} (id: {message.author.id})]: {content}"
+                image_urls = _extract_image_urls(message)
                 response = await process_message(
                     "discord",
                     str(message.author.id),
@@ -100,14 +116,25 @@ class IcarusBot(commands.Bot):
                     on_activity=on_activity,
                     conversation_id=conversation_id,
                     reply_to_message_id=reply_to_message_id,
+                    image_urls=image_urls,
                 )
                 if response:
                     chunks = split_message(response)
-                    for chunk in chunks:
-                        await message.channel.send(chunk)
+                    for index, chunk in enumerate(chunks):
+                        # Server channels can have several conversations going
+                        # at once — reply-threading the first chunk to the
+                        # triggering message makes it obvious who Icarus is
+                        # answering. DMs are already 1:1, so plain sends there.
+                        if index == 0 and message.guild is not None:
+                            await message.reply(chunk, mention_author=False)
+                        else:
+                            await message.channel.send(chunk)
             except Exception as e:
                 logger.error(f"Error processing Discord message: {e}")
-                await message.channel.send(f"Error: {e}")
+                if message.guild is not None:
+                    await message.reply(f"Error: {e}", mention_author=False)
+                else:
+                    await message.channel.send(f"Error: {e}")
             finally:
                 if status_message["msg"] is not None:
                     try:

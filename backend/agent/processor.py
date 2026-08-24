@@ -165,12 +165,19 @@ async def process_message(
     skip_history: bool = False,
     conversation_id: str | None = None,
     reply_to_message_id: str | None = None,
+    image_urls: list[str] | None = None,
 ) -> str:
     """Core message processing logic — runs the L1 agent loop against the local model.
 
     on_activity, if given, is called with a short status string before each
     tool call executes, so a caller (e.g. Discord) can show live progress
     instead of going silent until the whole turn finishes.
+
+    image_urls — image URLs (e.g. Discord attachment links) to attach as
+    vision input for this turn only. The images themselves aren't persisted
+    into chat history or the transcript (only a text marker is), since
+    history/transcript are plain-text records replayed as text on later
+    turns — see run_icarus/local_agent_loop for how they're actually sent.
 
     skip_history — for system-generated hydration prompts (a Councilor
     mailbox relay, an email-notification relay): these are self-contained,
@@ -203,6 +210,15 @@ async def process_message(
 
     try:
         history_id = resolved_conversation_id
+
+        # Images are vision input for this turn only — history/transcript
+        # are plain text replayed as text on later turns, so the image
+        # itself can't survive there. Leave a marker instead of just
+        # dropping the fact that an image was attached.
+        text_for_record = text
+        if image_urls:
+            suffix = "image" if len(image_urls) == 1 else "images"
+            text_for_record = f"{text}\n[Attached {len(image_urls)} {suffix}]"
 
         history = [] if skip_history else await get_chat_history(history_id)
         memory_context = await _load_memory_context(
@@ -247,7 +263,7 @@ async def process_message(
                 platform,
                 user_id,
                 "user",
-                text,
+                text_for_record,
                 conversation_id=resolved_conversation_id,
             )
         except Exception as e:
@@ -275,13 +291,14 @@ async def process_message(
             full_prompt,
             read_only=effective_read_only,
             on_activity=on_activity,
+            image_urls=image_urls,
         )
 
         if response_text:
             # Strip think tags if the model produces them
             response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
             if not skip_history:
-                await save_chat_history(history_id, (text, response_text))
+                await save_chat_history(history_id, (text_for_record, response_text))
                 if pending_notification:
                     try:
                         from backend.agent.notification_repo import consume_notification
