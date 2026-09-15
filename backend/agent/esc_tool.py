@@ -334,3 +334,89 @@ async def escalate_to_councilor(intent_description: str, target_files: List[str]
         error_msg = f"Failed to publish escalation request: {e}"
         logger.error(error_msg)
         return error_msg
+
+
+async def delegate_task(
+    intent: str,
+    capabilities: list[str],
+    needs_network: bool = False,
+    needs_repo_write: bool = False,
+) -> str:
+    """Delegate a self-contained task to a Councilor-supervised subagent.
+
+    The subagent runs in the background with ONLY the capabilities you declare
+    here — nothing else is callable for it — and you never see its raw tool
+    output: a short completion summary is delivered to the operator via the
+    current platform when it finishes. This call returns IMMEDIATELY with a
+    task id. After calling it, log the pending task id with append_memory.
+
+    Args:
+        intent: A complete, self-contained brief of what to do and what the
+            summary should answer. The subagent has none of your conversation
+            context — include everything it needs.
+        capabilities: Capability names the task needs, from: time, web,
+            gmail_read, calendar_read, github_read, github_write, telemetry,
+            tracked_items. Declare only what's needed.
+        needs_network: True if any declared capability reaches the network
+            (web, gmail_read, calendar_read, github_read, github_write).
+        needs_repo_write: True only if the task must modify Icarus's own
+            source code — it then runs in the sandboxed worktree and lands as
+            a PR for human review, like escalate_to_councilor.
+    """
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id, current_access_mode
+    from backend.agent.delegation import build_delegation_request, DelegationError
+
+    # Same capability-not-prompt enforcement as check_mailbox: an untrusted
+    # server channel never gets to spend Councilor time, even if the tool
+    # somehow ends up bound there.
+    if current_access_mode.get() == "server":
+        return "Delegation is unavailable in server channels."
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+
+    # Validate the declaration here, synchronously, so the model gets an
+    # actionable error on THIS turn instead of a fire-and-forget request that
+    # comes back rejected minutes later through the mailbox.
+    try:
+        req = build_delegation_request(
+            intent=intent,
+            capabilities=capabilities,
+            needs_network=needs_network,
+            needs_repo_write=needs_repo_write,
+            platform=platform,
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+    except DelegationError as e:
+        return f"Delegation rejected before dispatch: {e}"
+
+    redis = get_redis_client()
+    try:
+        await redis.publish("icarus:councilor:requests", json.dumps(req.to_payload()))
+        logger.info(
+            f"Published delegation {req.task_id} (caps={req.capabilities}, network={req.needs_network}, "
+            f"repo_write={req.needs_repo_write}). Councilor will notify via {(platform or 'unknown').capitalize()}."
+        )
+    except Exception as e:
+        error_msg = f"Failed to publish delegation request: {e}"
+        logger.error(error_msg)
+        return error_msg
+
+    from backend.agent.activity_repo import publish_activity
+    await publish_activity(
+        actor="icarus", event_type="dispatch_delegation",
+        action="dispatched delegate_task", detail=intent,
+        thread_id=req.thread_id, platform=platform, user_id=user_id,
+    )
+
+    scope = ", ".join(req.capabilities) if req.capabilities else "none"
+    where = "sandboxed worktree (result lands as a PR)" if req.needs_repo_write else "Councilor, no repo access"
+    return (
+        f"Delegated task {req.task_id} to the Councilor — capabilities: {scope}; "
+        f"network: {'yes' if req.needs_network else 'no'}; runs in: {where}. "
+        f"It runs in the background; the completion summary will be delivered via "
+        f"{(platform or 'unknown').capitalize()} when done. Log the pending task id with append_memory."
+    )

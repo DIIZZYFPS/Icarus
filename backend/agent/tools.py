@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from contextvars import ContextVar
 from .esc_tool import (
     escalate_to_councilor,
+    delegate_task,
     consult_councilor,
     check_mailbox,
     check_pending_upgrade,
@@ -339,6 +340,7 @@ ICARUS_TOOLS = [
     check_mailbox,
     consult_councilor,
     escalate_to_councilor,
+    delegate_task,
     check_pending_upgrade,
     apply_pending_upgrade,
     dispatch_worker_task,

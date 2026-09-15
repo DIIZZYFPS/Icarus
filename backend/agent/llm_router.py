@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 ROUTING_TABLE = {
     "consultation": "local",
     "scoring":      "local",
-    "escalation":   "local",
+    "escalation":   "local",   # repo-write delegated task (worktree + bwrap)
+    "delegation":   "local",   # capability-scoped delegated task, no worktree
 }
 
 DEFAULT_TIER = "local"

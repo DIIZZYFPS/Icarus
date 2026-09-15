@@ -43,6 +43,17 @@ When receiving an escalation request:
 
 **Git operations (branch, commit, push, PR) are handled automatically** by the Councilor daemon after you exit. Do NOT run `git add`, `git commit`, `git push`, `git checkout`, or any other git commands.
 
+## Your Responsibilities (Delegated Task Mode)
+
+A `delegation` request is a self-contained task Icarus handed off together
+with a capability declaration (`backend/agent/delegation.py`): the tools
+bound to that session are exactly the declared capabilities (`web`,
+`gmail_read`, `calendar_read`, `github_read`, `github_write`, `telemetry`,
+`tracked_items`, `time`) and nothing else. `needs_repo_write: true` is the
+escalation path above — same worktree, same sandbox, same PR-only landing.
+Whatever the shape, Icarus only ever receives the short completion envelope;
+raw tool output stays with the subagent and is discarded when the task ends.
+
 ## Your Responsibilities (Consultation Mode)
 
 When receiving a consultation request:
@@ -53,7 +64,8 @@ When receiving a consultation request:
 ## Current Codebase State
 
 - **L1 Agent**: `backend/agent/engine.py` — no ADK. `run_icarus()` calls `local_llm.local_agent_loop()` directly, against the same local llama-server L2/scoring use. `icarus-brain` (dockerized Ollama, small model) is retired.
-- **Tool registry**: `backend/agent/tools.py` — filesystem, memory, transcript recall, tracked items, GitHub, Gmail, Calendar, worker dispatch, escalation tools
+- **Tool registry**: `backend/agent/tools.py` — filesystem, memory, transcript recall, tracked items, GitHub, Gmail, Calendar, worker dispatch, escalation/delegation tools
+- **Delegation contract**: `backend/agent/delegation.py` — request shape, capability catalog, completion envelope shared by L1 (`esc_tool.delegate_task`) and the Councilor (`process_delegation`)
 - **LLM Router**: `backend/agent/llm_router.py` — routes to local by default; `backend/agent/local_llm.py` is the local llama-server client (chat + tool-calling loop), shared by L1 and L2
 - **Memory**: `backend/agent/memory_repo.py` — SQLite + FTS5, auto-compaction, scored retrieval
 - **Webhook**: `backend/routes/webhook.py` — Telegram webhook
