@@ -153,6 +153,47 @@ async def _load_memory_context(
         return ""
 
 
+# ── Paused-subagent replies ─────────────────────────────────────────────────
+
+async def _try_resume_paused_subagent(
+    platform: str,
+    user_id: str,
+    chat_id: str,
+    text: str,
+    reply_to_message_id: str | None,
+    conversation_id: str,
+) -> str | None:
+    """If this operator message answers a subagent paused on ask_supervisor
+    (backend/agent/subagent_resume.py), forward it and return the
+    confirmation to send back — the model never sees the message. Returns
+    None for ordinary conversation, or on any failure (which then falls
+    through to normal processing rather than eating the message)."""
+    try:
+        from backend.agent.subagent_resume import resolve_paused_reply, deliver_resume
+
+        redis = get_redis_client()
+        resolved = await resolve_paused_reply(
+            redis, platform=platform, chat_id=chat_id, text=text, reply_to_message_id=reply_to_message_id,
+        )
+        if not resolved:
+            return None
+        task_id, answer = resolved
+        await deliver_resume(redis, task_id, answer, user_id=user_id)
+    except Exception as e:
+        logger.warning(f"[resume] could not resolve/deliver a paused-subagent reply: {e}")
+        return None
+
+    confirmation = f"Passed your answer to subagent {task_id} — it's resuming now."
+    try:
+        from backend.agent.transcript_repo import log_message
+        await log_message(platform, user_id, "user", text, conversation_id=conversation_id)
+        await log_message(platform, user_id, "assistant", confirmation, conversation_id=conversation_id)
+    except Exception as e:
+        logger.warning(f"[transcript] Failed to log resume exchange: {e}")
+    logger.info(f"[resume] operator answer routed to {task_id}")
+    return confirmation
+
+
 # ── Message Processing ──────────────────────────────────────────────────────
 
 async def process_message(
@@ -219,6 +260,16 @@ async def process_message(
         if image_urls:
             suffix = "image" if len(image_urls) == 1 else "images"
             text_for_record = f"{text}\n[Attached {len(image_urls)} {suffix}]"
+
+        # An operator reply to a paused subagent is routed to that subagent,
+        # deterministically, before the model is involved. Never from server
+        # channels, never for system-generated hydration prompts.
+        if not skip_history and not server_conversation:
+            resumed = await _try_resume_paused_subagent(
+                platform, user_id, str(chat_id), text, reply_to_message_id, resolved_conversation_id,
+            )
+            if resumed:
+                return resumed
 
         history = [] if skip_history else await get_chat_history(history_id)
         memory_context = await _load_memory_context(

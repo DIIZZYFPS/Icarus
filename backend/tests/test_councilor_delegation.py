@@ -95,7 +95,7 @@ class ProcessDelegationTests(unittest.IsolatedAsyncioTestCase):
 
         # The subagent really did receive the dump inside its own loop...
         self.assertEqual(len(server.requests), 2)
-        self.assertEqual(server.tool_names_offered(0), ["web_search"])
+        self.assertEqual(server.tool_names_offered(0), ["ask_supervisor", "web_search"])
         self.assertTrue(any(RAW_DUMP_MARKER in m for m in server.tool_messages(1)))
 
         # ...and L1's mailbox only ever gets the envelope.
@@ -175,7 +175,8 @@ class ProcessDelegationTests(unittest.IsolatedAsyncioTestCase):
                 })
 
         self.assertEqual(
-            server.tool_names_offered(0), ["read_file", "write_file", "list_directory", "run_command"],
+            server.tool_names_offered(0),
+            ["read_file", "write_file", "list_directory", "run_command", "ask_supervisor"],
         )
         self.assertIn("isolated git worktree", server.requests[0]["messages"][0]["content"])
         msg = self._mailbox()[0]

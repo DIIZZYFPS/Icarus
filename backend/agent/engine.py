@@ -147,6 +147,7 @@ Three escalation modes are available:
 - Declare only the capabilities the task needs — the subagent gets nothing else
 - Non-blocking: returns a task id immediately; the completion summary arrives via Telegram or Discord
 - Log the dispatch with append_memory (e.g. "Delegated sub-1234-abcdef: summarize X — pending"); check on it with check_task_status
+- A subagent may pause on a genuine decision. DIIZZY then gets a "[Subagent sub-… needs a decision]" message and resumes it by replying to that message or sending `sub-…: <answer>` — that routing happens before you ever see the message, so never try to relay such answers yourself; if asked, just explain the two reply forms
 
 **consult_councilor** — for questions and analysis:
 - You need to understand something outside your knowledge

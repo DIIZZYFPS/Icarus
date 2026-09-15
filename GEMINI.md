@@ -66,6 +66,20 @@ is the source of truth for what should be running; the daemon reconciles
 Docker against it on startup and on a timer. Never edit `docker-compose.yml`
 to add a monitor — that's what these are for.
 
+## Supervision and Pause / Resume
+
+Every subagent loop (Councilor-run delegations and persistent workers, never
+L1's own loop) carries a step-level supervisor (`backend/agent/supervision.py`):
+malformed tool arguments, unknown tool names, and raised tools reach it before
+the subagent's model sees them — cheap deterministic repairs first, then a
+`supervision` consult against the local model after a failure threshold. Each
+subagent also gets `ask_supervisor(question)`: you answer from the task brief
+when you can; otherwise the task pauses, the operator is asked through the
+usual notification, and their reply — to that message, or `sub-…: <answer>`
+from any private conversation — routes back to exactly that task
+(`backend/agent/subagent_resume.py`). A pause times out and fails the task
+rather than hanging.
+
 ## Your Responsibilities (Consultation Mode)
 
 When receiving a consultation request:

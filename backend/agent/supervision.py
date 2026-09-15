@@ -266,3 +266,146 @@ class Supervisor:
         else:
             verdict["source"] = "consult"
         return verdict
+
+
+# ── Phase 5: ask_supervisor — scoping clarification with pause / resume ──────
+# Not an error path. A subagent that hits real ambiguity — a decision the
+# brief doesn't settle and only the operator can make — asks instead of
+# guessing. The Councilor answers from context when it can (same shape as
+# consult_councilor); otherwise the task pauses, the operator is asked via
+# the usual notification channel, and the reply routes back to this one
+# task through backend/agent/subagent_resume.py. A pause has a timeout: an
+# indefinitely paused subagent is a stuck subagent, so on timeout the tool
+# raises AgentAbort and the task fails cleanly back to L1.
+
+ASK_SUPERVISOR_SYSTEM_PROMPT = """You are The Councilor answering a scoping question from a subagent working on a task for Project Icarus.
+Answer ONLY if the task brief plus ordinary good judgment settle it — keep it to
+a few sentences the subagent can act on immediately.
+If the decision is genuinely the operator's — spending money, sending anything
+on their behalf, deleting or changing their data, choosing between options only
+they can weigh, or anything the brief doesn't cover and can't reasonably be
+inferred — reply with exactly the single word:
+NEED_OPERATOR
+"""
+
+
+def make_ask_supervisor(
+    *,
+    task_id: str,
+    intent: str,
+    platform: str | None,
+    chat_id: str | None,
+    redis_getter: Callable[[], Awaitable[Any]],
+    notify: Callable[[str | None, str | None, str], Any],
+    generate: Callable[..., Awaitable[str]] | None = None,
+    registry=None,
+    timeout_seconds: int | None = None,
+    memory_context: str = "",
+    on_pause_state: Callable[[str, str | None], Awaitable[None]] | None = None,
+):
+    """Build the ask_supervisor tool bound to one subagent.
+
+    redis_getter: async -> redis client (shared with L1, where replies land).
+    notify: sync (platform, chat_id, text) -> NotifyResult-like with
+        .message_ids / .target_id / .platform (None tolerated).
+    registry: the Councilor's SubagentRegistry, or None for a worker that
+        must not write it (single-writer rule) — on_pause_state is its
+        alternative for surfacing paused/running state."""
+    from backend.agent.subagent_resume import PAUSE_TIMEOUT_SECONDS, record_pause, clear_pause, wait_for_resume
+
+    timeout = int(timeout_seconds if timeout_seconds is not None else PAUSE_TIMEOUT_SECONDS)
+
+    async def _state(state: str, question: str | None) -> None:
+        if registry is not None:
+            try:
+                if state == "paused":
+                    await registry.set_status(task_id, "paused", paused_question=(question or "")[:2000])
+                elif state == "running":
+                    await registry.set_status(task_id, "running", paused_question=None)
+            except Exception as e:
+                logger.warning(f"[ask_supervisor {task_id}] registry update failed: {e}")
+        if on_pause_state is not None:
+            try:
+                await on_pause_state(state, question)
+            except Exception as e:
+                logger.warning(f"[ask_supervisor {task_id}] pause-state callback failed: {e}")
+
+    async def _activity(event_type: str, action: str, detail: str, severity: str = "info") -> None:
+        try:
+            from backend.agent.activity_repo import publish_activity
+            await publish_activity(
+                actor="councilor", event_type=event_type, action=action, detail=detail,
+                thread_id=f"sub-{task_id}", platform=platform, user_id=None, severity=severity,
+            )
+        except Exception:
+            pass
+
+    async def ask_supervisor(question: str) -> str:
+        """Ask your supervisor (the Councilor) when the task brief leaves a real decision open — not for facts your tools can find. Blocks until answered: the Councilor answers from context when it can; otherwise it asks the operator and pauses you until they reply (or a timeout ends the task). Ask one precise question."""
+        import asyncio
+        from backend.agent.local_llm import AgentAbort
+
+        question = (question or "").strip()
+        if not question:
+            return "Ask a specific question — what decision do you need made?"
+
+        # 1. The Councilor's own judgment first.
+        gen = generate
+        if gen is None:
+            from backend.agent.llm_router import generate as router_generate
+            gen = router_generate
+        prompt = f"Task brief:\n{intent}\n\n"
+        if memory_context:
+            prompt += memory_context + "\n"
+        prompt += f"Subagent's question:\n{question}"
+        try:
+            answer = await gen(
+                task_type="supervision",
+                messages=[{"role": "user", "text": prompt}],
+                system_instruction=ASK_SUPERVISOR_SYSTEM_PROMPT,
+                max_tokens=400,
+            )
+        except Exception as e:
+            logger.warning(f"[ask_supervisor {task_id}] consult failed, relaying to operator: {e}")
+            answer = ""
+        answer = (answer or "").strip()
+        if answer and "NEED_OPERATOR" not in answer.upper() and not answer.startswith("Local LLM error"):
+            logger.info(f"[ask_supervisor {task_id}] answered from context")
+            return f"Supervisor's answer: {answer}"
+
+        # 2. Pause and relay to the operator.
+        redis = await redis_getter()
+        await _state("paused", question)
+        text = (
+            f"[Subagent {task_id} needs a decision]\n\n{question}\n\n"
+            f"Reply to this message — or send `{task_id}: <your answer>` — to resume it. "
+            f"It gives up after {max(1, timeout // 60)} min without an answer."
+        )
+        result = await asyncio.to_thread(notify, platform, chat_id, text)
+        message_ids = [str(m) for m in (getattr(result, "message_ids", None) or [])]
+        target_platform = getattr(result, "platform", None) or platform
+        target_chat = getattr(result, "target_id", None) or chat_id
+        if not message_ids:
+            logger.warning(f"[ask_supervisor {task_id}] pause notice returned no message ids — only the explicit `{task_id}:` reply form will resume it")
+        await record_pause(
+            redis, task_id=task_id, question=question, platform=target_platform, chat_id=target_chat,
+            delivery_message_ids=message_ids, timeout_seconds=timeout,
+        )
+        await _activity("paused", "paused — waiting on the operator", question, severity="warning")
+        logger.info(f"[ask_supervisor {task_id}] paused, waiting up to {timeout}s for the operator")
+
+        reply = await wait_for_resume(redis, task_id, timeout)
+        await clear_pause(redis, task_id)
+        if reply is None:
+            await _state("timed_out", question)
+            await _activity("failed", "pause timed out — no operator reply", question, severity="critical")
+            raise AgentAbort(
+                f"paused for an operator decision and none arrived within {timeout}s — the question was: {question[:200]}"
+            )
+        await _state("running", None)
+        operator_answer = str(reply.get("answer") or "").strip() or "(empty reply)"
+        await _activity("resumed", "resumed — operator answered", operator_answer)
+        logger.info(f"[ask_supervisor {task_id}] resumed with the operator's answer")
+        return f"Operator's answer: {operator_answer}"
+
+    return ask_supervisor

@@ -70,6 +70,9 @@ Rules:
 - You cannot modify Icarus's source, run shell commands, or acquire new
   capabilities. If the directive needs something you don't have, report that
   once and note it.
+- ask_supervisor(question) is for a genuine decision the directive leaves open
+  — not for anything your tools can find out. It may pause you until the
+  operator answers; ask one precise question, sparingly.
 """
 
 
@@ -221,12 +224,31 @@ class PersistentSubagent:
 
         return [save_note, read_notes, delete_note, report_to_operator]
 
+    def _ask_supervisor_tool(self):
+        from backend.agent.supervision import make_ask_supervisor
+        from backend.agent.operator_notify import notify
+
+        async def _redis():
+            return self.redis
+
+        # The worker never writes the Councilor's registry (single writer);
+        # paused/running shows up in the health hash instead.
+        return make_ask_supervisor(
+            task_id=self.task_id, intent=self.intent,
+            platform=self.spec.get("platform"), chat_id=self.spec.get("chat_id"),
+            redis_getter=_redis, notify=notify, registry=None,
+            on_pause_state=self._on_pause_state,
+        )
+
+    async def _on_pause_state(self, state: str, question: str | None) -> None:
+        await self.heartbeat("paused" if state == "paused" else "alive")
+
     def build_tools(self) -> None:
         try:
             req = self._request()
         except Exception as e:
             raise SubagentConfigError(f"invalid capability declaration in spec: {e}") from e
-        resolved = resolve_tools(req, extra_tools=self._own_tools())
+        resolved = resolve_tools(req, extra_tools=[*self._own_tools(), self._ask_supervisor_tool()])
         if resolved.unavailable:
             reasons = "; ".join(f"{k}: {v}" for k, v in resolved.unavailable.items())
             raise SubagentConfigError(f"declared capabilities unavailable in this image — {reasons}")

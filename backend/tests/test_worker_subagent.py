@@ -78,7 +78,7 @@ class PersistentSubagentTests(unittest.IsolatedAsyncioTestCase):
         agent.build_tools()
         self.assertEqual(
             [t.__name__ for t in agent.tools],
-            ["save_note", "read_notes", "delete_note", "report_to_operator", "get_time"],
+            ["save_note", "read_notes", "delete_note", "report_to_operator", "ask_supervisor", "get_time"],
         )
         self.assertIn("- time: get_time", agent.grants)
         self.assertIn("sub-1700000000-abcdef", agent.system_prompt)
