@@ -441,3 +441,128 @@ async def check_task_status(task_id: str = "") -> str:
 
     from backend.agent.subagent_registry import describe_task
     return await describe_task(task_id)
+
+
+async def create_persistent_subagent(
+    intent: str,
+    capabilities: list[str],
+    needs_network: bool = False,
+    interval_minutes: int = 15,
+) -> str:
+    """Create a persistent subagent that keeps working on a standing directive on a schedule.
+
+    Unlike delegate_task (one job, then done), this provisions a long-lived
+    worker container that wakes every `interval_minutes`, acts on the
+    directive with ONLY the capabilities declared here, keeps its own notes
+    between cycles, and messages the operator only when something material
+    changes. Its capability grant expires after a configured TTL (default one
+    week) — re-create it to renew. This call returns IMMEDIATELY; the
+    Councilor confirms the subagent's id via the current platform. Log that
+    id with append_memory when it arrives.
+
+    Args:
+        intent: The standing directive, complete and self-contained — what to
+            watch or maintain, what counts as worth reporting, what to ignore.
+        capabilities: Capability names it needs, from: time, web, gmail_read,
+            calendar_read, github_read, github_write, telemetry, tracked_items.
+        needs_network: True if any declared capability reaches the network.
+        interval_minutes: Minutes between cycles (1–1440; default 15).
+    """
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id, current_access_mode
+    from backend.agent.delegation import validate_declaration, DelegationError
+
+    if current_access_mode.get() == "server":
+        return "Persistent subagents are unavailable in server channels."
+
+    intent = (intent or "").strip()
+    if not intent:
+        return "Rejected: intent must be a non-empty standing directive."
+    try:
+        caps = validate_declaration(capabilities, bool(needs_network), False)
+    except DelegationError as e:
+        return f"Rejected before dispatch: {e}"
+    try:
+        minutes = int(interval_minutes)
+    except (TypeError, ValueError):
+        minutes = 15
+    minutes = max(1, min(1440, minutes))
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    timestamp = int(time.time())
+    payload = json.dumps({
+        "type": "subagent_create",
+        "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "intent": intent,
+        "capabilities": caps,
+        "needs_network": bool(needs_network),
+        "interval_seconds": minutes * 60,
+    })
+    redis = get_redis_client()
+    try:
+        await redis.publish("icarus:councilor:requests", payload)
+    except Exception as e:
+        return f"Failed to publish subagent request: {e}"
+
+    from backend.agent.activity_repo import publish_activity
+    await publish_activity(
+        actor="icarus", event_type="dispatch_subagent_create",
+        action="requested create_persistent_subagent", detail=intent,
+        thread_id=f"subagent-{timestamp}", platform=platform, user_id=user_id,
+    )
+    return (
+        f"Requested a persistent subagent (capabilities: {', '.join(caps) or 'none'}; every {minutes} min). "
+        f"The Councilor is provisioning it and will confirm its id (sub-…) via "
+        f"{(platform or 'unknown').capitalize()} — log that id with append_memory when it arrives."
+    )
+
+
+async def stop_subagent(task_id: str) -> str:
+    """Stop and remove a persistent subagent, or cancel a running delegated task, by its id (sub-…).
+
+    Returns IMMEDIATELY; the Councilor confirms via the current platform. Only
+    call this when DIIZZY asks for a subagent or task to be stopped.
+
+    Args:
+        task_id: The id from create_persistent_subagent's confirmation or delegate_task.
+    """
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id, current_access_mode
+    from backend.agent.delegation import is_task_id
+
+    if current_access_mode.get() == "server":
+        return "Stopping subagents is unavailable in server channels."
+    task_id = (task_id or "").strip()
+    if not is_task_id(task_id):
+        return f"'{task_id}' is not a task id — ids look like sub-1700000000-a1b2c3. Use check_task_status('') to list recent ones."
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    timestamp = int(time.time())
+    payload = json.dumps({
+        "type": "subagent_stop",
+        "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "task_id": task_id,
+    })
+    redis = get_redis_client()
+    try:
+        await redis.publish("icarus:councilor:requests", payload)
+    except Exception as e:
+        return f"Failed to publish stop request: {e}"
+
+    from backend.agent.activity_repo import publish_activity
+    await publish_activity(
+        actor="icarus", event_type="dispatch_subagent_stop",
+        action="requested stop_subagent", detail=task_id,
+        thread_id=f"sub-{task_id}", platform=platform, user_id=user_id,
+    )
+    return f"Stop requested for {task_id}. The Councilor will confirm via {(platform or 'unknown').capitalize()}."

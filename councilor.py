@@ -686,6 +686,10 @@ def _handle_request(data: dict) -> asyncio.Task:
         coro = process_deploy_check(data)
     elif req_type == "deploy_apply":
         coro = process_deploy_apply(data)
+    elif req_type == "subagent_create":
+        coro = process_subagent_create(data)
+    elif req_type == "subagent_stop":
+        coro = process_subagent_stop(data)
     else:
         coro = process_consultation(data)
     return _dispatch(_dispatch_key(req_type, data), coro)
@@ -910,6 +914,161 @@ async def process_escalation(data: dict):
     await process_delegation({**data, "type": "escalation"})
 
 
+# ── Persistent subagents ─────────────────────────────────────────────────────
+# Long-lived containers on the compose daemon (backend/agent/subagent_manager.py
+# owns the lifecycle; backend/agent/worker_subagent.py is what runs inside).
+# Two request types from L1 — subagent_create / subagent_stop — plus
+# reconciliation against Docker on startup and on a timer, since these
+# containers outlive this process and nothing else supervises them.
+
+SUBAGENT_RECONCILE_INTERVAL = int(os.getenv("SUBAGENT_RECONCILE_INTERVAL_SECONDS", "600"))
+_subagent_manager = None
+
+
+def _manager():
+    global _subagent_manager
+    if _subagent_manager is None:
+        from backend.agent.subagent_manager import SubagentManager
+        from backend.agent.docker_runtime import DockerRuntime
+        _subagent_manager = SubagentManager(_registry(), DockerRuntime(), PROJECT_ROOT)
+    return _subagent_manager
+
+
+async def _deliver_lifecycle(timestamp: int, message: str, platform, chat_id, task_id: str | None, *, failed: bool, event: str):
+    from backend.agent.activity_repo import publish_activity
+    await _publish_response(timestamp, "subagent_lifecycle", message, platform, chat_id, task_id=task_id)
+    await publish_activity(
+        actor="councilor", event_type="failed" if failed else event, action=message.split("\n", 1)[0][:120],
+        detail=message, thread_id=f"sub-{task_id}" if task_id else f"subagent-{timestamp}",
+        platform=platform, user_id=None, severity="warning" if failed else "info",
+    )
+    await asyncio.to_thread(_notify, platform, chat_id, f"[Icarus Subagent]\n\n{message}")
+
+
+async def process_subagent_create(data: dict):
+    """Provision a persistent subagent container from an L1 request."""
+    from backend.agent.subagent_manager import SubagentLimitError
+    from backend.agent.delegation import DelegationError
+
+    platform = data.get("platform")
+    chat_id = data.get("chat_id")
+    user_id = data.get("user_id")
+    timestamp = data.get("timestamp", int(time.time()))
+    task_id = None
+    failed = True
+    try:
+        row = await _manager().create(
+            intent=data.get("intent", ""),
+            capabilities=data.get("capabilities") or [],
+            needs_network=bool(data.get("needs_network")),
+            interval_seconds=data.get("interval_seconds"),
+            ttl_hours=data.get("ttl_hours"),
+            platform=platform, chat_id=str(chat_id) if chat_id is not None else None,
+            user_id=str(user_id) if user_id is not None else None,
+        )
+    except (DelegationError, SubagentLimitError) as e:
+        message = f"Persistent subagent not created: {e}"
+    except Exception as e:
+        logger.exception("Persistent subagent creation failed")
+        message = f"Persistent subagent creation failed: {e}"
+    else:
+        failed = False
+        task_id = row["id"]
+        scope = row["capability_scope"]
+        caps = ", ".join(scope.get("capabilities") or []) or "none"
+        message = (
+            f"Persistent subagent {task_id} is running (container {row['container_name']}) — "
+            f"capabilities: {caps}; network: {'yes' if scope.get('needs_network') else 'no'}; "
+            f"cycle every {row['interval_seconds'] // 60} min; capability grant expires {row['expires_at'] or 'never'}.\n"
+            f"Directive: {row['intent'][:300]}\n"
+            f"It reports only material updates. check_task_status('{task_id}') shows its state; "
+            f"stop_subagent('{task_id}') tears it down."
+        )
+    logger.info(f"subagent_create: {message[:200]}")
+    await _deliver_lifecycle(timestamp, message, platform, chat_id, task_id, failed=failed, event="subagent_created")
+
+
+async def process_subagent_stop(data: dict):
+    """Stop a persistent subagent, or cancel an in-flight one-shot task."""
+    from backend.agent.subagent_manager import SubagentNotFound
+    from backend.agent.subagent_registry import KIND_ONESHOT, STATUS_FAILED as REG_STATUS_FAILED, ACTIVE_STATUSES
+
+    platform = data.get("platform")
+    chat_id = data.get("chat_id")
+    timestamp = data.get("timestamp", int(time.time()))
+    task_id = str(data.get("task_id") or "").strip()
+    failed = True
+    try:
+        row = await _registry().get(task_id) if task_id else None
+        if row is None:
+            message = f"No task or subagent with id {task_id!r} in the registry."
+        elif row["kind"] == KIND_ONESHOT:
+            inflight = _inflight.get(task_id)
+            if inflight is not None and not inflight.done():
+                inflight.cancel()
+                await _registry().set_status(task_id, REG_STATUS_FAILED, error="cancelled by operator via stop_subagent")
+                message = f"Cancelled running task {task_id}."
+                failed = False
+            elif row["status"] in ACTIVE_STATUSES:
+                await _registry().set_status(task_id, REG_STATUS_FAILED, error="marked stopped by operator; no live task found")
+                message = f"Task {task_id} was marked {row['status']} but nothing was running it — marked failed."
+                failed = False
+            else:
+                message = f"Task {task_id} already finished ({row['status']}); nothing to stop."
+        else:
+            row = await _manager().stop(task_id)
+            removed = (row.get("result") or {}).get("container_removed")
+            message = (
+                f"Stopped persistent subagent {task_id}: container "
+                f"{'removed' if removed else 'was already gone'}; registry marked stopped."
+            )
+            failed = False
+    except SubagentNotFound as e:
+        message = f"Stop failed: {e}"
+    except Exception as e:
+        logger.exception("subagent_stop failed")
+        message = f"Stop failed for {task_id}: {e}"
+    logger.info(f"subagent_stop: {message[:200]}")
+    await _deliver_lifecycle(timestamp, message, platform, chat_id, task_id or None, failed=failed, event="subagent_stopped")
+
+
+async def _reconcile_subagents(trigger: str):
+    """Docker <-> registry reconciliation. Respawns and failures are surfaced
+    to whoever created the subagent, via the same mailbox path as everything
+    else; the routine healthy/expired cases only log."""
+    try:
+        manager = _manager()
+        if not await manager.runtime.available():
+            logger.warning(f"[subagents] docker unavailable — skipping reconcile ({trigger})")
+            return None
+        report = await manager.reconcile()
+        logger.info(f"[subagents] reconcile ({trigger}): {report.summary()}")
+        for task_id in report.respawned + report.config_failed + list(report.failed):
+            row = await _registry().get(task_id)
+            if row is None:
+                continue
+            if task_id in report.respawned:
+                text = f"Persistent subagent {task_id} was not running — respawned it (restart #{row['restart_count']})."
+                failed = False
+            elif task_id in report.config_failed:
+                text = f"Persistent subagent {task_id} stopped: {row['last_error']}"
+                failed = True
+            else:
+                text = f"Could not reconcile persistent subagent {task_id}: {report.failed[task_id]}"
+                failed = True
+            await _deliver_lifecycle(int(time.time()), text, row["platform"], row["chat_id"], task_id, failed=failed, event="subagent_reconciled")
+        return report
+    except Exception as e:
+        logger.error(f"[subagents] reconcile ({trigger}) crashed: {e}")
+        return None
+
+
+async def _reconcile_loop():
+    while True:
+        await asyncio.sleep(SUBAGENT_RECONCILE_INTERVAL)
+        await _reconcile_subagents("periodic")
+
+
 # ── Redis IPC ────────────────────────────────────────────────────────────────
 
 _redis_client = None
@@ -1016,6 +1175,10 @@ async def async_main():
         )
         if orphaned:
             logger.warning(f"[registry] {len(orphaned)} task(s) from the previous run marked failed")
+        # Persistent subagents outlive this process: make Docker match the
+        # registry now, and keep doing so on a timer (expired grants, crashes).
+        await _reconcile_subagents("startup")
+        _dispatch("subagent-reconcile-loop", _reconcile_loop())
     except Exception as e:
         logger.error(f"[registry] unavailable — task status tracking is off for this run: {e}")
 

@@ -54,6 +54,18 @@ escalation path above — same worktree, same sandbox, same PR-only landing.
 Whatever the shape, Icarus only ever receives the short completion envelope;
 raw tool output stays with the subagent and is discarded when the task ends.
 
+## Persistent Subagents
+
+`subagent_create` / `subagent_stop` requests provision and tear down
+long-lived subagent containers (`backend/agent/subagent_manager.py`,
+running `backend/agent/worker_subagent.py` from the shared `icarus-worker`
+image). Each has its own state directory under `workspace/memory/subagents/`,
+a capability scope that expires, and reports to the operator through the
+same mailbox as everything else. The registry (`workspace/memory/councilor.db`)
+is the source of truth for what should be running; the daemon reconciles
+Docker against it on startup and on a timer. Never edit `docker-compose.yml`
+to add a monitor — that's what these are for.
+
 ## Your Responsibilities (Consultation Mode)
 
 When receiving a consultation request:
