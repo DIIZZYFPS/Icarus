@@ -732,30 +732,55 @@ def _build_delegation_system_prompt(req, resolved) -> str:
     return "\n\n".join(parts)
 
 
+def _make_supervisor(req):
+    """One Supervisor per delegated task — the step-level hook that gets a
+    shot at a malformed call / unknown tool / raised exception before the
+    subagent's own model does (backend/agent/supervision.py). This is the
+    only place a Councilor-run loop gets one; L1's loop never does."""
+    from backend.agent.supervision import Supervisor
+    return Supervisor(req.task_id, req.intent)
+
+
 async def _run_delegation_loop(req, tools, system: str, max_retries: int = MAX_DELEGATION_RETRIES) -> tuple[str, bool]:
     """Run the subagent loop with whole-task retries. Returns (final response,
     loop_failed) — loop_failed is True only when the loop itself broke on the
-    final attempt (transport error, turn budget exhausted), which is what
-    decides the envelope's failed/completed status."""
+    final attempt (transport error, turn budget exhausted, supervisor abort),
+    which is what decides the envelope's failed/completed status."""
     from backend.agent.llm_router import agent_loop
+    from backend.agent.local_llm import AgentAbort
     from backend.agent.delegation import looks_like_loop_failure
 
+    supervisor = _make_supervisor(req)
     response = ""
     for attempt in range(max_retries + 1):
         if attempt > 0:
             logger.info(f"[{req.task_id}] Retry {attempt}/{max_retries}...")
         # Retries reuse the same tools (and, for repo tasks, the same
         # worktree), so a retry sees the prior attempt's partial progress.
-        response = await agent_loop(
-            task_type=req.kind,
-            initial_prompt=req.intent,
-            tools=tools,
-            system_instruction=system,
-        )
+        try:
+            response = await agent_loop(
+                task_type=req.kind,
+                initial_prompt=req.intent,
+                tools=tools,
+                system_instruction=system,
+                supervisor=supervisor,
+            )
+        except AgentAbort as e:
+            # A deliberate stop (supervisor give_up, or a paused subagent
+            # that never got its answer) — retrying blindly would be wrong.
+            logger.warning(f"[{req.task_id}] aborted: {e}")
+            response = f"Agent aborted: {e}"
+            break
         if _looks_failed(response, req) and attempt < max_retries:
             system += f"\n\n[PREVIOUS ATTEMPT FAILED]\n{response}\nPlease fix the issue and try again."
             continue
         break
+    interventions = [d for d in getattr(supervisor, "decisions", []) if d.get("verdict")]
+    if interventions:
+        logger.info(
+            f"[{req.task_id}] supervisor intervened {len(interventions)} time(s): "
+            + ", ".join(f"{d['kind']}->{d['verdict'].get('action')}" for d in interventions)
+        )
     return response, looks_like_loop_failure(response)
 
 

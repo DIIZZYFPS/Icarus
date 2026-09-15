@@ -223,6 +223,70 @@ class ProcessDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(server.requests), 1)
         self.assertEqual(self._mailbox()[0]["envelope"]["status"], "completed")
 
+    # ── Phase 4: step-level supervision inside a delegated task ───────────
+
+    async def test_supervisor_repairs_a_malformed_tool_call_inside_a_delegated_task(self):
+        seen = []
+
+        async def web_search(query: str, num_results: int = 5) -> str:
+            """fake"""
+            seen.append(query)
+            return "RESULTS"
+
+        server = ScriptedLlamaServer([
+            tool_call_response([("web_search", '{"query": "bwrap",}')]),   # trailing comma: not JSON
+            text_response("bwrap is a sandboxing tool."),
+        ])
+        data = delegation.build_delegation_request(
+            intent="what is bwrap", capabilities=["web"], needs_network=True, timestamp=1700000000,
+        ).to_payload()
+        cat = {"web": CapabilitySpec("web", "", True, lambda req: [web_search])}
+        with mock.patch.dict(delegation.CAPABILITY_CATALOG, cat, clear=False), server.patched():
+            await councilor.process_delegation(data)
+
+        self.assertEqual(seen, ["bwrap"])   # repaired and executed, not run with {}
+        msg = self._mailbox()[0]
+        self.assertEqual(msg["envelope"]["status"], "completed")
+        self.assertIn("sandboxing tool", msg["message"])
+        self.assertEqual(len(server.requests), 2)   # no model round-trip was spent on the repair
+
+    async def test_supervisor_give_up_fails_the_task_without_retries(self):
+        from backend.agent.supervision import Supervisor
+
+        async def gmail_list_messages(query: str = "is:unread") -> str:
+            """fake"""
+            raise RuntimeError("invalid_grant: refresh token revoked")
+
+        async def verdict(**kw):
+            return '{"action": "give_up", "reason": "Gmail credentials are revoked; the operator must re-authorize"}'
+
+        server = ScriptedLlamaServer([
+            tool_call_response([("gmail_list_messages", '{"query": "invoices"}')]),
+            text_response("unreachable"),
+        ])
+        data = delegation.build_delegation_request(
+            intent="find invoices", capabilities=["gmail_read"], needs_network=True, timestamp=1700000000,
+        ).to_payload()
+        cat = {"gmail_read": CapabilitySpec("gmail_read", "", True, lambda req: [gmail_list_messages])}
+        with mock.patch.dict(delegation.CAPABILITY_CATALOG, cat, clear=False), server.patched(), \
+             mock.patch.object(councilor, "_make_supervisor",
+                               lambda req: Supervisor(req.task_id, req.intent, generate=verdict, failure_threshold=1)):
+            await councilor.process_delegation(data)
+
+        self.assertEqual(len(server.requests), 1)   # aborted: no retries, no further turns
+        msg = self._mailbox()[0]
+        self.assertEqual(msg["envelope"]["status"], "failed")
+        self.assertIn("Agent aborted", msg["envelope"]["error"])
+        self.assertIn("re-authorize", msg["envelope"]["error"])
+        self.assertIn("Failed", self.notified[0][2])
+
+    async def test_l1_loop_gets_no_supervisor(self):
+        # The §2 boundary, checked structurally: nothing in L1's engine ever
+        # mentions a supervisor. Read as text — engine.py imports the Google
+        # tool modules, which the Councilor's host venv doesn't have.
+        engine_source = (Path(__file__).resolve().parents[1] / "agent" / "engine.py").read_text(encoding="utf-8")
+        self.assertNotIn("supervisor", engine_source)
+
 
 if __name__ == "__main__":
     unittest.main()

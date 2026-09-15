@@ -480,6 +480,7 @@ STATUS_FAILED = "failed"
 # only responses that mean "the loop itself broke", as opposed to a model
 # summary that happens to contain the word "error".
 _LOOP_FAILURE_PREFIXES = (
+    "Agent aborted:",
     "Agent loop error on turn",
     "(Agent loop exhausted",
     "(Agent produced no output)",

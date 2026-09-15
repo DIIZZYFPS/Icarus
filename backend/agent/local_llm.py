@@ -47,6 +47,19 @@ MAX_IMAGES_PER_TURN = 4
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# How many supervised retries/redirects one tool call may consume before the
+# loop falls back to handing the error to the model as plain text.
+MAX_SUPERVISED_ATTEMPTS = 2
+
+
+class AgentAbort(Exception):
+    """Raised out of local_agent_loop() when the run must stop now rather
+    than continue to the model's next turn: a supervisor verdict of
+    give_up, or a tool (e.g. ask_supervisor) that timed out waiting on a
+    decision only the operator can make. Callers turn it into a failed
+    completion envelope. Never raised for L1's own loop — nothing binds a
+    supervisor or an aborting tool there."""
+
 
 def _strip_reasoning(text: str) -> str:
     """Strip <think> blocks — Qwen3.6 emits reasoning separately in
@@ -247,6 +260,78 @@ def _describe_activity(fn_name: str, args: dict) -> str:
     return f"🔧 Using `{fn_name}`…"
 
 
+async def _supervise(supervisor, event: dict) -> dict | None:
+    """Call the supervision hook defensively: a crashing hook is logged and
+    treated as 'no opinion', never allowed to take the loop down."""
+    try:
+        verdict = await supervisor(event)
+    except Exception as e:
+        logger.warning(f"[local_llm] supervisor hook failed on {event.get('kind')}: {e}")
+        return None
+    return verdict if isinstance(verdict, dict) else None
+
+
+async def _run_tool(fn: Callable, args: dict) -> str:
+    result = fn(**args)
+    if inspect.isawaitable(result):
+        result = await result
+    return result if isinstance(result, str) else json.dumps(result)
+
+
+async def _execute_tool(
+    fn_name: str,
+    fn: Callable,
+    args: dict,
+    *,
+    tool_map: dict,
+    schema_map: dict,
+    supervisor,
+    failures: dict[str, int],
+) -> str:
+    """Run one tool call. On an exception, give the supervisor (if any) the
+    error before it's serialized into the transcript: it may retry (with
+    fixed args), redirect to another tool, attach a note, or abort. With no
+    supervisor this is exactly the pre-supervision behaviour."""
+    attempts = 0
+    while True:
+        try:
+            logger.info(f"[local_llm] Executing tool: {fn_name}({list(args.keys())})")
+            result_text = await _run_tool(fn, args)
+            failures[fn_name] = 0
+            return result_text
+        except AgentAbort:
+            raise
+        except Exception as e:
+            failures[fn_name] = failures.get(fn_name, 0) + 1
+            logger.error(f"[local_llm] Tool {fn_name} failed: {e}")
+            verdict = None
+            if supervisor is not None and attempts < MAX_SUPERVISED_ATTEMPTS:
+                verdict = await _supervise(supervisor, {
+                    "kind": "exec_error", "tool": fn_name, "args": args, "error": str(e),
+                    "consecutive_failures": failures[fn_name],
+                    "schema": schema_map.get(fn_name), "available_tools": list(tool_map),
+                })
+            action = verdict.get("action") if verdict else None
+            if action == "retry":
+                attempts += 1
+                if isinstance(verdict.get("args"), dict):
+                    args = verdict["args"]
+                continue
+            if action == "redirect" and verdict.get("tool") in tool_map:
+                attempts += 1
+                logger.info(f"[local_llm] Supervisor redirected {fn_name!r} -> {verdict['tool']!r} after failure")
+                fn_name = verdict["tool"]
+                fn = tool_map[fn_name]
+                args = verdict.get("args") if isinstance(verdict.get("args"), dict) else {}
+                continue
+            if action == "give_up":
+                raise AgentAbort(verdict.get("reason") or f"supervisor gave up after {fn_name} failed: {e}")
+            payload = {"error": str(e)}
+            if action == "note" and verdict.get("note"):
+                payload["supervisor_note"] = str(verdict["note"])
+            return json.dumps(payload)
+
+
 async def local_agent_loop(
     initial_prompt: str,
     tools: list[Callable],
@@ -256,8 +341,21 @@ async def local_agent_loop(
     enable_thinking: bool = True,
     on_activity: Callable[[str], Awaitable[None]] | None = None,
     image_urls: list[str] | None = None,
+    supervisor: Callable[[dict], Awaitable[dict | None]] | None = None,
 ) -> str:
     """Multi-turn tool-calling loop against the local llama-server.
+
+    supervisor, if given, is awaited with an event dict whenever a tool
+    call can't be executed as written — before the failure is serialized
+    into the transcript for the model to react to. Event kinds:
+      malformed_args {tool, raw_arguments, schema, available_tools}
+      unknown_tool   {tool, args, available_tools}
+      exec_error     {tool, args, error, consecutive_failures, schema, available_tools}
+    It returns a verdict dict — {"action": "repair"|"redirect"|"retry"|
+    "note"|"give_up", ...} (see supervision.py) — or None to keep the
+    default behaviour. give_up raises AgentAbort out of this function.
+    Only subagent loops ever pass one (Councilor delegations, persistent
+    workers); L1's own loop in engine.run_icarus never does.
 
     Mirrors llm_router.agent_loop()'s signature/contract so the caller
     (councilor.py) doesn't need to know which backend answered.
@@ -294,6 +392,8 @@ async def local_agent_loop(
     )
     tool_schemas = [_tool_schema(fn) for fn in tools]
     tool_map = {fn.__name__: fn for fn in tools}
+    schema_map = {s["function"]["name"]: s for s in tool_schemas}
+    failures: dict[str, int] = {}   # consecutive failures per tool, for the supervisor's threshold
 
     # MTP speculative decoding can crash on requests carrying image content
     # (see start_qwen.sh) — disable it for every turn of a turn-carrying
@@ -340,11 +440,38 @@ async def local_agent_loop(
 
             for call in tool_calls:
                 fn_name = call["function"]["name"]
+                raw_args = call["function"].get("arguments") or "{}"
                 fn = tool_map.get(fn_name)
                 try:
-                    args = json.loads(call["function"].get("arguments") or "{}")
+                    args = json.loads(raw_args)
+                    if not isinstance(args, dict):
+                        raise json.JSONDecodeError("arguments are not a JSON object", raw_args, 0)
                 except json.JSONDecodeError:
-                    args = {}
+                    args = None
+                    if supervisor is not None:
+                        verdict = await _supervise(supervisor, {
+                            "kind": "malformed_args", "tool": fn_name, "raw_arguments": raw_args,
+                            "schema": schema_map.get(fn_name), "available_tools": list(tool_map),
+                        })
+                        if verdict and verdict.get("action") == "repair" and isinstance(verdict.get("args"), dict):
+                            args = verdict["args"]
+                        elif verdict and verdict.get("action") == "give_up":
+                            raise AgentAbort(verdict.get("reason") or f"supervisor gave up on malformed arguments for {fn_name}")
+                    if args is None:
+                        args = {}   # pre-supervision behaviour: run with no arguments
+
+                if fn is None and supervisor is not None:
+                    verdict = await _supervise(supervisor, {
+                        "kind": "unknown_tool", "tool": fn_name, "args": args, "available_tools": list(tool_map),
+                    })
+                    if verdict and verdict.get("action") == "redirect" and verdict.get("tool") in tool_map:
+                        logger.info(f"[local_llm] Supervisor redirected unknown tool {fn_name!r} -> {verdict['tool']!r}")
+                        fn_name = verdict["tool"]
+                        fn = tool_map[fn_name]
+                        if isinstance(verdict.get("args"), dict):
+                            args = verdict["args"]
+                    elif verdict and verdict.get("action") == "give_up":
+                        raise AgentAbort(verdict.get("reason") or f"supervisor gave up on unknown tool {fn_name}")
 
                 if on_activity:
                     try:
@@ -356,15 +483,10 @@ async def local_agent_loop(
                     logger.warning(f"[local_llm] Model requested unknown tool: {fn_name}")
                     result_text = json.dumps({"error": f"Unknown tool: {fn_name}"})
                 else:
-                    try:
-                        logger.info(f"[local_llm] Executing tool: {fn_name}({list(args.keys())})")
-                        result = fn(**args)
-                        if inspect.isawaitable(result):
-                            result = await result
-                        result_text = result if isinstance(result, str) else json.dumps(result)
-                    except Exception as e:
-                        logger.error(f"[local_llm] Tool {fn_name} failed: {e}")
-                        result_text = json.dumps({"error": str(e)})
+                    result_text = await _execute_tool(
+                        fn_name, fn, args, tool_map=tool_map, schema_map=schema_map,
+                        supervisor=supervisor, failures=failures,
+                    )
 
                 messages.append({
                     "role": "tool",

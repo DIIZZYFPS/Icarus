@@ -156,6 +156,7 @@ class PersistentSubagent:
         redis=None,
         agent_loop=None,
         supervisor=None,
+        supervisor_factory=None,
     ):
         self.spec = spec
         self.task_id = spec["task_id"]
@@ -167,6 +168,9 @@ class PersistentSubagent:
         self._redis = redis
         self._agent_loop = agent_loop
         self._supervisor = supervisor
+        # A factory gives every cycle a fresh consult budget; a fixed hook
+        # is for tests. One or the other.
+        self._supervisor_factory = supervisor_factory
         self._stop = asyncio.Event()
         self._reports_this_cycle = 0
         self.cycle_n = 0
@@ -302,8 +306,9 @@ class PersistentSubagent:
             from backend.agent.local_llm import local_agent_loop
             loop = local_agent_loop
         kwargs = {}
-        if self._supervisor is not None:
-            kwargs["supervisor"] = self._supervisor
+        supervisor = self._supervisor_factory() if self._supervisor_factory else self._supervisor
+        if supervisor is not None:
+            kwargs["supervisor"] = supervisor
         try:
             outcome = await loop(
                 initial_prompt=prompt, tools=self.tools, system_instruction=self.system_prompt,
@@ -385,7 +390,11 @@ def main() -> int:
         logger.error(str(e))
         return EXIT_CONFIG_ERROR
 
-    agent = PersistentSubagent(spec, state_dir)
+    from backend.agent.supervision import Supervisor
+    agent = PersistentSubagent(
+        spec, state_dir,
+        supervisor_factory=lambda: Supervisor(spec["task_id"], spec["intent"]),
+    )
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     for sig in (signal.SIGTERM, signal.SIGINT):
