@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from .esc_tool import (
     escalate_to_councilor,
     delegate_task,
+    check_task_status,
     consult_councilor,
     check_mailbox,
     check_pending_upgrade,
@@ -341,6 +342,7 @@ ICARUS_TOOLS = [
     consult_councilor,
     escalate_to_councilor,
     delegate_task,
+    check_task_status,
     check_pending_upgrade,
     apply_pending_upgrade,
     dispatch_worker_task,

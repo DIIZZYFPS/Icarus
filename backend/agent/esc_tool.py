@@ -418,5 +418,26 @@ async def delegate_task(
         f"Delegated task {req.task_id} to the Councilor — capabilities: {scope}; "
         f"network: {'yes' if req.needs_network else 'no'}; runs in: {where}. "
         f"It runs in the background; the completion summary will be delivered via "
-        f"{(platform or 'unknown').capitalize()} when done. Log the pending task id with append_memory."
+        f"{(platform or 'unknown').capitalize()} when done. Check on it any time with "
+        f"check_task_status('{req.task_id}'). Log the pending task id with append_memory."
     )
+
+
+async def check_task_status(task_id: str = "") -> str:
+    """Check the status of a delegated task or subagent by its id (sub-…).
+
+    Read-only and instant — reads the Councilor's task registry directly and
+    never waits for the task. Reports status (queued / running / paused /
+    completed / failed / stopped), the capability scope, and the completion
+    summary or error once there is one. Call with an empty id to list the
+    ten most recent tasks.
+
+    Args:
+        task_id: The id returned by delegate_task, or empty to list recent tasks.
+    """
+    from backend.agent.tools import current_access_mode
+    if current_access_mode.get() == "server":
+        return "Task status is unavailable in server channels."
+
+    from backend.agent.subagent_registry import describe_task
+    return await describe_task(task_id)

@@ -208,6 +208,7 @@ _ACTIVITY_LABELS: dict[str, Callable[[dict], str]] = {
     "consult_councilor": lambda a: "🧠 Consulting the Councilor…",
     "escalate_to_councilor": lambda a: "📤 Escalating to the Councilor…",
     "delegate_task": lambda a: "🧭 Delegating a task to the Councilor…",
+    "check_task_status": lambda a: "📋 Checking task status…",
     "list_tracked_items": lambda a: "📋 Checking tracked items…",
     "append_memory": lambda a: "🧠 Saving to memory…",
     "check_mailbox": lambda a: "📬 Checking the mailbox…",

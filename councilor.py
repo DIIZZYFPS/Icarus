@@ -621,6 +621,76 @@ async def process_consultation(data: dict):
     logger.info(f"Consultation complete ({len(response)} chars)")
 
 
+# ── Task registry ────────────────────────────────────────────────────────────
+# Durable bookkeeping for every subagent (backend/agent/subagent_registry.py).
+# The Councilor is its only writer; L1 reads it for check_task_status. Every
+# write here is wrapped so a registry hiccup is logged and never breaks the
+# task it narrates — the registry is additive, the mailbox is still the
+# delivery path.
+
+def _registry():
+    from backend.agent.subagent_registry import get_registry
+    return get_registry()
+
+
+async def _registry_call(op: str, coro_factory):
+    try:
+        return await coro_factory()
+    except Exception as e:
+        logger.warning(f"[registry] {op} failed: {e}")
+        return None
+
+
+# ── Concurrent dispatch ──────────────────────────────────────────────────────
+# _listen_for_requests used to await each handler inline, so one long
+# escalation blocked every consultation queued behind it. Handlers now run
+# as tasks; _inflight keeps a strong reference (asyncio only holds weak
+# ones) and the done-callback surfaces crashes that would otherwise be
+# swallowed with the task object.
+
+_inflight: dict[str, asyncio.Task] = {}
+
+
+def _dispatch(key: str, coro) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=key)
+    _inflight[key] = task
+
+    def _done(t: asyncio.Task):
+        if _inflight.get(key) is t:
+            _inflight.pop(key, None)
+        if t.cancelled():
+            logger.warning(f"[dispatch] {key} was cancelled")
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error(f"[dispatch] {key} crashed: {exc!r}", exc_info=exc)
+
+    task.add_done_callback(_done)
+    return task
+
+
+def _dispatch_key(req_type: str, data: dict) -> str:
+    from backend.agent.delegation import is_task_id
+    task_id = data.get("task_id")
+    if is_task_id(task_id):
+        return task_id
+    return f"{req_type}-{data.get('timestamp', int(time.time()))}-{uuid.uuid4().hex[:4]}"
+
+
+def _handle_request(data: dict) -> asyncio.Task:
+    """Route one decoded request to its handler and start it concurrently."""
+    req_type = data.get("type", "consultation")
+    if req_type in ("escalation", "delegation"):
+        coro = process_delegation(data)
+    elif req_type == "deploy_check":
+        coro = process_deploy_check(data)
+    elif req_type == "deploy_apply":
+        coro = process_deploy_apply(data)
+    else:
+        coro = process_consultation(data)
+    return _dispatch(_dispatch_key(req_type, data), coro)
+
+
 # ── Delegated tasks (one-shot subagents) ─────────────────────────────────────
 # A delegation is a self-contained task L1 handed off together with a
 # capability declaration (backend/agent/delegation.py). Two execution shapes:
@@ -720,6 +790,11 @@ async def process_delegation(data: dict):
         parse_delegation_request, stub_request_from, resolve_tools,
         CompletionEnvelope, DelegationError, STATUS_COMPLETED, STATUS_FAILED,
     )
+    from backend.agent.subagent_registry import (
+        KIND_ONESHOT as REG_KIND_ONESHOT,
+        STATUS_QUEUED as REG_STATUS_QUEUED, STATUS_RUNNING as REG_STATUS_RUNNING,
+        STATUS_COMPLETED as REG_STATUS_COMPLETED, STATUS_FAILED as REG_STATUS_FAILED,
+    )
     from backend.agent.activity_repo import publish_activity
 
     started = time.monotonic()
@@ -732,6 +807,15 @@ async def process_delegation(data: dict):
             task_id=stub.task_id, kind=stub.kind, status=STATUS_FAILED,
             raw_summary="", error=f"rejected: {e}",
         )
+        await _registry_call("create(rejected)", lambda: _registry().create(
+            task_id=stub.task_id, kind=REG_KIND_ONESHOT, request_type=stub.kind, intent=stub.intent or "(none)",
+            capabilities=[], needs_network=False, needs_repo_write=stub.needs_repo_write,
+            platform=stub.platform, chat_id=stub.chat_id, user_id=stub.user_id, thread_id=stub.thread_id,
+            status=REG_STATUS_FAILED,
+        ))
+        await _registry_call("set_status(rejected)", lambda: _registry().set_status(
+            stub.task_id, REG_STATUS_FAILED, error=envelope.error, result=envelope.to_dict(),
+        ))
         await _deliver_envelope(stub, envelope, notify_label="Icarus Task Rejected")
         return
 
@@ -740,6 +824,12 @@ async def process_delegation(data: dict):
         f"[{req.task_id}] {req.kind} [platform={req.platform}] caps={req.capabilities} "
         f"network={req.needs_network} repo_write={req.needs_repo_write}: {req.intent[:200]}"
     )
+    await _registry_call("create", lambda: _registry().create(
+        task_id=req.task_id, kind=REG_KIND_ONESHOT, request_type=req.kind, intent=req.intent,
+        capabilities=req.capabilities, needs_network=req.needs_network, needs_repo_write=req.needs_repo_write,
+        platform=req.platform, chat_id=req.chat_id, user_id=req.user_id, thread_id=req.thread_id,
+        status=REG_STATUS_QUEUED,
+    ))
 
     worktree = None
     worktree_path = branch_name = None
@@ -775,6 +865,7 @@ async def process_delegation(data: dict):
             )
         else:
             system = _build_delegation_system_prompt(req, resolved)
+            await _registry_call("set_status(running)", lambda: _registry().set_status(req.task_id, REG_STATUS_RUNNING))
             response, loop_failed = await _run_delegation_loop(req, resolved.tools, system)
 
             artifacts = {}
@@ -801,6 +892,11 @@ async def process_delegation(data: dict):
             await asyncio.to_thread(_cleanup_worktree, worktree_path)
 
     _record_escalation(req.kind, req.intent, envelope.summary[:100] or envelope.error or "")
+    await _registry_call("set_status(final)", lambda: _registry().set_status(
+        req.task_id,
+        REG_STATUS_FAILED if envelope.status == STATUS_FAILED else REG_STATUS_COMPLETED,
+        error=envelope.error, result=envelope.to_dict(),
+    ))
     await _deliver_envelope(
         req, envelope,
         notify_label=f"{label} {'Failed' if envelope.status == STATUS_FAILED else 'Complete'}",
@@ -877,16 +973,8 @@ async def _listen_for_requests():
         try:
             data = json.loads(msg["data"])
             req_type = data.get("type", "consultation")
-            logger.info(f"Received {req_type} request via Redis")
-
-            if req_type in ("escalation", "delegation"):
-                await process_delegation(data)
-            elif req_type == "deploy_check":
-                await process_deploy_check(data)
-            elif req_type == "deploy_apply":
-                await process_deploy_apply(data)
-            else:
-                await process_consultation(data)
+            logger.info(f"Received {req_type} request via Redis ({len(_inflight)} in flight)")
+            _handle_request(data)
 
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in request: {e}")
@@ -916,6 +1004,20 @@ async def async_main():
     # default now, so this is no longer a hard requirement to start.
     if not os.getenv("GOOGLE_API_KEY"):
         logger.info("GOOGLE_API_KEY not set — fine, cloud overflow path stays unused.")
+
+    # Task registry — this process is its only writer. One-shot rows still
+    # marked active belonged to the previous Councilor process and can never
+    # finish now; say so rather than leaving check_task_status lying.
+    try:
+        registry = _registry()
+        await registry.init()
+        orphaned = await registry.fail_incomplete_oneshots(
+            "Councilor restarted before this task finished — re-delegate it if still needed"
+        )
+        if orphaned:
+            logger.warning(f"[registry] {len(orphaned)} task(s) from the previous run marked failed")
+    except Exception as e:
+        logger.error(f"[registry] unavailable — task status tracking is off for this run: {e}")
 
     # Enter the main listen loop
     await _listen_for_requests()

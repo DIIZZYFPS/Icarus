@@ -58,15 +58,30 @@ def error_response(status: int = 500, text: str = "boom") -> dict:
 
 
 class ScriptedLlamaServer:
-    def __init__(self, responses: list[dict]):
-        self.responses = list(responses)
+    """`responses` is a list replayed in order — or, with `route`, a dict of
+    lists keyed by whatever route(request_body) returns, so concurrent loops
+    each get their own script regardless of how their requests interleave."""
+
+    def __init__(self, responses, route=None):
+        if isinstance(responses, dict):
+            self.responses = {k: list(v) for k, v in responses.items()}
+        else:
+            self.responses = list(responses)
+        self.route = route
         self.requests: list[dict] = []
 
+    def _queue(self, body: dict) -> list:
+        if isinstance(self.responses, dict):
+            return self.responses.setdefault(self.route(body) if self.route else None, [])
+        return self.responses
+
     def handler(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(json.loads(request.content))
-        if not self.responses:
+        body = json.loads(request.content)
+        self.requests.append(body)
+        queue = self._queue(body)
+        if not queue:
             return httpx.Response(500, json={"error": "scripted responses exhausted"})
-        nxt = self.responses.pop(0)
+        nxt = queue.pop(0)
         if "__http_error__" in nxt:
             return httpx.Response(nxt["__http_error__"], text=nxt.get("text", ""))
         return httpx.Response(200, json=nxt)
