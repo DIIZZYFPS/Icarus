@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 ROUTING_TABLE = {
     "consultation": "local",
     "scoring":      "local",
-    "escalation":   "local",
+    "escalation":   "local",   # repo-write delegated task (worktree + bwrap)
+    "delegation":   "local",   # capability-scoped delegated task, no worktree
+    "supervision":  "local",   # Councilor supervising a subagent's tool call (supervision.py)
 }
 
 DEFAULT_TIER = "local"
@@ -75,7 +77,9 @@ async def generate(
     # trivial prompts (real job_match prompts starved max_tokens entirely,
     # returning empty content) — reasoning quality isn't worth eating the
     # whole 120s budget before the model ever emits an answer.
-    enable_thinking = task_type not in ("scoring", "job_match")
+    # supervision: a short JSON verdict about one failed tool call — cheap
+    # and frequent, exactly the case reasoning shouldn't be burning time on.
+    enable_thinking = task_type not in ("scoring", "job_match", "supervision")
     return await local_generate(
         messages, system_instruction=system_instruction, max_tokens=max_tokens,
         enable_thinking=enable_thinking,
@@ -91,14 +95,19 @@ async def agent_loop(
     system_instruction: str | None = None,
     max_turns: int = 15,
     context_messages: list[dict] | None = None,
+    supervisor=None,
 ) -> str:
     """Multi-turn agent loop with function calling.
 
     The model can call tools, receive results, and iterate until it produces
-    a final text response or hits the turn limit.
+    a final text response or hits the turn limit. `supervisor` is the
+    step-level supervision hook (see local_llm.local_agent_loop) — only
+    subagent call sites pass one.
     """
     tier = _resolve_tier(task_type)
     if tier == "cloud":
+        if supervisor is not None:
+            logger.warning("[llm_router] supervision hook is not supported on the cloud path — ignoring it")
         return await _cloud_agent_loop(
             task_type, initial_prompt, tools, system_instruction, max_turns, context_messages
         )
@@ -107,6 +116,7 @@ async def agent_loop(
         system_instruction=system_instruction,
         max_turns=max_turns,
         context_messages=context_messages,
+        supervisor=supervisor,
     )
 
 

@@ -347,6 +347,13 @@
 
   .jobs-table th.jobs-expand-col { cursor: default; width: 28px; padding-left: 12px; padding-right: 0; }
   .jobs-table tr.jobs-row { cursor: pointer; }
+  /* "dismissed" here only means "acknowledged in Today's attention list" —
+     not "this application is closed" — so a dismissed row stays visible in
+     the full pipeline by default (see jobs-hide-dismissed's default state
+     below); dim it rather than hide it so Hide dismissed's effect is
+     legible instead of the row just silently vanishing. */
+  .jobs-table tr.jobs-row.dismissed { opacity: 0.55; }
+  .jobs-table tr.jobs-row.dismissed:hover { opacity: 0.85; }
   .jobs-expand-toggle {
     background: none; border: none; color: var(--text-faint); cursor: pointer;
     font-size: 11px; padding: 2px 6px; line-height: 1; transition: transform 0.15s ease, color 0.15s ease;
@@ -969,7 +976,13 @@
         <button class="chip" data-jobtype="job_opportunity">Opportunities</button>
         <button class="chip" data-jobtype="job_application">Applications</button>
         <label class="jobs-dismissed-toggle">
-          <input type="checkbox" id="jobs-hide-dismissed" checked />
+          <!-- Defaults unchecked: "dismissed" here just means "acknowledged
+               in Today's attention list," not "this application is over" —
+               defaulting to hidden silently dropped active applications
+               (e.g. a job in "application received" you'd marked handled)
+               out of your own pipeline table. Opt-in decluttering, not the
+               default view. -->
+          <input type="checkbox" id="jobs-hide-dismissed" />
           Hide dismissed
         </label>
       </div>
@@ -2493,7 +2506,7 @@
           : escapeHtml(f.role);
         const typeLabel = item.item_type === 'job_application' ? 'Applied' : 'Opportunity';
         const expanded = jobsExpandedIds.has(item.id);
-        const mainRow = `<tr class="jobs-row${expanded ? ' expanded' : ''}" data-expand-id="${item.id}">
+        const mainRow = `<tr class="jobs-row${expanded ? ' expanded' : ''}${item.dismissed ? ' dismissed' : ''}" data-expand-id="${item.id}">
           <td><button class="jobs-expand-toggle" type="button" data-expand-id="${item.id}" aria-label="Toggle detail">▸</button></td>
           <td class="company" title="${escapeHtml(f.company)}">${escapeHtml(f.company)}</td>
           <td class="role" title="${escapeHtml(f.role)}">${roleCell}</td>

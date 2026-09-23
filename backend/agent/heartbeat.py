@@ -64,6 +64,12 @@ async def _poll_mailbox():
 
         if resp_type == "escalation":
             prefix = "[MAILBOX] Councilor escalation complete."
+        elif resp_type == "delegation":
+            prefix = "[MAILBOX] Councilor delegated task complete."
+        elif resp_type == "subagent_report":
+            prefix = f"[MAILBOX] Report from persistent subagent {data.get('task_id') or ''}.".replace(" .", ".")
+        elif resp_type == "subagent_lifecycle":
+            prefix = "[MAILBOX] Subagent lifecycle update from the Councilor."
         else:
             prefix = "[MAILBOX] Councilor consultation response."
 
@@ -78,12 +84,17 @@ async def _poll_mailbox():
         try:
             from backend.agent.activity_repo import publish_activity
             ts = data.get("timestamp")
-            if ts is not None and resp_type in ("escalation", "consultation"):
+            thread_id = None
+            if resp_type in ("delegation", "subagent_report", "subagent_lifecycle") and data.get("task_id"):
+                thread_id = f"sub-{data['task_id']}"
+            elif ts is not None and resp_type in ("escalation", "consultation"):
                 thread_prefix = "esc" if resp_type == "escalation" else "consult"
+                thread_id = f"{thread_prefix}-{ts}"
+            if thread_id:
                 await publish_activity(
                     actor="icarus", event_type="delivered",
                     action="delivered via mailbox heartbeat",
-                    thread_id=f"{thread_prefix}-{ts}", platform=platform, user_id=None,
+                    thread_id=thread_id, platform=platform, user_id=None,
                 )
         except Exception as e:
             logger.warning(f"[heartbeat] Failed to publish delivery activity event: {e}")

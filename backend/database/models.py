@@ -88,6 +88,10 @@ class TrackedItem(Base):
     dismissed_at = Column(String, nullable=True)
     message_id = Column(String, nullable=True, index=True)   # originating Gmail message, if any — links back to a
                                                                # TriageClassification row for the correction learning loop
+    thread_id = Column(String, nullable=True, index=True)    # originating Gmail thread, if any — the strongest identity
+                                                               # signal a follow-up email carries (see tracked_items_repo.
+                                                               # find_by_thread): a reply in the same thread is the same
+                                                               # job/bill regardless of how its company/role text reads.
     created_at = Column(String, nullable=False)
     updated_at = Column(String, nullable=False)
 

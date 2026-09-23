@@ -40,9 +40,20 @@ def _sanitize_identifier(value: str) -> str:
     value = value.strip()[:_USERNAME_MAX_LEN]
     return value if value else "anonymous"
 
-async def handle_telegram_payload(chat_id: int, user_id: str, text: str):
+def _extract_reply_to(message: dict) -> str | None:
+    """The id of the message this one replies to, if any — what lets a reply
+    to a paused-subagent notice resolve to that subagent (see
+    backend/agent/subagent_resume.py), same as Discord's message reference."""
+    reply = message.get("reply_to_message") or {}
+    message_id = reply.get("message_id")
+    return str(message_id) if message_id is not None else None
+
+
+async def handle_telegram_payload(chat_id: int, user_id: str, text: str, reply_to_message_id: str | None = None):
     """Process Telegram message and send response."""
-    response_text = await process_message("telegram", user_id, text, chat_id=str(chat_id))
+    response_text = await process_message(
+        "telegram", user_id, text, chat_id=str(chat_id), reply_to_message_id=reply_to_message_id,
+    )
     await push_telegram_message(chat_id, response_text)
 
 @router.post("/webhook/telegram")
@@ -67,6 +78,8 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 
         # Standardize message format with sanitized identity prefix
         formatted_text = f"[User:{username} (id: {user_id})]: {text}"
-        background_tasks.add_task(handle_telegram_payload, chat_id, user_id, formatted_text)
+        background_tasks.add_task(
+            handle_telegram_payload, chat_id, user_id, formatted_text, _extract_reply_to(message),
+        )
 
     return {"status": "ok"}

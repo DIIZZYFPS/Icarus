@@ -334,3 +334,235 @@ async def escalate_to_councilor(intent_description: str, target_files: List[str]
         error_msg = f"Failed to publish escalation request: {e}"
         logger.error(error_msg)
         return error_msg
+
+
+async def delegate_task(
+    intent: str,
+    capabilities: list[str],
+    needs_network: bool = False,
+    needs_repo_write: bool = False,
+) -> str:
+    """Delegate a self-contained task to a Councilor-supervised subagent.
+
+    The subagent runs in the background with ONLY the capabilities you declare
+    here — nothing else is callable for it — and you never see its raw tool
+    output: a short completion summary is delivered to the operator via the
+    current platform when it finishes. This call returns IMMEDIATELY with a
+    task id. After calling it, log the pending task id with append_memory.
+
+    Args:
+        intent: A complete, self-contained brief of what to do and what the
+            summary should answer. The subagent has none of your conversation
+            context — include everything it needs.
+        capabilities: Capability names the task needs, from: time, web,
+            gmail_read, calendar_read, github_read, github_write, telemetry,
+            tracked_items. Declare only what's needed.
+        needs_network: True if any declared capability reaches the network
+            (web, gmail_read, calendar_read, github_read, github_write).
+        needs_repo_write: True only if the task must modify Icarus's own
+            source code — it then runs in the sandboxed worktree and lands as
+            a PR for human review, like escalate_to_councilor.
+    """
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id, current_access_mode
+    from backend.agent.delegation import build_delegation_request, DelegationError
+
+    # Same capability-not-prompt enforcement as check_mailbox: an untrusted
+    # server channel never gets to spend Councilor time, even if the tool
+    # somehow ends up bound there.
+    if current_access_mode.get() == "server":
+        return "Delegation is unavailable in server channels."
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+
+    # Validate the declaration here, synchronously, so the model gets an
+    # actionable error on THIS turn instead of a fire-and-forget request that
+    # comes back rejected minutes later through the mailbox.
+    try:
+        req = build_delegation_request(
+            intent=intent,
+            capabilities=capabilities,
+            needs_network=needs_network,
+            needs_repo_write=needs_repo_write,
+            platform=platform,
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+    except DelegationError as e:
+        return f"Delegation rejected before dispatch: {e}"
+
+    redis = get_redis_client()
+    try:
+        await redis.publish("icarus:councilor:requests", json.dumps(req.to_payload()))
+        logger.info(
+            f"Published delegation {req.task_id} (caps={req.capabilities}, network={req.needs_network}, "
+            f"repo_write={req.needs_repo_write}). Councilor will notify via {(platform or 'unknown').capitalize()}."
+        )
+    except Exception as e:
+        error_msg = f"Failed to publish delegation request: {e}"
+        logger.error(error_msg)
+        return error_msg
+
+    from backend.agent.activity_repo import publish_activity
+    await publish_activity(
+        actor="icarus", event_type="dispatch_delegation",
+        action="dispatched delegate_task", detail=intent,
+        thread_id=req.thread_id, platform=platform, user_id=user_id,
+    )
+
+    scope = ", ".join(req.capabilities) if req.capabilities else "none"
+    where = "sandboxed worktree (result lands as a PR)" if req.needs_repo_write else "Councilor, no repo access"
+    return (
+        f"Delegated task {req.task_id} to the Councilor — capabilities: {scope}; "
+        f"network: {'yes' if req.needs_network else 'no'}; runs in: {where}. "
+        f"It runs in the background; the completion summary will be delivered via "
+        f"{(platform or 'unknown').capitalize()} when done. Check on it any time with "
+        f"check_task_status('{req.task_id}'). Log the pending task id with append_memory."
+    )
+
+
+async def check_task_status(task_id: str = "") -> str:
+    """Check the status of a delegated task or subagent by its id (sub-…).
+
+    Read-only and instant — reads the Councilor's task registry directly and
+    never waits for the task. Reports status (queued / running / paused /
+    completed / failed / stopped), the capability scope, and the completion
+    summary or error once there is one. Call with an empty id to list the
+    ten most recent tasks.
+
+    Args:
+        task_id: The id returned by delegate_task, or empty to list recent tasks.
+    """
+    from backend.agent.tools import current_access_mode
+    if current_access_mode.get() == "server":
+        return "Task status is unavailable in server channels."
+
+    from backend.agent.subagent_registry import describe_task
+    return await describe_task(task_id)
+
+
+async def create_persistent_subagent(
+    intent: str,
+    capabilities: list[str],
+    needs_network: bool = False,
+    interval_minutes: int = 15,
+) -> str:
+    """Create a persistent subagent that keeps working on a standing directive on a schedule.
+
+    Unlike delegate_task (one job, then done), this provisions a long-lived
+    worker container that wakes every `interval_minutes`, acts on the
+    directive with ONLY the capabilities declared here, keeps its own notes
+    between cycles, and messages the operator only when something material
+    changes. Its capability grant expires after a configured TTL (default one
+    week) — re-create it to renew. This call returns IMMEDIATELY; the
+    Councilor confirms the subagent's id via the current platform. Log that
+    id with append_memory when it arrives.
+
+    Args:
+        intent: The standing directive, complete and self-contained — what to
+            watch or maintain, what counts as worth reporting, what to ignore.
+        capabilities: Capability names it needs, from: time, web, gmail_read,
+            calendar_read, github_read, github_write, telemetry, tracked_items.
+        needs_network: True if any declared capability reaches the network.
+        interval_minutes: Minutes between cycles (1–1440; default 15).
+    """
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id, current_access_mode
+    from backend.agent.delegation import validate_declaration, DelegationError
+
+    if current_access_mode.get() == "server":
+        return "Persistent subagents are unavailable in server channels."
+
+    intent = (intent or "").strip()
+    if not intent:
+        return "Rejected: intent must be a non-empty standing directive."
+    try:
+        caps = validate_declaration(capabilities, bool(needs_network), False)
+    except DelegationError as e:
+        return f"Rejected before dispatch: {e}"
+    try:
+        minutes = int(interval_minutes)
+    except (TypeError, ValueError):
+        minutes = 15
+    minutes = max(1, min(1440, minutes))
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    timestamp = int(time.time())
+    payload = json.dumps({
+        "type": "subagent_create",
+        "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "intent": intent,
+        "capabilities": caps,
+        "needs_network": bool(needs_network),
+        "interval_seconds": minutes * 60,
+    })
+    redis = get_redis_client()
+    try:
+        await redis.publish("icarus:councilor:requests", payload)
+    except Exception as e:
+        return f"Failed to publish subagent request: {e}"
+
+    from backend.agent.activity_repo import publish_activity
+    await publish_activity(
+        actor="icarus", event_type="dispatch_subagent_create",
+        action="requested create_persistent_subagent", detail=intent,
+        thread_id=f"subagent-{timestamp}", platform=platform, user_id=user_id,
+    )
+    return (
+        f"Requested a persistent subagent (capabilities: {', '.join(caps) or 'none'}; every {minutes} min). "
+        f"The Councilor is provisioning it and will confirm its id (sub-…) via "
+        f"{(platform or 'unknown').capitalize()} — log that id with append_memory when it arrives."
+    )
+
+
+async def stop_subagent(task_id: str) -> str:
+    """Stop and remove a persistent subagent, or cancel a running delegated task, by its id (sub-…).
+
+    Returns IMMEDIATELY; the Councilor confirms via the current platform. Only
+    call this when DIIZZY asks for a subagent or task to be stopped.
+
+    Args:
+        task_id: The id from create_persistent_subagent's confirmation or delegate_task.
+    """
+    from backend.database.redis_connection import get_redis_client
+    from backend.agent.tools import current_platform, current_user_id, current_chat_id, current_access_mode
+    from backend.agent.delegation import is_task_id
+
+    if current_access_mode.get() == "server":
+        return "Stopping subagents is unavailable in server channels."
+    task_id = (task_id or "").strip()
+    if not is_task_id(task_id):
+        return f"'{task_id}' is not a task id — ids look like sub-1700000000-a1b2c3. Use check_task_status('') to list recent ones."
+
+    platform = current_platform.get()
+    user_id = current_user_id.get()
+    chat_id = current_chat_id.get()
+    timestamp = int(time.time())
+    payload = json.dumps({
+        "type": "subagent_stop",
+        "timestamp": timestamp,
+        "platform": platform,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "task_id": task_id,
+    })
+    redis = get_redis_client()
+    try:
+        await redis.publish("icarus:councilor:requests", payload)
+    except Exception as e:
+        return f"Failed to publish stop request: {e}"
+
+    from backend.agent.activity_repo import publish_activity
+    await publish_activity(
+        actor="icarus", event_type="dispatch_subagent_stop",
+        action="requested stop_subagent", detail=task_id,
+        thread_id=f"sub-{task_id}", platform=platform, user_id=user_id,
+    )
+    return f"Stop requested for {task_id}. The Councilor will confirm via {(platform or 'unknown').capitalize()}."
