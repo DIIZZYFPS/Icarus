@@ -181,7 +181,9 @@ class EmailTriageWorker(WorkerBase):
         """Collapse a free-text identifier into a stable-ish entity key."""
         return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "unknown"
 
-    async def _track_item(self, classification: dict, sender: str, subject: str, message_id: str) -> int | None:
+    async def _track_item(
+        self, classification: dict, sender: str, subject: str, message_id: str, thread_id: str | None = None
+    ) -> int | None:
         """Upsert this classification into tracked_items if it's a category
         with an actual lifecycle (jobs, bills) — not everything is; shopping/
         social/newsletters/other don't have a "current state" worth tracking,
@@ -190,6 +192,7 @@ class EmailTriageWorker(WorkerBase):
         details = classification.get("details") or {}
 
         due_at = None
+        role_missing = False
         if category == "jobs":
             # Digests aren't about the recipient's own application — nothing here has
             # a "current state" worth tracking, and upserting one would either create
@@ -198,9 +201,16 @@ class EmailTriageWorker(WorkerBase):
             if classification.get("job_kind") == "digest":
                 return None
             company = details.get("company") or sender
-            role = details.get("role") or "unknown-role"
+            role_raw = details.get("role")
+            role_missing = not role_raw
+            role = role_raw or "unknown-role"
             # Keyed on company+role, not company alone — two different roles at the
-            # same company must not collide onto one tracked_items row.
+            # same company must not collide onto one tracked_items row. Fragile by
+            # itself though: a follow-up email that drops the role entirely (an
+            # OA/interview/rejection notice rarely restates the job title) produces
+            # an entity_key nothing else will ever match. See the thread_id/company
+            # fallbacks below, which exist specifically to catch that case before
+            # it forks a second row for the same application.
             entity_key = self._normalize_key(f"{company}-{role}")
             state = details.get("status") or "unknown"
             due_at = details.get("proposed_datetime") or None
@@ -217,32 +227,73 @@ class EmailTriageWorker(WorkerBase):
         else:
             return None
 
-        from backend.agent.tracked_items_repo import upsert_item, get_by_identity, promote_to_application
+        from backend.agent.tracked_items_repo import (
+            upsert_item, get_by_identity, promote_to_application,
+            find_by_thread, find_latest_job_by_company,
+        )
 
         # A real application-update email about a company+role job_scout
         # already scored should land on THAT row, not spawn a second one.
         # upsert_item's own dedup can't do this — its lookup is scoped to
         # the item_type you pass it, so item_type="job_application" never
         # matches an existing item_type="job_opportunity" row no matter how
-        # identical the entity_key is. Check explicitly, promote if found.
+        # identical the entity_key is. Three lookups, in order of how much
+        # to trust them, first hit wins:
         if category == "jobs":
             platform, user_id = "discord", os.environ.get("DISCORD_OPERATOR_ID", "0")
-            existing_opportunity = await get_by_identity(
-                platform=platform, user_id=user_id,
-                item_type="job_opportunity", entity_key=entity_key,
-            )
-            if existing_opportunity is not None:
+
+            # 1. Same Gmail thread as an email that already touched a tracked
+            #    job row — the strongest signal available, independent of
+            #    this message's own company/role text. See find_by_thread().
+            existing = await find_by_thread(platform=platform, user_id=user_id, thread_id=thread_id)
+
+            # 2. This email's own (company, role) exactly matches a
+            #    scored-but-not-applied-to job_opportunity — the original
+            #    promotion path.
+            if existing is None:
+                existing = await get_by_identity(
+                    platform=platform, user_id=user_id,
+                    item_type="job_opportunity", entity_key=entity_key,
+                )
+
+            # 3. No role was extracted from this email at all (a bare "your
+            #    application" OA/interview/rejection notice) — entity_key has
+            #    nothing real in it to match on, so fall back to the one job
+            #    already tracked at this company rather than forking a
+            #    permanent "company-unknown-role" row. Skipped whenever a
+            #    role WAS extracted: a different role at the same company may
+            #    be a second, genuine posting (see the docstring).
+            if existing is None and role_missing:
+                existing = await find_latest_job_by_company(
+                    platform=platform, user_id=user_id, company_key=self._normalize_key(company),
+                )
+
+            if existing is not None and existing.item_type == "job_opportunity":
                 promoted = await promote_to_application(
-                    existing_opportunity.id, state=state,
+                    existing.id, state=state,
                     summary=classification.get("summary"),
                     due_at=due_at, urgency=classification.get("urgency"),
-                    payload=details or None, message_id=message_id,
+                    payload=details or None, message_id=message_id, thread_id=thread_id,
                 )
                 if promoted:
-                    return existing_opportunity.id
+                    return existing.id
                 # Fell through (e.g. it stopped being a job_opportunity
                 # between the check and now) — fall back to a normal upsert
                 # below rather than silently dropping this classification.
+            elif existing is not None:
+                # Already a job_application (found via thread_id or the
+                # company fallback, both of which search across item_types)
+                # — update it in place under its OWN entity_key. Handing this
+                # to the upsert below under the freshly-computed entity_key
+                # is exactly what would fork a second row.
+                return await upsert_item(
+                    platform=platform, user_id=user_id,
+                    item_type="job_application", entity_key=existing.entity_key,
+                    state=state, summary=classification.get("summary"),
+                    urgency=classification.get("urgency"), due_at=due_at,
+                    payload=details or None, source="email_triage",
+                    message_id=message_id, thread_id=thread_id,
+                )
 
         return await upsert_item(
             platform="discord",
@@ -256,6 +307,7 @@ class EmailTriageWorker(WorkerBase):
             payload=details or None,
             source="email_triage",
             message_id=message_id,
+            thread_id=thread_id if category == "jobs" else None,
         )
 
     def _parse_date_loose(self, text: str | None):
@@ -381,6 +433,7 @@ class EmailTriageWorker(WorkerBase):
 
         # 2. Extract email parts
         sender, subject, date, body = extract_email_parts(message)
+        thread_id = message.get("threadId")
         logger.info(f"[triage] Email from '{sender}': '{subject[:60]}'")
 
         # 3. Classify via LLM — fetch past operator corrections for similar
@@ -455,7 +508,7 @@ class EmailTriageWorker(WorkerBase):
         # what a future "what am I missing" digest reads, instead of trying
         # to re-derive current state from scattered email mentions.
         try:
-            tracked_item_id = await self._track_item(classification, sender, subject, message_id)
+            tracked_item_id = await self._track_item(classification, sender, subject, message_id, thread_id)
             if tracked_item_id is not None:
                 await publish_activity(
                     actor="triage", event_type="tracked",

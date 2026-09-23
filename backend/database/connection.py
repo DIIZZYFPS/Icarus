@@ -83,6 +83,7 @@ async def init_db():
             "ALTER TABLE tracked_items ADD COLUMN dismissed INTEGER DEFAULT 0",
             "ALTER TABLE tracked_items ADD COLUMN dismissed_at VARCHAR",
             "ALTER TABLE tracked_items ADD COLUMN message_id VARCHAR",
+            "ALTER TABLE tracked_items ADD COLUMN thread_id VARCHAR",
             "ALTER TABLE transcript ADD COLUMN conversation_id VARCHAR",
             "ALTER TABLE memory_entries ADD COLUMN conversation_id VARCHAR",
         ):
@@ -90,6 +91,17 @@ async def init_db():
                 await conn.execute(text(ddl))
             except Exception:
                 pass  # column already exists
+
+        # Index creation is separate from the ADD COLUMN loop above: an
+        # index can be created (IF NOT EXISTS) even on a column that already
+        # existed before this deploy, so it doesn't belong behind the same
+        # "already exists, ignore" try/except as the column adds.
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_tracked_items_thread_id ON tracked_items (thread_id)"
+            ))
+        except Exception:
+            pass
 
         # ── memory_entries FTS5 ──────────────────────────────────────────
         await conn.execute(text(
