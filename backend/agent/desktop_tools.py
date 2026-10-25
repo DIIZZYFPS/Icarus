@@ -128,7 +128,7 @@ async def run_claude_task(project: str, task: str, mode: str = "ask") -> str:
 
 
 async def restart_icarus(parts: list[str]) -> str:
-    """Restart parts of Icarus so code changes take effect: "desktop" (this avatar daemon), "councilor" (runs Claude tasks and subagents), "api" (the main Icarus server). It is queued and runs once the current conversation ends; the Councilor also waits for running tasks to finish. Only call it when DIIZZY asks or agrees. parts=["cancel"] cancels a queued restart."""
+    """Restart parts of Icarus so code changes take effect: "desktop" (this avatar daemon), "councilor" (runs Claude tasks and subagents), "api" (the main Icarus server and the email worker). It is queued and runs once the current conversation ends; the Councilor also waits for running tasks to finish. Only call it when DIIZZY asks or agrees. parts=["cancel"] cancels a queued restart."""
     if isinstance(parts, str):
         parts = [parts]
     return await _call("restart_icarus", {"parts": [str(p) for p in parts or []]})

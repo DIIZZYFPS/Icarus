@@ -641,11 +641,18 @@ def _dispatch_key(req_type: str, data: dict) -> str:
     return f"{req_type}-{data.get('timestamp', int(time.time()))}-{uuid.uuid4().hex[:4]}"
 
 
+async def _shown_busy(source: str, coro, ttl: float = 600):
+    """Run a request handler as a thought bubble on the desktop avatar (backend/agent/busy.py)."""
+    from backend.agent.busy import busy
+    async with busy(source, ttl=ttl):
+        return await coro
+
+
 def _handle_request(data: dict) -> asyncio.Task:
     """Route one decoded request to its handler and start it concurrently."""
     req_type = data.get("type", "consultation")
     if req_type in ("escalation", "delegation"):
-        coro = process_delegation(data)
+        coro = _shown_busy("subagent", process_delegation(data), ttl=3600)
     elif req_type == "deploy_check":
         coro = process_deploy_check(data)
     elif req_type == "deploy_apply":
@@ -657,7 +664,7 @@ def _handle_request(data: dict) -> asyncio.Task:
     elif req_type == "claude_code":
         coro = process_claude_code(data)
     else:
-        coro = process_consultation(data)
+        coro = _shown_busy("councilor", process_consultation(data))
     return _dispatch(_dispatch_key(req_type, data), coro)
 
 

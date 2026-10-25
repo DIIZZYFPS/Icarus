@@ -321,7 +321,9 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
         self.daemon.state = "dormant"
         self.assertTrue(self.daemon.restart_ready())
         await self.daemon.do_restart()
-        self.assertEqual([c[-1] for c in self.ran], ["icarus-api", "icarus-councilor.service", "icarus-desktop.service"])
+        self.assertEqual([c[2:] for c in self.ran], [("icarus-api", "icarus-email_triage-1"),
+                                                     ("--no-block", "restart", "icarus-councilor.service"),
+                                                     ("--no-block", "restart", "icarus-desktop.service")])
         self.assertFalse(self.daemon.pending_restart)
 
     async def test_councilor_waits_for_running_claude_tasks(self):
@@ -345,6 +347,33 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
         reply = await self.restart(["cancel"])
         self.assertEqual(reply["result"], "Cancelled the pending restart.")
         self.assertFalse(self.daemon.restart_ready())
+
+
+class BusyBubbleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.daemon = Daemon(Config(linger_seconds=.05, followup_seconds=0, token="t"))
+        self.daemon.link = FakeLink()
+        self.events = []
+        self.daemon.bus.emit = self.events.append
+
+    def bubbles(self):
+        return [e["items"] for e in self.events if e["type"] == "bubbles"]
+
+    async def test_busy_list_goes_to_the_renderer_once_per_change(self):
+        msg = {"type": "busy", "items": [{"id": "discord-1", "source": "discord", "done": False, "ok": True, "started": 1}]}
+        await self.daemon.on_api_message(msg)
+        await self.daemon.on_api_message(msg)   # the 5-second resend: nothing new to draw
+        self.assertEqual(self.bubbles(), [[{"id": "discord-1", "source": "discord", "done": False, "ok": True}]])
+        self.assertIn({"type": "bubbles", "items": self.daemon.busy_items}, self.daemon._snapshot())
+
+    async def test_stale_or_disconnected_list_is_cleared(self):
+        await self.daemon.on_api_message({"type": "busy", "items": [{"id": "e", "source": "email"}]})
+        self.daemon.expire_busy()
+        self.assertTrue(self.daemon.busy_items)            # fresh and connected: kept
+        self.daemon.link.connected.clear()
+        self.daemon.expire_busy()
+        self.assertEqual(self.daemon.busy_items, [])
+        self.assertEqual(self.bubbles()[-1], [])
 
 
 class FollowUpTests(unittest.IsolatedAsyncioTestCase):
@@ -745,7 +774,7 @@ class TaskBadgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_snapshot_includes_running_tasks(self):
         await self.event("Reading a.py", title="t")
-        self.assertEqual(self.daemon._snapshot()[-1]["items"][0]["title"], "t")
+        self.assertEqual(next(e for e in self.daemon._snapshot() if e["type"] == "tasks")["items"][0]["title"], "t")
 
     async def test_quiet_task_cleared_when_registry_says_nothing_runs(self):
         await self.event("Reading a.py")

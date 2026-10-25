@@ -139,6 +139,28 @@ async def _ambient_loop(send) -> None:
         await asyncio.sleep(AMBIENT_INTERVAL_SECONDS)
 
 
+BUSY_POLL_SECONDS = 1.0
+BUSY_RESEND_SECONDS = 5.0   # resent even unchanged, so the daemon can tell a stale list from a quiet one
+
+
+async def _busy_loop(send) -> None:
+    """Background work for the avatar's thought bubbles (backend/agent/busy.py)."""
+    from backend.agent.busy import snapshot
+    last, sent_at = None, 0.0
+    while True:
+        try:
+            items = await snapshot()
+        except Exception as e:
+            logger.debug(f"[desktop] busy list unavailable: {e}")
+            await asyncio.sleep(BUSY_POLL_SECONDS)
+            continue
+        key = [(i["id"], i["done"], i["ok"]) for i in items]
+        if key != last or time.monotonic() - sent_at > BUSY_RESEND_SECONDS:
+            await send({"type": "busy", "items": items})
+            last, sent_at = key, time.monotonic()
+        await asyncio.sleep(BUSY_POLL_SECONDS)
+
+
 # ── Turns ────────────────────────────────────────────────────────────────────
 
 # End of a sentence: terminal punctuation, any closing quote/bracket, then whitespace; or a newline.
@@ -252,6 +274,7 @@ async def desktop_ws(ws: WebSocket):
     turns: dict[str, asyncio.Task] = {}
     await send({"type": "ready"})
     ambient = asyncio.create_task(_ambient_loop(send))
+    busy_watch = asyncio.create_task(_busy_loop(send))
     logger.info("[desktop] daemon connected")
 
     try:
@@ -290,6 +313,7 @@ async def desktop_ws(ws: WebSocket):
         logger.exception("[desktop] connection error")
     finally:
         ambient.cancel()
+        busy_watch.cancel()
         for task in turns.values():
             task.cancel()
         session.close()

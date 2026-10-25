@@ -60,6 +60,23 @@ INK = (3, 4, 6)
 DISPLAY = "Chakra Petch"
 MONO = "JetBrainsMono Nerd Font, JetBrains Mono, monospace"
 
+# Thought bubbles: background work that isn't this conversation (backend/agent/busy.py).
+# source -> (Nerd Font glyph, brand colour flashed when the bubble appears)
+BUBBLE_SOURCES = {
+    "discord": ("\U000f066f", (88, 101, 242)),
+    "telegram": ("\uf2c6", (38, 165, 228)),
+    "email": ("\U000f01ee", (234, 67, 53)),
+    "subagent": ("\U000f06a9", MG),
+    "councilor": ("\U000f09d1", AM),
+}
+# (degrees, distance) from the orb, one slot per source: an inner arc, then a higher second row,
+# all clear of the task badge to the orb's left.
+BUBBLE_SLOTS = ((-100, 70), (-126, 72), (-74, 70), (-113, 104), (-87, 104))
+BUBBLE_DELAY = 1.0    # quick jobs finish before this and never show
+BUBBLE_FLASH = .7     # brand colour fading into cyan
+BUBBLE_POP = .4
+BUBBLE_FAIL = .6      # ember flicker before a failed job's bubble fades
+
 VISIBLE = {"connecting", "listening", "thinking", "acting", "confirm", "speaking", "linger", "error"}
 ACTIVITY = {
     "watching": {"turn": -1.0, "deck": 0, "vent": False},
@@ -218,6 +235,7 @@ class Avatar:
         self.tasks = []          # running Claude tasks [{id, title, project, mode, text, steps, started}]
         self.tasks_t0 = 0.0      # when the badge appeared / started fading
         self.tasks_last = []     # what the badge showed, kept while it fades out
+        self.bubbles = {}        # source -> {seen, end, ok, slot, count}
         self.particles = []
         self.fire_t0 = 0.0       # fire glitch: a brief flash of Icarus burning
         self.fire_until = 0.0
@@ -253,6 +271,8 @@ class Avatar:
             if items:
                 self.tasks_last = items
             self.tasks = items
+        elif kind == "bubbles":
+            self.update_bubbles(ev.get("items") or [], now)
         elif kind == "mic_level":
             self.mic = clamp(float(ev.get("rms", 0)) * 6, 0, 1)
         elif kind == "speech_level":
@@ -297,6 +317,29 @@ class Avatar:
             self.ignite(float(ev.get("seconds", .8)))
         elif kind == "clear":
             self.chips, self.card, self.subtitle, self.transcript = [], None, None, None
+
+    def update_bubbles(self, items, now):
+        """One bubble per source: appears while any of its jobs run, pops when the last one ends."""
+        live, failed = {}, set()
+        for item in items:
+            src = item.get("source") if isinstance(item, dict) else None
+            if src not in BUBBLE_SOURCES:
+                continue
+            if item.get("done"):
+                if not item.get("ok", True):
+                    failed.add(src)
+            else:
+                live[src] = live.get(src, 0) + 1
+        for src, n in live.items():
+            b = self.bubbles.get(src)
+            if b is None or b["end"] is not None:
+                used = {x["slot"] for k, x in self.bubbles.items() if k != src}
+                slot = next(i for i in range(len(BUBBLE_SLOTS)) if i not in used)
+                b = self.bubbles[src] = {"seen": now, "end": None, "ok": True, "slot": slot}
+            b["count"] = n
+        for src, b in self.bubbles.items():
+            if src not in live and b["end"] is None:
+                b["end"], b["ok"] = now, src not in failed
 
     def fire_stamp(self, word, sub, col, ms):
         now = time.monotonic()
@@ -934,6 +977,82 @@ class Renderer:
         cr.fill()
         cr.restore()
 
+    def draw_bubbles(self, cr, t):
+        """Thought bubbles floating off the orb, one per source of background work.
+        Like the task badge, they belong to orb mode and fade while he's on screen."""
+        a = self.a
+        ox, oy = ORB
+        for src, b in list(a.bubbles.items()):
+            shown = b["seen"] + BUBBLE_DELAY
+            if b["end"] is not None and b["end"] < shown:
+                del a.bubbles[src]              # finished before it was due: never shown
+                continue
+            if t < shown:
+                continue
+            glyph, brand = BUBBLE_SOURCES[src]
+            age = t - shown
+            emerge = 1 - (1 - min(1, age / .6)) ** 3
+            alpha, scale, col = min(1, age / .25) * (1 - a.p), 1.0, mix(CY, brand, max(0, 1 - age / BUBBLE_FLASH) ** .6)
+            if b["end"] is not None:
+                e = t - max(b["end"], shown)
+                fail = 0 if b["ok"] else BUBBLE_FAIL
+                if e > fail + BUBBLE_POP:
+                    del a.bubbles[src]
+                    continue
+                if e < fail:
+                    col = EMBER
+                    alpha *= .55 + .45 * (int(t * 8) % 2)   # stepped flicker, like the rest
+                else:
+                    k = (e - fail) / BUBBLE_POP
+                    scale, alpha = 1 + .45 * k, alpha * (1 - k)
+                    col = EMBER if fail else col
+            if alpha <= .01:
+                continue
+            deg, reach = BUBBLE_SLOTS[b["slot"]]
+            ang = math.radians(deg)
+            dist = lerp(a.orb_r, reach, emerge)
+            bob = 2.2 * math.sin(t * TAU / 3.1 + b["slot"] * 1.7) * emerge
+            bx, by = ox + math.cos(ang) * dist, oy + math.sin(ang) * dist + bob
+            r = 12.5 * (.4 + .6 * emerge) * scale
+
+            # trailing dots, bowed slightly sideways like a drawn thought bubble
+            nx, ny = -math.sin(ang), math.cos(ang)
+            for frac, dot in ((.36, 1.7), (.68, 2.7)):
+                d = lerp(a.orb_r + 4, dist - r - 2, frac)
+                bow = math.sin(frac * math.pi) * 4
+                cr.set_source_rgba(*rgba(col, .75 * alpha * min(1, emerge * 2) * (1 if scale == 1 else 0)))
+                cr.arc(ox + math.cos(ang) * d + nx * bow, oy + math.sin(ang) * d + ny * bow + bob * frac, dot, 0, TAU)
+                cr.fill()
+
+            if age < .6 and b["end"] is None:   # brand-coloured ring as it appears
+                cr.set_line_width(1.5)
+                cr.set_source_rgba(*rgba(brand, (1 - age / .6) * .7 * alpha))
+                cr.arc(bx, by, r + age * 30, 0, TAU)
+                cr.stroke()
+            cr.arc(bx, by, r, 0, TAU)
+            cr.set_source_rgba(.016, .03, .063, .88 * alpha)
+            cr.fill_preserve()
+            cr.set_line_width(1)
+            cr.set_source_rgba(*rgba(col, .75 * alpha))
+            cr.stroke()
+            if b["end"] is None:                # working: a short arc circling the bubble
+                cr.set_line_width(1.2)
+                cr.set_source_rgba(*rgba(col, .5 * alpha))
+                spin = t * 3 + b["slot"]
+                cr.arc(bx, by, r + 3, spin, spin + 1.2)
+                cr.stroke()
+            icon = layout(cr, glyph, MONO, 13 * scale * (.4 + .6 * emerge))
+            iw, ih = size_of(icon)
+            draw_layout(cr, icon, bx - iw / 2, by - ih / 2, rgba(col, alpha))
+            if b.get("count", 1) > 1 and b["end"] is None:
+                cx, cy = bx + r * .72, by + r * .72
+                cr.arc(cx, cy, 6, 0, TAU)
+                cr.set_source_rgba(*rgba(col, .9 * alpha))
+                cr.fill()
+                num = layout(cr, str(min(b["count"], 9)), MONO, 8.5, "Bold")
+                nw, nh = size_of(num)
+                draw_layout(cr, num, cx - nw / 2, cy - nh / 2, rgba(INK, alpha))
+
     def draw_column(self, cr, t):
         """Card, chips and subtitles, stacked upward from the panel's bottom-left."""
         a = self.a
@@ -1084,6 +1203,7 @@ class Renderer:
         cr.set_operator(cairo.OPERATOR_OVER)
         self.draw_orb(cr, t)
         self.draw_task_badge(cr, t)
+        self.draw_bubbles(cr, t)
         if self.a.p > .001:
             self.render_character(t)
             self.composite_character(cr, t)
@@ -1615,6 +1735,16 @@ DEMO = [
                                         "mode": "edit", "text": "Editing avatar.py", "steps": 7, "started": time.time() - 64}]}),
     (2.0, {"type": "tasks", "items": [{"id": "sub-4472", "title": "add a running-task badge beside the orb", "project": "icarus",
                                         "mode": "edit", "text": "Running python -m unittest discover", "steps": 12, "started": time.time() - 64}]}),
+    (0.0, {"type": "tasks", "items": []}),
+    (0.6, {"type": "bubbles", "items": [{"id": "d1", "source": "discord"}]}),
+    (1.6, {"type": "bubbles", "items": [{"id": "d1", "source": "discord"}, {"id": "e1", "source": "email"}]}),
+    (1.6, {"type": "bubbles", "items": [{"id": "d1", "source": "discord"}, {"id": "d2", "source": "discord"},
+                                        {"id": "e1", "source": "email"}, {"id": "s1", "source": "subagent"}]}),
+    (2.4, {"type": "bubbles", "items": [{"id": "d1", "source": "discord"}, {"id": "e1", "source": "email", "done": True, "ok": True},
+                                        {"id": "s1", "source": "subagent"}]}),
+    (1.6, {"type": "bubbles", "items": [{"id": "d1", "source": "discord", "done": True, "ok": True},
+                                        {"id": "s1", "source": "subagent", "done": True, "ok": False}]}),
+    (2.0, {"type": "bubbles", "items": []}),
     (2.0, {"type": "ambient", "heat": .9, "unread": 0, "tasks_running": 1, "recent_task": False}),
     (0.0, {"type": "state", "name": "listening"}),
     (0.0, {"type": "transcript", "text": "", "listening": True}),

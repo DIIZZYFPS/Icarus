@@ -35,7 +35,7 @@ logger = logging.getLogger("icarus_desktop")
 # What restart_icarus may restart, in the order they go. The daemon is last: restarting it ends
 # this process, and --no-block lets systemd carry the job out after we're gone.
 RESTART_TARGETS = {
-    "api": ("docker", "restart", "icarus-api"),
+    "api": ("docker", "restart", "icarus-api", "icarus-email_triage-1"),   # both run ./backend
     "councilor": ("systemctl", "--user", "--no-block", "restart", "icarus-councilor.service"),
     "desktop": ("systemctl", "--user", "--no-block", "restart", "icarus-desktop.service"),
 }
@@ -201,6 +201,8 @@ class Daemon:
         self._confirm: asyncio.Future | None = None   # pending yes/no for an edit request
         self.task_progress: dict[str, dict] = {}      # Claude task id -> {title, text, steps, started, ...}
         self.pending_restart: set[str] = set()        # RESTART_TARGETS keys, run once he's done talking
+        self.busy_items: list[dict] = []              # background jobs for the thought bubbles
+        self.busy_at = 0.0                            # when icarus-api last sent the list
         self.pending_image: str | None = None         # screenshot to send with the next utterance
         self.call_image: str | None = None            # ...and re-sent with follow-ups in the same call
         self.board: dict | None = None                # code on screen ("show me")
@@ -221,7 +223,8 @@ class Daemon:
     # ── renderer ────────────────────────────────────────────────────────────
 
     def _snapshot(self):
-        return [self.ambient, {"type": "state", "name": self.state}, self._tasks_event()]
+        return [self.ambient, {"type": "state", "name": self.state}, self._tasks_event(),
+                {"type": "bubbles", "items": self.busy_items}]
 
     def emit(self, **ev):
         self.bus.emit(ev)
@@ -462,6 +465,8 @@ class Daemon:
                     self.bus.emit(self._tasks_event())
         elif kind == "task_event":
             self.on_task_event(msg)
+        elif kind == "busy":
+            self.on_busy(msg)
         elif kind == "notify":
             self.announcements.append({**msg, "received": time.monotonic()})
             logger.info(f"[notify] pop-up {msg.get('id')} queued ({len(self.announcements)} waiting)")
@@ -830,6 +835,29 @@ class Daemon:
         if self.state != "dormant":
             self.emit(type="chip", id=f"task-{task_id}", text=text, done=bool(msg.get("done")))
 
+    # ── thought bubbles (background work) ───────────────────────────────────
+
+    BUSY_STALE_SECONDS = 15   # icarus-api resends every 5 s; silence this long means the list is dead
+
+    def on_busy(self, msg: dict):
+        items = [{"id": str(i.get("id")), "source": str(i.get("source")), "done": bool(i.get("done")),
+                  "ok": bool(i.get("ok", True))} for i in (msg.get("items") or []) if isinstance(i, dict)]
+        self.busy_at = time.monotonic()
+        if items != self.busy_items:
+            self.busy_items = items
+            self.bus.emit({"type": "bubbles", "items": items})
+
+    def expire_busy(self):
+        if self.busy_items and (not self.link.connected.is_set()
+                                or time.monotonic() - self.busy_at > self.BUSY_STALE_SECONDS):
+            self.busy_items = []
+            self.bus.emit({"type": "bubbles", "items": []})
+
+    async def busy_loop(self):
+        while True:
+            await asyncio.sleep(3)
+            self.expire_busy()
+
     # ── restarting Icarus (to load changes) ─────────────────────────────────
 
     def _tasks_busy(self) -> bool:
@@ -968,6 +996,7 @@ class Daemon:
             asyncio.create_task(self.tts.warm_up()),
             asyncio.create_task(self.announce_loop()),
             asyncio.create_task(self.restart_loop()),
+            asyncio.create_task(self.busy_loop()),
         ]
         logger.info(f"[daemon] ready; control socket {self.config.ctl_socket}")
         try:

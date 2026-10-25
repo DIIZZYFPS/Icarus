@@ -422,8 +422,10 @@ class EmailTriageWorker(WorkerBase):
 
         logger.info(f"[triage] Processing message {message_id}")
 
+        from backend.agent.busy import busy
         try:
-            await self._process_message(message_id)
+            async with busy("email"):
+                await self._process_message(message_id)
         except Exception as e:
             logger.error(f"[triage] Unhandled error processing {message_id}: {e}", exc_info=True)
 

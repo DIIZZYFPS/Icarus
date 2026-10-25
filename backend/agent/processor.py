@@ -196,6 +196,24 @@ async def _try_resume_paused_subagent(
 
 # ── Message Processing ──────────────────────────────────────────────────────
 
+BUSY_PLATFORMS = ("discord", "telegram")   # chat replies shown as a thought bubble on the desktop avatar
+
+
+def _shows_busy(fn):
+    """Report Discord/Telegram turns to busy.py while they run (desktop turns are the avatar's own)."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(platform: str, *args, **kwargs):
+        if platform not in BUSY_PLATFORMS:
+            return await fn(platform, *args, **kwargs)
+        from backend.agent.busy import busy
+        async with busy(platform):
+            return await fn(platform, *args, **kwargs)
+    return wrapper
+
+
+@_shows_busy
 async def process_message(
     platform: str,
     user_id: str,
