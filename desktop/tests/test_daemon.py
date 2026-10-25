@@ -639,6 +639,50 @@ class ConfirmTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"type": "chip", "id": "task-sub-1", "text": "Editing app.py", "done": False}, self.events)
 
 
+class TaskBadgeTests(unittest.IsolatedAsyncioTestCase):
+    """Running Claude tasks reach the renderer even in orb mode, for the badge beside the orb."""
+
+    def setUp(self):
+        self.daemon = Daemon(Config(token="t"))
+        self.events = []
+        self.daemon.bus.emit = self.events.append
+
+    def badge(self):
+        return [e for e in self.events if e["type"] == "tasks"][-1]["items"]
+
+    async def event(self, text, **extra):
+        await self.daemon.on_api_message({"type": "task_event", "task_id": "sub-1", "text": text, **extra})
+
+    async def test_badge_shows_title_progress_and_steps_while_dormant(self):
+        meta = {"title": "fix the flaky test", "project": "icarus", "mode": "edit", "started": 1000.0}
+        await self.event("Claude: editing icarus", **meta)
+        await self.event("Reading engine.py", **meta)
+        await self.event("Editing engine.py", **meta)
+        [item] = self.badge()
+        self.assertEqual((item["title"], item["project"], item["mode"]), ("fix the flaky test", "icarus", "edit"))
+        self.assertEqual((item["text"], item["steps"], item["started"]), ("Editing engine.py", 2, 1000.0))
+        self.assertNotIn("seen", item)
+        self.assertFalse(any(e["type"] == "chip" for e in self.events))   # chips only while he's on screen
+
+    async def test_done_removes_it(self):
+        await self.event("Reading a.py")
+        await self.event("Claude finished", done=True)
+        self.assertEqual(self.badge(), [])
+
+    async def test_snapshot_includes_running_tasks(self):
+        await self.event("Reading a.py", title="t")
+        self.assertEqual(self.daemon._snapshot()[-1]["items"][0]["title"], "t")
+
+    async def test_quiet_task_cleared_when_registry_says_nothing_runs(self):
+        await self.event("Reading a.py")
+        idle = {"type": "ambient", "heat": .3, "unread": 0, "tasks_running": 0, "recent_task": True}
+        await self.daemon.on_api_message(idle)
+        self.assertEqual(len(self.daemon.task_progress), 1)   # fresh: one bad read mustn't blink it away
+        self.daemon.task_progress["sub-1"]["seen"] -= 120
+        await self.daemon.on_api_message(idle)
+        self.assertEqual(self.badge(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
