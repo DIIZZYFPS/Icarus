@@ -913,8 +913,9 @@ async def process_delegation(data: dict):
 # ── Claude Code tasks (desktop avatar, Phase 4) ──────────────────────────────
 # Requested by L1's run_claude_task tool after the operator confirmed it on the
 # desktop. Runs `claude -p` headless (backend/agent/claude_runner.py): `ask` is
-# read-only in the project, `edit` works in a git worktree on claude/<task_id>
-# and leaves a commit there for review. Same registry, envelope and delivery as
+# read-only in the project, `edit` works in a git worktree on claude/<task_id>,
+# then lands the commit on the checked-out branch (or holds it there, saying why).
+# Same registry, envelope and delivery as
 # a delegated task, so check_task_status and the desktop pop-ups just work.
 
 TASK_EVENTS_LIST = "icarus:desktop:task_events"
@@ -969,8 +970,12 @@ async def process_claude_code(data: dict):
         error = result.error if not result.ok else None
     failed = result is None or not result.ok
     summary = (result.summary if result else "") or ""
-    if result and result.branch:
-        summary += f"\n\nBranch: {result.branch} ({result.diffstat or 'no changes'}). Worktree: {result.worktree}"
+    if result and result.landed_on:
+        summary += f"\n\nApplied to {result.landed_on} ({result.diffstat}). Not pushed."
+    elif result and result.branch:
+        why = f" because {result.hold_reason}" if result.hold_reason else ""
+        summary += (f"\n\nNot applied{why}. The changes are on branch {result.branch} ({result.diffstat or 'no changes'}); "
+                    f"run `git merge {result.branch}` when ready. Worktree: {result.worktree}")
     envelope = CompletionEnvelope.build(
         task_id=task_id, kind="claude_code", status=STATUS_FAILED if failed else STATUS_COMPLETED,
         raw_summary=summary, artifacts=(result.artifacts if result else {}), error=error,

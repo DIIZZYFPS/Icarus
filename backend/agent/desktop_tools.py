@@ -24,7 +24,7 @@ You are speaking out loud through DIIZZY's desktop avatar. Everything you write 
 - Answer in one to three short spoken sentences. No markdown, lists, code, URLs, file paths or emoji.
 - If the answer needs detail (code, a list, a link), call show_on_screen with it and say in a few words that it's on screen.
 - Desktop tools, available only in this mode, act on DIIZZY's PC directly: open_app, focus_window, media_control, now_playing, spotify_play, show_on_screen. When asked, just do it and confirm briefly; don't narrate.
-- Coding work in one of DIIZZY's projects (fix, implement, refactor, investigate or explain code) goes to run_claude_task, not escalate_to_councilor or delegate_task. Use mode="ask" to investigate or answer without changing anything, mode="edit" to make changes (DIIZZY confirms first; it lands on a branch for review). Projects: {projects}.
+- Coding work in one of DIIZZY's projects (fix, implement, refactor, investigate or explain code) goes to run_claude_task, not escalate_to_councilor or delegate_task. Use mode="ask" to investigate or answer without changing anything, mode="edit" to make changes (DIIZZY confirms first; once tested, the change is applied to DIIZZY's checked-out branch). Projects: {projects}.
 - To explain something visual ("show me", an algorithm, an example), don't read it aloud: show it and narrate it in 2-6 beats. Code goes to show_visual; a grid that fills in step by step (DP tables, matrices) goes to show_table; flows, trees and architectures go to show_diagram. Keep examples small so they're quick: tables up to about 6x6, 3-5 beats, code under 25 lines. Call the tool once. Each beat is one or two spoken sentences plus the lines to light up while you say them. The beats are spoken for you, in order, with the lines highlighted, so after show_visual end your reply with one short closing sentence at most. If DIIZZY wants to keep it ("keep that up", "pop it out"), call keep_visual.
 - If a screenshot is attached, it's the window DIIZZY is looking at right now (he pressed the look hotkey): answer about what's on it, and refer to things by what they say or where they are.
 - There is no shell access from here. For anything those tools can't do, say so or delegate as you normally would.
@@ -82,7 +82,7 @@ async def show_on_screen(title: str, body: str) -> str:
 
 
 async def run_claude_task(project: str, task: str, mode: str = "ask") -> str:
-    """Hand a coding task in one of DIIZZY's projects to Claude Code, which works on it in the background and reports back when it's done. mode="ask" investigates or answers questions about the code without changing anything; mode="edit" makes changes on a new git branch for review, after DIIZZY confirms on the desktop. Write task as a complete brief: Claude has no conversation context."""
+    """Hand a coding task in one of DIIZZY's projects to Claude Code, which works on it in the background and reports back when it's done. mode="ask" investigates or answers questions about the code without changing anything; mode="edit" makes changes in an isolated worktree, has them tested, and applies them to the branch DIIZZY has checked out (kept on its own branch if they conflict or tests fail), after DIIZZY confirms on the desktop. Write task as a complete brief: Claude has no conversation context."""
     from .delegation import new_task_id
     from .tools import current_chat_id, current_platform, current_user_id
     from backend.database.redis_connection import get_redis_client

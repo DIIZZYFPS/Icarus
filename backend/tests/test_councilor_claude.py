@@ -82,6 +82,28 @@ class ProcessClaudeCodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((mailbox["type"], mailbox["platform"]), ("delegation", "desktop"))
         self.assertIn("claude/sub-5-aaaaaa", mailbox["message"])
 
+    async def test_landed_edit_says_where_it_was_applied(self):
+        async def landed_run(**kw):
+            return ClaudeResult(True, "Fixed the greeting.", branch="claude/sub-7-cccccc", landed_on="feat/x",
+                                diffstat="1 file changed", elapsed_s=3)
+        with mock.patch("backend.agent.claude_runner.run_claude", landed_run):
+            await councilor.process_claude_code({"task_id": "sub-7-cccccc", "timestamp": 7, "project": "icarus",
+                                                 "task": "Fix", "mode": "edit", "platform": "desktop"})
+        message = self.redis.lists["icarus:councilor:responses"][0]["message"]
+        self.assertIn("Applied to feat/x (1 file changed)", message)
+        self.assertNotIn("git merge", message)
+
+    async def test_held_edit_says_why_and_how_to_apply(self):
+        async def held_run(**kw):
+            return ClaudeResult(True, "Fixed.", branch="claude/sub-8-dddddd", worktree="/wt/sub-8",
+                                hold_reason="you have uncommitted changes in app.py", diffstat="1 file changed")
+        with mock.patch("backend.agent.claude_runner.run_claude", held_run):
+            await councilor.process_claude_code({"task_id": "sub-8-dddddd", "timestamp": 8, "project": "icarus",
+                                                 "task": "Fix", "mode": "edit", "platform": "desktop"})
+        message = self.redis.lists["icarus:councilor:responses"][0]["message"]
+        self.assertIn("Not applied because you have uncommitted changes in app.py", message)
+        self.assertIn("git merge claude/sub-8-dddddd", message)
+
     async def test_unknown_project_fails_cleanly(self):
         await councilor.process_claude_code({"task_id": "sub-6-bbbbbb", "timestamp": 6, "project": "nope",
                                              "task": "x", "mode": "ask", "platform": "desktop"})

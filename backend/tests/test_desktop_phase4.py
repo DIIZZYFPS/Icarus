@@ -100,41 +100,128 @@ class ClaudeRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(claude_runner.parse_projects("Icarus=/p/i, bad, site = /p/s"),
                          {"icarus": Path("/p/i"), "site": Path("/p/s")})
 
+    async def _edit_run(self, d, *, script="echo \"print('fixed')\" > app.py", result_text="Fixed the greeting.",
+                        before=None, env=None):
+        """Init a repo at d/repo, run edit mode with a fake claude that runs `script` in the worktree.
+        $REPO in the script is the main checkout (to simulate DIIZZY working during the run)."""
+        repo, worktrees = Path(d, "repo"), Path(d, "wt")
+        repo.mkdir()
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        git("init", "-q", "-b", "main")
+        (repo / "app.py").write_text("print('hi')\n")
+        git("add", "-A")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+        if before:
+            before(repo)
+        fake = Path(d, "claude")
+        fake.write_text(textwrap.dedent("""\
+            #!/bin/sh
+            REPO=%s
+            echo '{"type":"system","subtype":"init"}'
+            echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"app.py"}}]}}'
+            %s
+            echo '{"type":"result","subtype":"success","is_error":false,"result":%s,"num_turns":2,"total_cost_usd":0.01}'
+            """) % (repo, script, json.dumps(result_text)))
+        fake.chmod(0o755)
+        self.progress = []
+
+        async def on_progress(text):
+            self.progress.append(text)
+
+        with mock.patch.dict(os.environ, {"CLAUDE_BIN": str(fake), "CLAUDE_WORKTREE_ROOT": str(worktrees), **(env or {})}):
+            result = await claude_runner.run_claude(task_id="sub-1-abc123", project_name="repo", project=repo,
+                                                    task="Fix the greeting", mode="edit", on_progress=on_progress)
+        return repo, result
+
+    @staticmethod
+    def _branches(repo):
+        return subprocess.run(["git", "-C", str(repo), "branch", "--format=%(refname:short)"],
+                              capture_output=True, text=True).stdout.split()
+
+    @staticmethod
+    def _log(repo, ref="HEAD"):
+        return subprocess.run(["git", "-C", str(repo), "log", "--format=%s", ref], capture_output=True, text=True).stdout
+
     @unittest.skipUnless(shutil.which("git"), "needs git")
-    async def test_edit_mode_runs_in_a_worktree_and_commits_on_a_branch(self):
+    async def test_edit_mode_applies_the_commit_to_the_checked_out_branch(self):
         with tempfile.TemporaryDirectory() as d:
-            repo, worktrees = Path(d, "repo"), Path(d, "wt")
-            repo.mkdir()
-            git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
-            git("init", "-q", "-b", "main")
-            (repo / "app.py").write_text("print('hi')\n")
-            git("add", "-A")
-            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
-            fake = Path(d, "claude")
-            fake.write_text(textwrap.dedent("""\
-                #!/bin/sh
-                echo '{"type":"system","subtype":"init"}'
-                echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"app.py"}}]}}'
-                echo "print('fixed')" > app.py
-                echo '{"type":"result","subtype":"success","is_error":false,"result":"Fixed the greeting.","num_turns":2,"total_cost_usd":0.01}'
-                """))
-            fake.chmod(0o755)
-            progress = []
-
-            async def on_progress(text):
-                progress.append(text)
-
-            with mock.patch.dict(os.environ, {"CLAUDE_BIN": str(fake), "CLAUDE_WORKTREE_ROOT": str(worktrees)}):
-                result = await claude_runner.run_claude(task_id="sub-1-abc123", project_name="repo", project=repo,
-                                                        task="Fix the greeting", mode="edit", on_progress=on_progress)
+            repo, result = await self._edit_run(d)
             self.assertTrue(result.ok, result.error)
             self.assertEqual(result.summary, "Fixed the greeting.")
-            self.assertEqual(result.branch, "claude/sub-1-abc123")
             self.assertIn("1 file changed", result.diffstat)
-            self.assertEqual(progress, ["Editing app.py"])
-            self.assertEqual((repo / "app.py").read_text(), "print('hi')\n")   # main checkout untouched
-            log = subprocess.run(["git", "-C", str(repo), "log", "--oneline", "claude/sub-1-abc123"], capture_output=True, text=True).stdout
-            self.assertIn("claude: Fix the greeting", log)
+            self.assertEqual(self.progress, ["Editing app.py"])
+            self.assertEqual(result.landed_on, "main")
+            self.assertEqual((repo / "app.py").read_text(), "print('fixed')\n")
+            self.assertIn("claude: Fix the greeting", self._log(repo))
+            self.assertEqual(self._branches(repo), ["main"])                 # task branch cleaned up
+            self.assertFalse(Path(d, "wt", "repo", "sub-1-abc123").exists())  # ...and its worktree
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    async def test_commit_is_rebased_when_the_branch_moved_during_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            script = ("echo \"print('fixed')\" > app.py; echo notes > \"$REPO/notes.txt\"; "
+                      "git -C \"$REPO\" add notes.txt; git -C \"$REPO\" -c user.name=t -c user.email=t@t commit -q -m mine")
+            repo, result = await self._edit_run(d, script=script)
+            self.assertEqual(result.landed_on, "main", result.hold_reason)
+            self.assertEqual(self._log(repo).split("\n")[:2], ["claude: Fix the greeting", "mine"])
+            self.assertEqual((repo / "app.py").read_text(), "print('fixed')\n")
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    async def test_uncommitted_work_in_the_same_file_holds_the_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, result = await self._edit_run(d, before=lambda r: (r / "app.py").write_text("print('mine')\n"))
+            self.assertIsNone(result.landed_on)
+            self.assertIn("uncommitted changes in app.py", result.hold_reason)
+            self.assertEqual((repo / "app.py").read_text(), "print('mine')\n")   # DIIZZY's work untouched
+            self.assertIn("claude/sub-1-abc123", self._branches(repo))
+            self.assertTrue(Path(result.worktree).is_dir())
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    async def test_uncommitted_work_elsewhere_doesnt_block_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            def before(r):
+                (r / "other.py").write_text("x = 1\n")
+                subprocess.run(["git", "-C", str(r), "add", "other.py"], check=True)
+            repo, result = await self._edit_run(d, before=before)
+            self.assertEqual(result.landed_on, "main", result.hold_reason)
+            self.assertEqual((repo / "other.py").read_text(), "x = 1\n")
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    async def test_conflicting_commit_on_the_branch_holds_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            script = ("echo \"print('fixed')\" > app.py; echo \"print('theirs')\" > \"$REPO/app.py\"; "
+                      "git -C \"$REPO\" -c user.name=t -c user.email=t@t commit -qam theirs")
+            repo, result = await self._edit_run(d, script=script)
+            self.assertIsNone(result.landed_on)
+            self.assertIn("conflicts", result.hold_reason)
+            self.assertEqual((repo / "app.py").read_text(), "print('theirs')\n")
+            wt_status = subprocess.run(["git", "-C", result.worktree, "status", "--porcelain"], capture_output=True, text=True)
+            self.assertEqual(wt_status.stdout.strip(), "")                     # rebase was aborted cleanly
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    async def test_reported_test_failures_hold_the_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, result = await self._edit_run(d, result_text="Fixed it but test_x fails.\nTESTS FAILED")
+            self.assertIsNone(result.landed_on)
+            self.assertEqual(result.hold_reason, "Claude reported failing tests")
+            self.assertEqual(result.summary, "Fixed it but test_x fails.")
+            self.assertEqual((repo / "app.py").read_text(), "print('hi')\n")
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    async def test_landing_can_be_turned_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, result = await self._edit_run(d, env={"CLAUDE_EDIT_LAND": "branch"})
+            self.assertIsNone(result.landed_on)
+            self.assertEqual(result.branch, "claude/sub-1-abc123")
+            self.assertEqual((repo / "app.py").read_text(), "print('hi')\n")
+            self.assertIn("claude: Fix the greeting", self._log(repo, "claude/sub-1-abc123"))
+
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    async def test_no_changes_leaves_nothing_behind(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, result = await self._edit_run(d, script="true", result_text="Nothing to change.")
+            self.assertIsNone(result.branch)
+            self.assertEqual(self._branches(repo), ["main"])
 
 
 class ShowVisualToolTests(unittest.IsolatedAsyncioTestCase):
