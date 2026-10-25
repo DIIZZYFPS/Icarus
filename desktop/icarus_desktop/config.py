@@ -77,6 +77,7 @@ class Config:
     kokoro_voices: Path = DESKTOP_DIR / "voices" / "voices-v1.0.bin"
     voice_speed: float = 1.0
     voice_fx: float = 0.0                # 0..1 'construct' processing
+    voice_room: float = 1.0              # 0..1 the 'machine' room he plays through; 0 is dry
     linger_seconds: float = 6.0
     followup_seconds: float = 8.0       # mic stays open this long after he answers; 0 disables
     max_record_seconds: float = 30.0
@@ -117,6 +118,7 @@ def load_config() -> Config:
         kokoro_voice=os.getenv("DESKTOP_KOKORO_VOICE", Config.kokoro_voice),
         voice_speed=_float("DESKTOP_VOICE_SPEED", Config.voice_speed),
         voice_fx=max(0.0, min(1.0, _float("DESKTOP_VOICE_FX", Config.voice_fx))),
+        voice_room=max(0.0, min(1.0, _float("DESKTOP_VOICE_ROOM", Config.voice_room))),
         linger_seconds=_float("DESKTOP_LINGER_SECONDS", Config.linger_seconds),
         followup_seconds=_float("DESKTOP_FOLLOWUP_SECONDS", Config.followup_seconds),
         max_record_seconds=_float("DESKTOP_MAX_RECORD_SECONDS", Config.max_record_seconds),

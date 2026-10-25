@@ -8,6 +8,7 @@ import threading
 import numpy as np
 
 from .audio import MIC_RATE
+from .voice import trim_silence
 
 logger = logging.getLogger(__name__)
 
@@ -99,24 +100,28 @@ class TextToSpeech:
         await asyncio.to_thread(self._synth, "Ready.")
         logger.info(f"[tts] voice {self.label} ready")
 
-    def _synth(self, text: str) -> tuple[bytes, int]:
+    def _synth(self, text: str, pace: float = 1.0) -> tuple[bytes, int]:
         voice = self._load()
+        speed = max(.7, min(1.4, self.config.voice_speed * pace))
         if self.engine == "kokoro":
             name = self.config.kokoro_voice
-            audio, rate = voice.create(text, voice=name, speed=self.config.voice_speed,
+            audio, rate = voice.create(text, voice=name, speed=speed,
                                        lang="en-gb" if name.startswith("b") else "en-us")
             audio = np.asarray(audio, np.float32)
         else:
-            chunks = list(voice.synthesize(text))
+            from piper import SynthesisConfig
+            chunks = list(voice.synthesize(text, SynthesisConfig(length_scale=1 / speed)))
             if not chunks:
                 return b"", 22050
             rate = chunks[0].sample_rate
             audio = np.frombuffer(b"".join(c.audio_int16_bytes for c in chunks), np.int16).astype(np.float32) / 32768.0
+        # Engines pad each clip with silence; the speaker decides the pauses instead.
+        audio = trim_silence(audio, rate)
         audio = construct_fx(audio, rate, self.config.voice_fx)
         return (np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes(), rate
 
-    async def synthesize(self, text: str) -> tuple[bytes, int]:
-        return await asyncio.to_thread(self._synth, text)
+    async def synthesize(self, text: str, pace: float = 1.0) -> tuple[bytes, int]:
+        return await asyncio.to_thread(self._synth, text, pace)
 
 
 _URL = re.compile(r"https?://\S+")

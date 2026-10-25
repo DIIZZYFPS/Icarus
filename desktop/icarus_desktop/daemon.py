@@ -4,7 +4,7 @@ daemon.py — the Icarus desktop daemon: eyes, ears and hands for the avatar.
   hotkey ─ctl socket─▶ daemon ─pw-record─▶ faster-whisper ─/ws/desktop─▶ icarus-api (Icarus L1)
                          │◀───────── status / action / say / reply / ambient ──────┘
                          ├─ actions (hyprctl, playerctl, Spotify) ─▶ action_result
-                         ├─ Piper ─pw-play─▶ speakers
+                         ├─ Kokoro/Piper ─MachineRoom─pw-play (one stream per reply)─▶ speakers
                          └─ events ─renderer socket─▶ avatar overlay
 
 The daemon owns the conversation state (ADR icarus_desktop_avatar.md §6.5) and
@@ -21,11 +21,14 @@ import re
 import time
 import uuid
 
+import numpy as np
+
 from .actions import ActionError, Actions
 from .board import BoardServer, open_page, write_page
 from .audio import Player, Recorder
 from .config import Config
 from .speech import SpeechToText, TextToSpeech, sentences
+from .voice import CHUNK_CHARS, FIRST_CHUNK_CHARS, gap_before, line_offsets, pace
 
 logger = logging.getLogger("icarus_desktop")
 
@@ -209,7 +212,7 @@ class Daemon:
         self.bus = RendererBus(config.renderer_socket, self._snapshot)
         self.link = Link(config, self.on_api_message)
         self.recorder = Recorder(on_level=self._mic_level, max_seconds=config.max_record_seconds)
-        self.player = Player()
+        self.player = Player(config.voice_room)
         self.stt = SpeechToText(config.whisper_model, config.whisper_device, config.whisper_compute,
                                 beam=config.whisper_beam, threads=config.whisper_threads, vocab=config.whisper_vocab)
         self.tts = TextToSpeech(config)
@@ -547,47 +550,91 @@ class Daemon:
     async def speak(self, queue: asyncio.Queue, gen: int, followup: bool = True):
         """Speak lines as they arrive on `queue` until None, then open the follow-up window.
 
-        A line is text, or (text, focus event) for a board beat. Synthesis runs one
-        line ahead of playback, so the next sentence is ready when this one ends."""
-        audio: asyncio.Queue = asyncio.Queue(maxsize=2)
+        A line is text, or (text, focus event) for a board beat. Lines that are already waiting
+        are synthesized together as one chunk, so the voice carries its intonation across
+        sentences instead of restarting every line. Synthesis runs one chunk ahead of playback,
+        and everything plays on one continuous stream with pauses chosen from the text."""
+        audio: asyncio.Queue = asyncio.Queue(maxsize=1)
+        end = object()
 
         async def synthesize():
+            nothing = object()
+            held, prev, first = nothing, None, True
             while True:
-                item = await queue.get()
+                item = held if held is not nothing else await queue.get()
+                held = nothing
                 if item is None:
-                    await audio.put(None)
+                    await audio.put(end)
                     return
-                text, focus = (item, None) if isinstance(item, str) else item
-                pcm, rate = await self.tts.synthesize(text)
-                await audio.put((text, focus, pcm, rate))
+                lines = [(item, None) if isinstance(item, str) else tuple(item)]
+                budget = FIRST_CHUNK_CHARS if first else CHUNK_CHARS
+                size = len(lines[0][0])
+                while not queue.empty():
+                    nxt = queue.get_nowait()
+                    line = None if nxt is None else ((nxt, None) if isinstance(nxt, str) else tuple(nxt))
+                    # A new board beat starts its own chunk (it gets a longer pause and its focus).
+                    if line is None or line[1] is not None or size + len(line[0]) > budget:
+                        held = nxt
+                        break
+                    lines.append(line)
+                    size += len(line[0]) + 1
+                text = " ".join(t for t, _ in lines)
+                pcm, rate = await self.tts.synthesize(text, pace=pace(text))
+                gap = gap_before(prev, text, new_beat=lines[0][1] is not None)
+                await audio.put((lines, pcm, rate, gap))
+                prev, first = text, False
+
+        def mark(text: str, focus: dict | None, ms: int):
+            def fire():
+                if gen != self.generation:
+                    return
+                self.set_state("speaking")
+                if focus:
+                    self.emit(**focus)
+                    self.board_server.broadcast(focus)
+                self.emit(type="subtitle", text=text, duration_ms=ms)
+            return fire
 
         producer = asyncio.create_task(synthesize())
+        getter: asyncio.Task | None = None
         spoke = False
         try:
             while True:
                 if audio.empty() and spoke and self.state == "speaking":
                     self.set_state("thinking")  # between sentences while a tool runs
-                got = await audio.get()
-                if got is None:
+                getter = getter or asyncio.ensure_future(audio.get())
+                if self.player.is_open:
+                    # Nothing ready soon (a tool is running): let the room ring out and close.
+                    await asyncio.wait({getter}, timeout=1.5)
+                    if not getter.done():
+                        await self.player.end()
+                got = await getter
+                getter = None
+                if got is end:
                     break
-                line, focus, pcm, rate = got
+                lines, pcm, rate, gap = got
                 if gen != self.generation:
                     return
                 if not spoke:
                     self.emit(type="transcript_clear")
                     spoke = True
                 self.speech_idle.clear()
-                self.set_state("speaking")
-                if focus:
-                    self.emit(**focus)
-                    self.board_server.broadcast(focus)
-                self.emit(type="subtitle", text=line, duration_ms=int(len(pcm) / 2 / rate * 1000))
-                await self.player.play(pcm, rate, on_level=lambda lv: self.emit(type="speech_level", rms=round(lv, 4)))
+                fresh = not self.player.is_open
+                await self.player.begin(rate, on_level=lambda lv: self.emit(type="speech_level", rms=round(lv, 4)))
+                # A freshly opened stream gets a breath of room before he speaks.
+                self.player.gap(.1 if fresh else gap)
+                pcm_audio = np.frombuffer(pcm[: len(pcm) // 2 * 2], np.int16)
+                offsets = line_offsets([t for t, _ in lines], pcm_audio, rate)
+                total = len(pcm_audio) / rate
+                bounds = offsets[1:] + [total]
+                marks = [(off, mark(text, focus, int((b - off) * 1000)))
+                         for (text, focus), off, b in zip(lines, offsets, bounds)]
+                await self.player.say(pcm, marks)
                 if gen != self.generation:
                     return
-                await asyncio.sleep(.25)
                 if audio.empty():
                     self.speech_idle.set()
+            await self.player.end()
             self.speech_idle.set()
             if not spoke:
                 await self.linger(gen)
@@ -602,6 +649,8 @@ class Daemon:
             await self.fail("My voice failed.", speak=False)
         finally:
             producer.cancel()
+            if getter:
+                getter.cancel()
             self.speech_idle.set()
 
     async def follow_up(self, gen: int):

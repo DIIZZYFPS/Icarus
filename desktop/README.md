@@ -90,8 +90,9 @@ python3 desktop/renderer/avatar.py --demo     # overlay only, scripted walk thro
 | `DESKTOP_LINGER_SECONDS` | `6` | how long he stays when follow-ups are off |
 | `DESKTOP_TTS_ENGINE` | `piper` | `piper` or `kokoro` (more natural; needs `kokoro-v1.0.onnx` + `voices-v1.0.bin` in `desktop/voices/`) |
 | `DESKTOP_KOKORO_VOICE` | `am_onyx` | e.g. `bm_lewis`, `am_fenrir`; `b*` voices are British |
-| `DESKTOP_VOICE_SPEED` | `1.0` | Kokoro only |
+| `DESKTOP_VOICE_SPEED` | `1.0` | Base speed; short confirmations go up to 10% faster on top of it |
 | `DESKTOP_VOICE_FX` | `0` | 0 to 1, the "construct" processing (chorus + faint ring mod) |
+| `DESKTOP_VOICE_ROOM` | `1` | 0 to 1, the "machine" room he plays through (body EQ, stereo reflections, faint floor); 0 is dry |
 | `DESKTOP_APP_DENYLIST` | empty | comma-separated app names `open_app` must refuse |
 | `DESKTOP_UNREAD_WINDOW_HOURS` | `6` | unanswered notifications younger than this count as unread |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | empty | from a free app at developer.spotify.com; without them "play X" opens a Spotify search instead of playing |

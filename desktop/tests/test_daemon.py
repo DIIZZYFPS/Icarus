@@ -171,20 +171,41 @@ class FakeLink:
 
 
 class FakeTTS:
-    async def synthesize(self, text):
+    def __init__(self):
+        self.texts = []
+
+    async def synthesize(self, text, pace=1.0):
+        self.texts.append(text)
         return b"\x00\x00" * 2205, 22050  # 0.1 s
 
 
 class FakePlayer:
     def __init__(self):
         self.played = 0
+        self.gaps = []
+        self.is_open = False
+
+    async def begin(self, rate, on_level=None):
+        self.is_open = True
+
+    def gap(self, seconds):
+        self.gaps.append(seconds)
+
+    async def say(self, pcm, marks=()):
+        self.played += 1
+        for _, fire in marks:
+            fire()
+        return True
+
+    async def end(self):
+        self.is_open = False
 
     async def play(self, pcm, rate, on_level=None):
         self.played += 1
         return True
 
     async def stop(self):
-        pass
+        self.is_open = False
 
 
 class DaemonFlowTests(unittest.IsolatedAsyncioTestCase):

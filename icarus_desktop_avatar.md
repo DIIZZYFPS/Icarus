@@ -229,7 +229,7 @@ The renderer is driven by one state machine plus a few continuous values. The da
 
 ### 6.6 Voice
 
-Kokoro `am_onyx`, chosen 2026-10-24 from an audition of 16 local voices (Kokoro and Piper). It renders about 0.5 s per short sentence on CPU, and speech is pipelined sentence by sentence. Piper `en_US-ryan-high` remains the fallback engine. An optional "construct" filter (`DESKTOP_VOICE_FX`, 0–1: chorus plus a faint ring mod) is available but off.
+Kokoro `am_onyx`, chosen 2026-10-24 from an audition of 16 local voices (Kokoro and Piper). It renders about 0.18 s per second of speech on CPU. Waiting lines are synthesized together in chunks (first ≤120 chars, then ≤300) so intonation carries across sentences, with engine padding trimmed and pauses chosen from punctuation. Each reply plays on one continuous stereo stream through a subtle "machine" room (`DESKTOP_VOICE_ROOM`: body EQ, per-ear early reflections, short tail, −64 dBFS floor), so it never drops to digital silence between lines (2026-10-25). Piper `en_US-ryan-high` remains the fallback engine. An optional "construct" filter (`DESKTOP_VOICE_FX`, 0–1: chorus plus a faint ring mod) is available but off.
 
 ---
 
