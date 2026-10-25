@@ -25,6 +25,7 @@ You are speaking out loud through DIIZZY's desktop avatar. Everything you write 
 - If the answer needs detail (code, a list, a link), call show_on_screen with it and say in a few words that it's on screen.
 - Desktop tools, available only in this mode, act on DIIZZY's PC directly: open_app, focus_window, media_control, now_playing, spotify_play, show_on_screen. When asked, just do it and confirm briefly; don't narrate.
 - Coding work in one of DIIZZY's projects (fix, implement, refactor, investigate or explain code) goes to run_claude_task, not escalate_to_councilor or delegate_task. Use mode="ask" to investigate or answer without changing anything, mode="edit" to make changes (DIIZZY confirms first; once tested, the change is applied to DIIZZY's checked-out branch). Projects: {projects}.
+- When a finished Claude task says a restart is needed to load its change, offer it. If DIIZZY agrees (or asks Icarus to restart), call restart_icarus with the parts named; it runs after this conversation ends, so just say it'll restart in a moment.
 - To explain something visual ("show me", an algorithm, an example), don't read it aloud: show it and narrate it in 2-6 beats. Code goes to show_visual; a grid that fills in step by step (DP tables, matrices) goes to show_table; flows, trees and architectures go to show_diagram. Keep examples small so they're quick: tables up to about 6x6, 3-5 beats, code under 25 lines. Call the tool once. Each beat is one or two spoken sentences plus the lines to light up while you say them. The beats are spoken for you, in order, with the lines highlighted, so after show_visual end your reply with one short closing sentence at most. If DIIZZY wants to keep it ("keep that up", "pop it out"), call keep_visual.
 - If a screenshot is attached, it's the window DIIZZY is looking at right now (he pressed the look hotkey): answer about what's on it, and refer to things by what they say or where they are.
 - There is no shell access from here. For anything those tools can't do, say so or delegate as you normally would.
@@ -124,6 +125,13 @@ async def run_claude_task(project: str, task: str, mode: str = "ask") -> str:
         return "The Councilor isn't running, so the Claude task couldn't start."
     where = f" on branch claude/{task_id}" if mode == "edit" else ""
     return f"Started Claude ({mode}) on {name} as task {task_id}{where}. It reports back when it finishes; don't wait for it."
+
+
+async def restart_icarus(parts: list[str]) -> str:
+    """Restart parts of Icarus so code changes take effect: "desktop" (this avatar daemon), "councilor" (runs Claude tasks and subagents), "api" (the main Icarus server). It is queued and runs once the current conversation ends; the Councilor also waits for running tasks to finish. Only call it when DIIZZY asks or agrees. parts=["cancel"] cancels a queued restart."""
+    if isinstance(parts, str):
+        parts = [parts]
+    return await _call("restart_icarus", {"parts": [str(p) for p in parts or []]})
 
 
 MAX_BEATS = 8
@@ -340,7 +348,7 @@ async def keep_visual() -> str:
     return await _call("keep_visual", {})
 
 
-DESKTOP_TOOLS = [open_app, focus_window, media_control, now_playing, spotify_play, show_on_screen, run_claude_task,
+DESKTOP_TOOLS = [open_app, focus_window, media_control, now_playing, spotify_play, show_on_screen, run_claude_task, restart_icarus,
                  show_visual, show_table, show_diagram, keep_visual]
 
 

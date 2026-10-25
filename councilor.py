@@ -931,6 +931,21 @@ async def _task_event(task_id: str, text: str, done: bool = False, **meta):
         logger.debug(f"[{task_id}] task event skipped: {e}")
 
 
+def restart_hint(project_name: str, files: list[str]) -> list[str]:
+    """Which parts of Icarus must restart to load a change to these files (restart_icarus names)."""
+    if project_name != "icarus":
+        return []
+    parts = set()
+    for f in files:
+        if f.startswith("desktop/"):
+            parts.add("desktop")
+        elif f == "councilor.py":
+            parts.add("councilor")
+        elif f.startswith("backend/") and "/tests/" not in f:
+            parts.update(("api", "councilor"))   # the Councilor imports backend.agent modules too
+    return [p for p in ("api", "councilor", "desktop") if p in parts]
+
+
 async def process_claude_code(data: dict):
     from types import SimpleNamespace
     from backend.agent.claude_runner import MODES, parse_projects, run_claude
@@ -972,6 +987,10 @@ async def process_claude_code(data: dict):
     summary = (result.summary if result else "") or ""
     if result and result.landed_on:
         summary += f"\n\nApplied to {result.landed_on} ({result.diffstat}). Not pushed."
+        parts = restart_hint(project_name, result.files)
+        if parts:
+            summary += (f" Takes effect after restarting: {', '.join(parts)}. Offer to do it; "
+                        f"restart_icarus(parts={parts}) runs it once the conversation ends.")
     elif result and result.branch:
         why = f" because {result.hold_reason}" if result.hold_reason else ""
         summary += (f"\n\nNot applied{why}. The changes are on branch {result.branch} ({result.diffstat or 'no changes'}); "

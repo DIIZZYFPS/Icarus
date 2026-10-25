@@ -151,6 +151,7 @@ class ClaudeRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("1 file changed", result.diffstat)
             self.assertEqual(self.progress, ["Editing app.py"])
             self.assertEqual(result.landed_on, "main")
+            self.assertEqual(result.files, ["app.py"])
             self.assertEqual((repo / "app.py").read_text(), "print('fixed')\n")
             self.assertIn("claude: Fix the greeting", self._log(repo))
             self.assertEqual(self._branches(repo), ["main"])                 # task branch cleaned up

@@ -86,6 +86,7 @@ class ClaudeResult:
     landed_on: str | None = None   # branch the commit was applied to; None if it's still on `branch`
     hold_reason: str = ""          # why it wasn't applied
     diffstat: str = ""
+    files: list[str] = field(default_factory=list)   # paths the commit changed
     cost_usd: float | None = None
     turns: int | None = None
     elapsed_s: float = 0.0
@@ -244,6 +245,9 @@ async def run_claude(
             result.error = (result.error + "; " if result.error else "") + str(e)
             result.hold_reason = "the commit failed"
         else:
+            if result.diffstat:
+                _, names = await _git(cwd, "diff", "--name-only", "HEAD~1", "HEAD")
+                result.files = [n for n in names.splitlines() if n.strip()]
             if not result.diffstat:
                 await remove_worktree(project, cwd, branch)          # nothing changed: nothing to keep
                 result.branch = result.worktree = None

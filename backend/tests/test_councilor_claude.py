@@ -85,13 +85,21 @@ class ProcessClaudeCodeTests(unittest.IsolatedAsyncioTestCase):
     async def test_landed_edit_says_where_it_was_applied(self):
         async def landed_run(**kw):
             return ClaudeResult(True, "Fixed the greeting.", branch="claude/sub-7-cccccc", landed_on="feat/x",
-                                diffstat="1 file changed", elapsed_s=3)
+                                diffstat="1 file changed", elapsed_s=3, files=["desktop/renderer/avatar.py"])
         with mock.patch("backend.agent.claude_runner.run_claude", landed_run):
             await councilor.process_claude_code({"task_id": "sub-7-cccccc", "timestamp": 7, "project": "icarus",
                                                  "task": "Fix", "mode": "edit", "platform": "desktop"})
         message = self.redis.lists["icarus:councilor:responses"][0]["message"]
         self.assertIn("Applied to feat/x (1 file changed)", message)
         self.assertNotIn("git merge", message)
+        self.assertIn("restarting: desktop", message)
+
+    def test_restart_hint_maps_files_to_services(self):
+        hint = councilor.restart_hint
+        self.assertEqual(hint("icarus", ["desktop/x.py", "backend/agent/a.py", "backend/tests/t.py"]), ["api", "councilor", "desktop"])
+        self.assertEqual(hint("icarus", ["councilor.py"]), ["councilor"])
+        self.assertEqual(hint("icarus", ["README.md", "backend/tests/t.py"]), [])
+        self.assertEqual(hint("site", ["desktop/x.py"]), [])
 
     async def test_held_edit_says_why_and_how_to_apply(self):
         async def held_run(**kw):

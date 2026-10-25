@@ -29,6 +29,14 @@ from .speech import SpeechToText, TextToSpeech, sentences
 
 logger = logging.getLogger("icarus_desktop")
 
+# What restart_icarus may restart, in the order they go. The daemon is last: restarting it ends
+# this process, and --no-block lets systemd carry the job out after we're gone.
+RESTART_TARGETS = {
+    "api": ("docker", "restart", "icarus-api"),
+    "councilor": ("systemctl", "--user", "--no-block", "restart", "icarus-councilor.service"),
+    "desktop": ("systemctl", "--user", "--no-block", "restart", "icarus-desktop.service"),
+}
+
 BUSY_STATES = {"thinking", "acting", "confirm", "speaking"}
 
 # Said in a follow-up window, these end the conversation instead of starting a turn.
@@ -189,6 +197,7 @@ class Daemon:
         self.announcements: list[dict] = []  # spoken pop-ups waiting for a good moment
         self._confirm: asyncio.Future | None = None   # pending yes/no for an edit request
         self.task_progress: dict[str, dict] = {}      # Claude task id -> {title, text, steps, started, ...}
+        self.pending_restart: set[str] = set()        # RESTART_TARGETS keys, run once he's done talking
         self.pending_image: str | None = None         # screenshot to send with the next utterance
         self.call_image: str | None = None            # ...and re-sent with follow-ups in the same call
         self.board: dict | None = None                # code on screen ("show me")
@@ -487,6 +496,11 @@ class Daemon:
             ok, result = self.board_action(name, args)
             await self.link.send({"type": "action_result", "id": action_id, "ok": ok, "result": result})
             return
+        if name == "restart_icarus":
+            ok, result = self.schedule_restart(args)
+            logger.info(f"[restart] {args} -> {result}")
+            await self.link.send({"type": "action_result", "id": action_id, "ok": ok, "result": result})
+            return
         if name == "confirm":
             ok = await self.confirm(args)
             await self.link.send({"type": "action_result", "id": action_id, "ok": ok,
@@ -767,6 +781,54 @@ class Daemon:
         if self.state != "dormant":
             self.emit(type="chip", id=f"task-{task_id}", text=text, done=bool(msg.get("done")))
 
+    # ── restarting Icarus (to load changes) ─────────────────────────────────
+
+    def _tasks_busy(self) -> bool:
+        return bool(self.task_progress) or int(self.ambient.get("tasks_running") or 0) > 0
+
+    def schedule_restart(self, args: dict) -> tuple[bool, str]:
+        """Queue parts of Icarus to restart. Nothing restarts mid-conversation: restart_loop
+        waits for dormant, and holds the Councilor while it's running tasks."""
+        parts = args.get("parts")
+        parts = [parts] if isinstance(parts, str) else list(parts or [])
+        parts = [str(p).strip().lower() for p in parts if str(p).strip()]
+        if not parts or parts == ["cancel"]:
+            had, self.pending_restart = bool(self.pending_restart), set()
+            return True, "Cancelled the pending restart." if had else "No restart was pending."
+        unknown = [p for p in parts if p not in RESTART_TARGETS]
+        if unknown:
+            return False, f"can't restart {', '.join(unknown)}; choose from {', '.join(RESTART_TARGETS)}"
+        self.pending_restart.update(parts)
+        names = ", ".join(p for p in RESTART_TARGETS if p in self.pending_restart)
+        wait = " and the running tasks finish" if "councilor" in self.pending_restart and self._tasks_busy() else ""
+        return True, f"Restart of {names} queued; it happens once this conversation ends{wait}."
+
+    def restart_ready(self) -> bool:
+        if not self.pending_restart or self.state != "dormant" or self.recorder.active or self.announcements:
+            return False
+        if self._confirm is not None and not self._confirm.done():
+            return False
+        return not ("councilor" in self.pending_restart and self._tasks_busy())
+
+    async def do_restart(self):
+        from .actions import run
+        parts = [p for p in RESTART_TARGETS if p in self.pending_restart]
+        self.pending_restart = set()
+        logger.info(f"[restart] restarting {', '.join(parts)}")
+        for part in parts:
+            try:
+                code, out = await run(*RESTART_TARGETS[part], timeout=90)
+            except Exception as e:
+                code, out = -1, str(e)
+            if code != 0:
+                logger.warning(f"[restart] {part} failed ({code}): {out[:200]}")
+
+    async def restart_loop(self):
+        while True:
+            await asyncio.sleep(2)
+            if self.restart_ready():
+                await self.do_restart()
+
     # ── speaking first (notification pop-ups) ───────────────────────────────
 
     async def suppressed(self) -> str | None:
@@ -856,6 +918,7 @@ class Daemon:
             asyncio.create_task(self.stt.warm_up()),
             asyncio.create_task(self.tts.warm_up()),
             asyncio.create_task(self.announce_loop()),
+            asyncio.create_task(self.restart_loop()),
         ]
         logger.info(f"[daemon] ready; control socket {self.config.ctl_socket}")
         try:

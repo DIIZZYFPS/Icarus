@@ -273,6 +273,59 @@ class DaemonFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.daemon.link.sent[-1]["type"], "cancel")
 
 
+class RestartTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.daemon = Daemon(Config(linger_seconds=.05, followup_seconds=0, token="t"))
+        self.daemon.link = FakeLink()
+        self.daemon.bus.emit = lambda ev: None
+        self.ran = []
+
+        async def fake_run(*cmd, timeout=8.0):
+            self.ran.append(cmd)
+            return 0, ""
+        patcher = mock.patch("icarus_desktop.actions.run", fake_run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def restart(self, parts):
+        await self.daemon.run_action({"type": "action", "id": "r1", "name": "restart_icarus", "args": {"parts": parts}})
+        return self.daemon.link.sent[-1]
+
+    async def test_waits_for_the_conversation_then_restarts_itself_last(self):
+        self.daemon.state = "speaking"
+        reply = await self.restart(["desktop", "api", "councilor"])
+        self.assertTrue(reply["ok"])
+        self.assertIn("once this conversation ends", reply["result"])
+        self.assertFalse(self.daemon.restart_ready())          # still talking
+        self.daemon.state = "dormant"
+        self.assertTrue(self.daemon.restart_ready())
+        await self.daemon.do_restart()
+        self.assertEqual([c[-1] for c in self.ran], ["icarus-api", "icarus-councilor.service", "icarus-desktop.service"])
+        self.assertFalse(self.daemon.pending_restart)
+
+    async def test_councilor_waits_for_running_claude_tasks(self):
+        self.daemon.on_task_event({"task_id": "sub-1", "text": "Editing app.py"})
+        reply = await self.restart(["councilor"])
+        self.assertIn("running tasks finish", reply["result"])
+        self.assertFalse(self.daemon.restart_ready())
+        self.daemon.on_task_event({"task_id": "sub-1", "text": "Claude finished", "done": True})
+        self.assertTrue(self.daemon.restart_ready())
+
+    async def test_desktop_alone_doesnt_wait_for_tasks(self):
+        self.daemon.on_task_event({"task_id": "sub-1", "text": "Editing app.py"})
+        await self.restart("desktop")
+        self.assertTrue(self.daemon.restart_ready())
+
+    async def test_unknown_parts_are_refused_and_cancel_clears(self):
+        reply = await self.restart(["desktop", "rm -rf"])
+        self.assertFalse(reply["ok"])
+        self.assertFalse(self.daemon.pending_restart)
+        await self.restart(["api"])
+        reply = await self.restart(["cancel"])
+        self.assertEqual(reply["result"], "Cancelled the pending restart.")
+        self.assertFalse(self.daemon.restart_ready())
+
+
 class FollowUpTests(unittest.IsolatedAsyncioTestCase):
     """After an answer the mic stays open briefly ('anything else?')."""
 

@@ -264,6 +264,7 @@ _ACTIVITY_LABELS: dict[str, Callable[[dict], str]] = {
     "spotify_play": lambda a: f"🎵 Searching Spotify for “{str(a.get('query', ''))[:50]}”…",
     "show_on_screen": lambda a: "🖥️ Putting it on screen…",
     "run_claude_task": lambda a: f"⧉ Handing it to Claude ({a.get('mode', 'ask')})…",
+    "restart_icarus": lambda a: "↻ Queuing a restart…",
     "show_visual": lambda a: f"🖥️ Putting {str(a.get('title', 'it'))[:40]} on screen…",
     "keep_visual": lambda a: "🖥️ Opening it in your browser…",
     "show_table": lambda a: f"🖥️ Drawing {str(a.get('title', 'a table'))[:40]}…",
