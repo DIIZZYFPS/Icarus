@@ -4,5 +4,7 @@
 # python-gobject, python-cairo and gtk-layer-shell from pacman.
 faster-whisper>=1.2
 piper-tts>=1.3
+kokoro-onnx>=0.4      # optional engine: DESKTOP_TTS_ENGINE=kokoro
+soundfile>=0.12
 websockets>=13
 numpy>=1.26

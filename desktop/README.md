@@ -26,6 +26,8 @@ desktop/
    for f in en_US-ryan-high.onnx en_US-ryan-high.onnx.json; do
      curl -LO "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/$f"; done
    ```
+   For the Kokoro engine, also fetch `kokoro-v1.0.onnx` and `voices-v1.0.bin` from
+   https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0 into the same folder.
    The speech-to-text model (`small.en`) downloads itself on first start.
 
 3. **Token:** set `DESKTOP_TOKEN` in the repo `.env` to a long random string. Both icarus-api and the daemon read it, and icarus-api refuses the desktop link without it.
@@ -40,7 +42,10 @@ desktop/
    bind  = SUPER, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl listen-start
    bindr = SUPER, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl listen-stop
    bind  = SUPER, Escape, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl cancel
+   bind  = SUPER SHIFT, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl look-start
+   bindr = SUPER SHIFT, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl listen-stop
    ```
+   SUPER+SHIFT+I works like SUPER+I but also sends a screenshot of the focused window with your question ("what's this error?"). Nothing is captured without that keypress, a scan line sweeps the window so you can see it happen, and the image is never written to disk.
    If release events ever misbehave, bind `ctl toggle` to a single key instead (tap to start, tap to send).
 
 6. **Run it:**
@@ -51,6 +56,14 @@ desktop/
    systemctl --user enable --now icarus-desktop
    ```
    The user service needs the Wayland session environment. If it can't open the overlay, add `exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP` to the Hyprland config.
+
+## Conversations
+
+After he answers, the mic reopens for a few seconds with "ANYTHING ELSE?" under the orb. Just keep talking to continue; say "that's all", "no thanks" or "never mind", or stay quiet, and he leaves. Pressing SUPER+I during that window works too.
+
+## Show me
+
+Ask him to explain something visual and he puts it on a board next to the avatar instead of reading it out: code with the lines he's talking about lit up, a table that fills in cell by cell (DP), or a boxes-and-arrows diagram. Say "keep it" to pop the board out to a browser tab that stays after he leaves and follows along live. Try the overlay alone with `python3 desktop/renderer/avatar.py --board-demo table` (or `code`, `graph`).
 
 ## Trying it without a mic
 
@@ -68,9 +81,17 @@ python3 desktop/renderer/avatar.py --demo     # overlay only, scripted walk thro
 | `DESKTOP_API_URL` | `ws://127.0.0.1:8000/ws/desktop` | |
 | `DESKTOP_USER_ID` | `operator` | user id for transcripts and memory scoping (icarus-api side) |
 | `DESKTOP_OUTPUT` | compositor's choice | Hyprland output for the overlay, e.g. `DP-2` (`DESKTOP_MONITOR` takes a GDK index instead) |
-| `DESKTOP_WHISPER_MODEL` / `_DEVICE` / `_COMPUTE` | `small.en` / `cpu` / `int8` | `cuda` works but competes with llama-server for VRAM |
+| `DESKTOP_WHISPER_MODEL` / `_DEVICE` / `_COMPUTE` | `large-v3-turbo` / `cpu` / `int8` | about 1.7 s per 5 s of speech on CPU; `small.en` is faster but mishears more; `cuda` competes with llama-server for VRAM |
+| `DESKTOP_WHISPER_BEAM` | `5` | 1 is faster, 5 is noticeably more accurate |
+| `DESKTOP_WHISPER_VOCAB` | empty | extra names to recognize (comma-separated), added to a built-in list and your Claude project names |
 | `DESKTOP_PIPER_VOICE` | `desktop/voices/en_US-ryan-high.onnx` | |
-| `DESKTOP_LINGER_SECONDS` | `6` | how long he stays after answering |
+| `DESKTOP_FOLLOWUP_SECONDS` | `8` | after answering, the mic stays open this long for a follow-up ("anything else?"); `0` turns it off |
+| `DESKTOP_END_SILENCE_SECONDS` | `1.5` | quiet after speech that ends a recording |
+| `DESKTOP_LINGER_SECONDS` | `6` | how long he stays when follow-ups are off |
+| `DESKTOP_TTS_ENGINE` | `piper` | `piper` or `kokoro` (more natural; needs `kokoro-v1.0.onnx` + `voices-v1.0.bin` in `desktop/voices/`) |
+| `DESKTOP_KOKORO_VOICE` | `am_onyx` | e.g. `bm_lewis`, `am_fenrir`; `b*` voices are British |
+| `DESKTOP_VOICE_SPEED` | `1.0` | Kokoro only |
+| `DESKTOP_VOICE_FX` | `0` | 0 to 1, the "construct" processing (chorus + faint ring mod) |
 | `DESKTOP_APP_DENYLIST` | empty | comma-separated app names `open_app` must refuse |
 | `DESKTOP_UNREAD_WINDOW_HOURS` | `6` | unanswered notifications younger than this count as unread |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | empty | from a free app at developer.spotify.com; without them "play X" opens a Spotify search instead of playing |

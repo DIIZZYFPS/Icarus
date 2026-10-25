@@ -654,6 +654,8 @@ def _handle_request(data: dict) -> asyncio.Task:
         coro = process_subagent_create(data)
     elif req_type == "subagent_stop":
         coro = process_subagent_stop(data)
+    elif req_type == "claude_code":
+        coro = process_claude_code(data)
     else:
         coro = process_consultation(data)
     return _dispatch(_dispatch_key(req_type, data), coro)
@@ -906,6 +908,79 @@ async def process_delegation(data: dict):
         notify_label=f"{label} {'Failed' if envelope.status == STATUS_FAILED else 'Complete'}",
     )
     logger.info(f"[{req.task_id}] {req.kind} {envelope.status} ({len(envelope.summary)} chars summary)")
+
+
+# ── Claude Code tasks (desktop avatar, Phase 4) ──────────────────────────────
+# Requested by L1's run_claude_task tool after the operator confirmed it on the
+# desktop. Runs `claude -p` headless (backend/agent/claude_runner.py): `ask` is
+# read-only in the project, `edit` works in a git worktree on claude/<task_id>
+# and leaves a commit there for review. Same registry, envelope and delivery as
+# a delegated task, so check_task_status and the desktop pop-ups just work.
+
+TASK_EVENTS_LIST = "icarus:desktop:task_events"
+
+
+async def _task_event(task_id: str, text: str, done: bool = False):
+    try:
+        r = await _get_redis()
+        await r.lpush(TASK_EVENTS_LIST, json.dumps({"task_id": task_id, "text": text, "done": done, "created": time.time()}))
+        await r.ltrim(TASK_EVENTS_LIST, 0, 199)
+    except Exception as e:
+        logger.debug(f"[{task_id}] task event skipped: {e}")
+
+
+async def process_claude_code(data: dict):
+    from types import SimpleNamespace
+    from backend.agent.claude_runner import MODES, parse_projects, run_claude
+    from backend.agent.delegation import CompletionEnvelope, STATUS_COMPLETED, STATUS_FAILED, new_task_id
+    from backend.agent.subagent_registry import (
+        KIND_ONESHOT as REG_KIND_ONESHOT, STATUS_RUNNING as REG_STATUS_RUNNING,
+        STATUS_COMPLETED as REG_STATUS_COMPLETED, STATUS_FAILED as REG_STATUS_FAILED,
+    )
+
+    timestamp = int(data.get("timestamp") or time.time())
+    task_id = data.get("task_id") or new_task_id(timestamp)
+    project_name = str(data.get("project") or "").lower()
+    mode = data.get("mode") if data.get("mode") in MODES else "ask"
+    task = str(data.get("task") or "").strip()
+    req = SimpleNamespace(
+        task_id=task_id, timestamp=timestamp, response_type="delegation", kind="claude_code",
+        platform=data.get("platform"), chat_id=data.get("chat_id"), thread_id=f"sub-{task_id}",
+        needs_repo_write=mode == "edit",
+    )
+    intent = f"[claude {mode} · {project_name}] {task}"
+    await _registry_call("create(claude)", lambda: _registry().create(
+        task_id=task_id, kind=REG_KIND_ONESHOT, request_type="claude_code", intent=intent,
+        capabilities=["claude_code"], needs_network=True, needs_repo_write=mode == "edit",
+        platform=req.platform, chat_id=req.chat_id, user_id=data.get("user_id"),
+        thread_id=req.thread_id, status=REG_STATUS_RUNNING,
+    ))
+    projects = parse_projects()
+    project = projects.get(project_name)
+    if not task or project is None:
+        error = "no task given" if not task else f"unknown project {project_name!r} (configured: {', '.join(projects) or 'none'})"
+        result = None
+    else:
+        await _task_event(task_id, f"Claude: {'editing' if mode == 'edit' else 'looking into'} {project_name}")
+        result = await run_claude(task_id=task_id, project_name=project_name, project=project, task=task, mode=mode,
+                                  on_progress=lambda text: _task_event(task_id, text))
+        error = result.error if not result.ok else None
+    failed = result is None or not result.ok
+    summary = (result.summary if result else "") or ""
+    if result and result.branch:
+        summary += f"\n\nBranch: {result.branch} ({result.diffstat or 'no changes'}). Worktree: {result.worktree}"
+    envelope = CompletionEnvelope.build(
+        task_id=task_id, kind="claude_code", status=STATUS_FAILED if failed else STATUS_COMPLETED,
+        raw_summary=summary, artifacts=(result.artifacts if result else {}), error=error,
+        elapsed_s=result.elapsed_s if result else 0.0,
+    )
+    await _task_event(task_id, "Claude finished" if not failed else "Claude task failed", done=True)
+    await _registry_call("set_status(claude)", lambda: _registry().set_status(
+        task_id, REG_STATUS_FAILED if failed else REG_STATUS_COMPLETED,
+        error=error, result=envelope.to_dict(),
+    ))
+    await _deliver_envelope(req, envelope, notify_label=f"Claude Task {'Failed' if failed else 'Complete'}")
+    logger.info(f"[{task_id}] claude {mode} {envelope.status} in {envelope.elapsed_s:.0f}s")
 
 
 async def process_escalation(data: dict):

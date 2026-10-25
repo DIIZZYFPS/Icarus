@@ -60,6 +60,7 @@ async def _poll_mailbox():
                 logger.info(f"[heartbeat] {resp_type} delivered via notification relay")
             except Exception as e:
                 logger.error(f"[heartbeat] {resp_type} delivery failed: {e}")
+            await _offer_to_desktop(data)
             continue
 
         if resp_type == "escalation":
@@ -108,7 +109,9 @@ async def _poll_mailbox():
                 await push_telegram_message(int(chat_id), prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Telegram delivery failed: {e}")
-        elif platform == "discord":
+        elif platform in ("discord", "desktop"):
+            # Desktop conversations have no chat to write back into; the operator's
+            # Discord DM is the written record, and the desktop gets a spoken pop-up.
             try:
                 import os
                 discord_operator_id = os.environ.get("DISCORD_OPERATOR_ID", "0")
@@ -116,8 +119,8 @@ async def _poll_mailbox():
 
                 await relay_councilor_mailbox_to_operator(
                     prompt,
-                    str(user_id),
-                    chat_id=str(chat_id) if chat_id else None,
+                    str(user_id) if platform == "discord" else discord_operator_id,
+                    chat_id=str(chat_id) if chat_id and platform == "discord" else None,
                     source_id=str(data.get("timestamp")) if data.get("timestamp") else None,
                 )
             except Exception as e:
@@ -132,6 +135,16 @@ async def _poll_mailbox():
                     await push_telegram_message(tid, prompt)
             except Exception as e:
                 logger.error(f"[heartbeat] Fallback Telegram delivery failed: {e}")
+        await _offer_to_desktop(data)
+
+
+async def _offer_to_desktop(data: dict) -> None:
+    """Important items also pop up on the desktop avatar (desktop_notify.py)."""
+    try:
+        from backend.agent.desktop_notify import announcer
+        await announcer.consider(data)
+    except Exception as e:
+        logger.warning(f"[heartbeat] desktop announcement skipped: {e}")
 
 
 async def run_heartbeat():

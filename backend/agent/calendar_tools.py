@@ -136,6 +136,8 @@ async def sync_upcoming_events_to_tracked_items(
         )
     except Exception as e:
         logger.error(f"[calendar] Sync failed to list events: {e}")
+        from backend.agent.google_auth_health import report_google_auth_failure
+        await report_google_auth_failure("Calendar", e)
         return 0, []
 
     events = results.get('items', [])
@@ -157,7 +159,7 @@ async def sync_upcoming_events_to_tracked_items(
             source="calendar",
         )
         synced += 1
-        synced_events.append({"id": event_id, "summary": summary, "start": start})
+        synced_events.append({"id": event_id, "summary": summary, "start": start, "location": e.get("location")})
 
     logger.info(f"[calendar] Synced {synced} upcoming events to tracked_items")
     return synced, synced_events

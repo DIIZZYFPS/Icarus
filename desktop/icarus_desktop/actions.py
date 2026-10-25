@@ -105,6 +105,35 @@ async def run(*cmd: str, timeout: float = 8.0) -> tuple[int, str]:
     return proc.returncode, out.decode(errors="replace").strip()
 
 
+MAX_SHOT_SIDE = 1600   # longest side sent to the model; enough to read code and errors
+
+
+async def capture_focused() -> dict | None:
+    """Screenshot the focused window (or the focused monitor if nothing is focused).
+    Returns {"data_uri", "rect": [x, y, w, h], "label"} or None."""
+    import base64
+    code, out = await run("hyprctl", "activewindow", "-j", timeout=3)
+    win = json.loads(out) if code == 0 and out.strip().startswith("{") else {}
+    if win.get("size") and win.get("at") and win["size"][0] > 20:
+        (x, y), (w, h) = win["at"], win["size"]
+        label = win.get("class") or win.get("title") or "window"
+    else:
+        code, out = await run("hyprctl", "monitors", "-j", timeout=3)
+        mon = next((m for m in json.loads(out or "[]") if m.get("focused")), None)
+        if not mon:
+            return None
+        x, y, w, h = mon["x"], mon["y"], mon["width"], mon["height"]
+        label = mon.get("name", "screen")
+    scale = min(1.0, MAX_SHOT_SIDE / max(w, h))
+    proc = await asyncio.create_subprocess_exec(
+        "grim", "-g", f"{x},{y} {w}x{h}", "-s", f"{scale:.3f}", "-t", "jpeg", "-q", "85", "-",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    jpeg, _ = await proc.communicate()
+    if proc.returncode != 0 or not jpeg:
+        return None
+    return {"data_uri": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(), "rect": [x, y, w, h], "label": label}
+
+
 MEDIA_COMMANDS = {
     "play": ["play"], "pause": ["pause"], "toggle": ["play-pause"], "play_pause": ["play-pause"],
     "next": ["next"], "skip": ["next"], "previous": ["previous"], "prev": ["previous"],

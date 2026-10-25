@@ -130,6 +130,21 @@ class DesktopSocketTests(unittest.TestCase):
             _recv_until(ws, "pong")
         self.assertTrue(cancelled.wait(2))
 
+    def test_screenshot_reaches_the_model_and_junk_is_dropped(self):
+        seen = {}
+
+        async def fake_process(platform, user_id, text, chat_id="0", on_activity=None, **kw):
+            seen.update(kw)
+            return "That's a KeyError."
+
+        with mock.patch.object(desktop, "process_message", fake_process):
+            ws = self._connect()
+            _recv_until(ws, "ready")
+            ws.send_json({"type": "utterance", "turn_id": "t6", "text": "what's this error?",
+                          "images": ["data:image/jpeg;base64,AAAA", "https://evil.example/x.png", "data:image/png;base64,BB", "data:image/png;base64,CC"]})
+            _recv_until(ws, "reply")
+        self.assertEqual(seen["image_urls"], ["data:image/jpeg;base64,AAAA", "data:image/png;base64,BB"])
+
     def test_failed_turn_sends_an_error(self):
         async def fake_process(*a, **kw):
             raise RuntimeError("llama-server down")
@@ -189,6 +204,15 @@ class DesktopToolBindingTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.session.close()
         self.assertIn("Desktop unavailable", await pending)
+
+
+class InlineImageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_data_uri_passes_through_without_a_download(self):
+        from backend.agent import local_llm
+        uri = "data:image/jpeg;base64,AAAA"
+        self.assertEqual(await local_llm._fetch_image_as_data_uri(uri), uri)
+        with mock.patch.object(local_llm, "_MAX_IMAGE_BYTES", 2):
+            self.assertIsNone(await local_llm._fetch_image_as_data_uri(uri))
 
 
 class StatusCleaningTests(unittest.TestCase):

@@ -310,8 +310,8 @@ async def run_icarus(
     system = build_system_prompt(read_only=read_only)
     if not read_only and current_platform.get() == "desktop":
         # Spoken replies through the desktop avatar; desktop tools only while its daemon is connected.
-        from .desktop_tools import DESKTOP_PROMPT, desktop_tools_for_turn
-        system += DESKTOP_PROMPT
+        from .desktop_tools import desktop_prompt, desktop_tools_for_turn
+        system += desktop_prompt()
         tools += desktop_tools_for_turn()
     return await local_agent_loop(
         initial_prompt=prompt,

@@ -74,7 +74,16 @@ async def _fetch_image_as_data_uri(url: str) -> str | None:
     """Download an image (e.g. a Discord attachment URL) and return it as a
     base64 data: URI for the vision-capable /v1/chat/completions endpoint.
     Returns None on any failure — a bad/oversized/non-image attachment
-    should degrade the turn to text-only, not fail it outright."""
+    should degrade the turn to text-only, not fail it outright.
+
+    An inline data:image/… URI (the desktop daemon's screenshots) is passed
+    through as-is, under the same size cap."""
+    if url.startswith("data:image/"):
+        approx_bytes = len(url) * 3 // 4
+        if approx_bytes > _MAX_IMAGE_BYTES:
+            logger.warning(f"[local_llm] Skipping oversized inline image (~{approx_bytes} bytes)")
+            return None
+        return url
     try:
         async with httpx.AsyncClient(timeout=_IMAGE_DOWNLOAD_TIMEOUT) as client:
             resp = await client.get(url)
@@ -163,6 +172,7 @@ _PY_TYPE_MAP = {
     int: "integer",
     float: "number",
     bool: "boolean",
+    dict: "object",
 }
 
 
@@ -253,6 +263,11 @@ _ACTIVITY_LABELS: dict[str, Callable[[dict], str]] = {
     "now_playing": lambda a: "🎵 Checking what's playing…",
     "spotify_play": lambda a: f"🎵 Searching Spotify for “{str(a.get('query', ''))[:50]}”…",
     "show_on_screen": lambda a: "🖥️ Putting it on screen…",
+    "run_claude_task": lambda a: f"⧉ Handing it to Claude ({a.get('mode', 'ask')})…",
+    "show_visual": lambda a: f"🖥️ Putting {str(a.get('title', 'it'))[:40]} on screen…",
+    "keep_visual": lambda a: "🖥️ Opening it in your browser…",
+    "show_table": lambda a: f"🖥️ Drawing {str(a.get('title', 'a table'))[:40]}…",
+    "show_diagram": lambda a: f"🖥️ Drawing {str(a.get('title', 'a diagram'))[:40]}…",
 }
 
 

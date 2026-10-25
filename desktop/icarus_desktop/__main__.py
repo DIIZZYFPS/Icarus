@@ -4,6 +4,7 @@ icarus-desktop — the Icarus desktop daemon and its control client.
   icarus-desktop run                 start the daemon (spawns the avatar overlay)
   icarus-desktop ctl listen-start    hotkey pressed: open the mic
   icarus-desktop ctl listen-stop     hotkey released: transcribe and send
+  icarus-desktop ctl look-start      like listen-start, plus a screenshot of the focused window
   icarus-desktop ctl toggle          tap-to-talk alternative to start/stop
   icarus-desktop ctl cancel          stop talking / drop the current turn
   icarus-desktop ctl status          JSON status

@@ -402,6 +402,8 @@ class EmailTriageWorker(WorkerBase):
                 "user_id": os.environ.get("DISCORD_OPERATOR_ID", "0"),
                 "message": classification_text,
                 "source_id": source_id,
+                "urgency": urgency,
+                "action_needed": bool(classification.get("action_needed", False)),
             })
             await redis.lpush("icarus:councilor:responses", response_payload)
             logger.info(f"[triage] Queued notification for '{subject[:50]}'")

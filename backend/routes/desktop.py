@@ -73,6 +73,9 @@ async def _unread_count(limit: int = 200) -> int:
     cutoff = time.time() - UNREAD_WINDOW_SECONDS
     count, seen = 0, 0
     async for key in redis.scan_iter(match="icarus:notifications:index:*", count=100):
+        name = key.decode() if isinstance(key, bytes) else str(key)
+        if name.startswith(f"icarus:notifications:index:{PLATFORM}:"):
+            continue  # desktop pop-ups were already spoken aloud
         for raw_id in await redis.lrange(key, 0, 19):
             seen += 1
             nid = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
@@ -131,12 +134,14 @@ async def _ambient_loop(send) -> None:
 
 # ── Turns ────────────────────────────────────────────────────────────────────
 
-async def _run_turn(send, turn_id: str, text: str) -> None:
+async def _run_turn(send, turn_id: str, text: str, reply_to: str | None = None,
+                    images: list[str] | None = None) -> None:
     async def on_activity(status: str) -> None:
         await send({"type": "status", "turn_id": turn_id, "text": clean_status(status)})
 
     try:
-        reply = await process_message(PLATFORM, _user_id(), text, chat_id=CHAT_ID, on_activity=on_activity)
+        reply = await process_message(PLATFORM, _user_id(), text, chat_id=CHAT_ID, on_activity=on_activity,
+                                      reply_to_message_id=reply_to, image_urls=images or None)
         await send({"type": "reply", "turn_id": turn_id, "text": reply})
     except asyncio.CancelledError:
         raise
@@ -187,7 +192,10 @@ async def desktop_ws(ws: WebSocket):
                 # A new utterance supersedes anything still running.
                 for task in turns.values():
                     task.cancel()
-                task = asyncio.create_task(_run_turn(send, turn_id, text))
+                reply_to = message.get("reply_to")
+                # Screenshots arrive inline as data:image/… URIs (SUPER+SHIFT+I); at most two per turn.
+                images = [i for i in (message.get("images") or []) if isinstance(i, str) and i.startswith("data:image/")][:2]
+                task = asyncio.create_task(_run_turn(send, turn_id, text, str(reply_to) if reply_to else None, images))
                 turns[turn_id] = task
                 task.add_done_callback(lambda _t, tid=turn_id: turns.pop(tid, None))
             elif kind == "action_result":

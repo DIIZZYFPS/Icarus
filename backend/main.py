@@ -145,6 +145,10 @@ async def lifespan(app: FastAPI):
     calendar_task = asyncio.create_task(run_calendar_watcher())
     spam_sweep_task = asyncio.create_task(run_spam_sweep())
     repo_producer_task = asyncio.create_task(run_repo_producer())
+    from backend.agent.desktop_notify import run_announcement_consumer
+    desktop_announce_task = asyncio.create_task(run_announcement_consumer())
+    from backend.agent.desktop_notify import run_task_event_consumer
+    desktop_task_events = asyncio.create_task(run_task_event_consumer())
 
 
     # Start Gmail watcher if Pub/Sub is configured
@@ -155,6 +159,8 @@ async def lifespan(app: FastAPI):
 
     yield
     heartbeat_task.cancel()
+    desktop_announce_task.cancel()
+    desktop_task_events.cancel()
     discord_task.cancel()
     supervisor_task.cancel()
     metrics_task.cancel()

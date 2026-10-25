@@ -229,7 +229,7 @@ The renderer is driven by one state machine plus a few continuous values. The da
 
 ### 6.6 Voice
 
-Piper for v1 (fast, CPU-only, so it doesn't compete with llama-server for GPU memory), with an optional light DSP chain (subtle chorus and high-shelf) for character. Kokoro is the quality upgrade in Phase 5.
+Kokoro `am_onyx`, chosen 2026-10-24 from an audition of 16 local voices (Kokoro and Piper). It renders about 0.5 s per short sentence on CPU, and speech is pipelined sentence by sentence. Piper `en_US-ryan-high` remains the fallback engine. An optional "construct" filter (`DESKTOP_VOICE_FX`, 0–1: chorus plus a faint ring mod) is available but off.
 
 ---
 

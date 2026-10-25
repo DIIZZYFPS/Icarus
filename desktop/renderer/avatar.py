@@ -39,6 +39,8 @@ gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gdk, GLib, Gtk, GtkLayerShell, Pango, PangoCairo  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+from icarus_desktop.layout import layered_layout  # noqa: E402
 TAU = math.pi * 2
 
 # Surface: the bottom-right corner of the screen, same layout as the prototype's stage.
@@ -214,6 +216,13 @@ class Avatar:
         self.tasks_running = 0
         self.recent_task = False
         self.particles = []
+        self.fire_t0 = 0.0       # fire glitch: a brief flash of Icarus burning
+        self.fire_until = 0.0
+        self.fire_burst = False
+        self.next_fire = now + 30 + random.random() * 40
+        self.push_t0 = -10.0     # camera: push-in when he answers or a stamp hits
+        self.push_amt = 0.0
+        self.shake_until = 0.0   # camera: short shake when the fire glitch hits
         self.chips = []          # [{id, text, done}]
         self.card = None         # {kind, title, body, meta, t0}
         self.subtitle = None     # {text, t0, dur}
@@ -239,7 +248,8 @@ class Avatar:
         elif kind == "speech_level":
             self.speech = clamp(float(ev.get("rms", 0)) * 5, 0, 1)
         elif kind == "transcript":
-            self.transcript = {"text": ev.get("text", ""), "listening": bool(ev.get("listening"))}
+            self.transcript = {"text": ev.get("text", ""), "listening": bool(ev.get("listening")),
+                               "prompt": ev.get("prompt"), "window": float(ev.get("window_ms") or 0) / 1000, "t0": now}
         elif kind == "transcript_clear":
             self.transcript = None
         elif kind == "subtitle":
@@ -266,16 +276,57 @@ class Avatar:
             self.fire_stamp(ev.get("word", ""), ev.get("sub", ""), col, int(ev.get("ms", 1400)))
             if ev.get("wings"):
                 self.spread_until = now + float(ev["wings"])
+        elif kind in ("board", "board_focus", "board_clear"):
+            win = getattr(self, "board_window", None)
+            if win is not None:
+                {"board": win.show_board, "board_focus": win.set_focus, "board_clear": win.hide_board}[kind](ev)
+        elif kind == "scan":
+            if ev.get("rect"):
+                ScanFlash(ev["rect"])
+        elif kind == "fire":
+            self.ignite(float(ev.get("seconds", .8)))
         elif kind == "clear":
             self.chips, self.card, self.subtitle, self.transcript = [], None, None, None
 
     def fire_stamp(self, word, sub, col, ms):
         now = time.monotonic()
+        self.push(.02)
         self.stamp = {"word": word, "sub": sub or "ICARUS // SIGNAL", "col": col, "t0": now, "ms": ms}
         self.freeze_until = now + .14
         self.flash_until = now + .07
         self.flash_col = col
         self.glitch_until = now + .16
+
+    def push(self, amount):
+        self.push_t0, self.push_amt = time.monotonic(), amount
+
+    def camera(self, t):
+        """Slow handheld drift (two incommensurate waves, smooth, not on twos) plus brief
+        reactions. Returns (dx, dy, scale) for the projection; text never moves."""
+        dx = 2.2 * math.sin(t * TAU / 11.3) + .8 * math.sin(t * TAU / 4.7 + 1.3)
+        dy = 1.6 * math.sin(t * TAU / 13.7 + .6) + .6 * math.sin(t * TAU / 6.1 + 2)
+        if t < self.shake_until:
+            amp = 3 * (self.shake_until - t) / .35
+            dx += (hashf(t * 61.7) - .5) * 2 * amp
+            dy += (hashf(t * 47.3 + 9) - .5) * 2 * amp
+        age = t - self.push_t0
+        push = 0.0
+        if 0 <= age < 1.2:
+            push = self.push_amt * min(1, age / .08) * math.exp(-age * 4)
+        return dx, dy, 1 + push
+
+    def ignite(self, seconds):
+        now = time.monotonic()
+        self.shake_until = now + .35
+        self.fire_t0, self.fire_until = now, now + seconds
+        self.fire_burst = True
+        self.glitch_until = max(self.glitch_until, now + .14)
+
+    def fire_level(self, t):
+        """0 outside a fire glitch; inside it, 1 with stepped flicker (on twos, like the rest)."""
+        if t >= self.fire_until or self.p < .5:
+            return 0.0
+        return .75 + .25 * hashf(self.step * 1.37)
 
     def pick_activity(self):
         if self.heat > .6:
@@ -296,6 +347,7 @@ class Avatar:
             self.next_glance = now + 2.5
         if name == "error":
             self.fire_stamp("FAILED", "ICARUS // ERROR", MG, 1400)
+            self.ignite(.6)
         self.p_target = 1.0 if name in VISIBLE else 0.0
 
     def pose_target(self, t):
@@ -335,6 +387,7 @@ class Avatar:
             if not self.answered and self.p > .5 and self.turn > -.15:
                 self.answered = True
                 self.spread_until = t + .7
+                self.push(.012)   # a slight lean toward you as he turns to answer
             target = 1.0 if t < self.spread_until else (.7 if self.state == "confirm" else 0.0)
             self.spread = lerp(self.spread, target, .35)
 
@@ -348,9 +401,18 @@ class Avatar:
             if self.scorch > .55 and not self.hot_stamped:
                 self.hot_stamped = True
                 self.fire_stamp("RUNNING HOT", f"GPU {round(heat * 100)}% // WINGS FAILING", EMBER, 1300)
+                self.ignite(.9)
         self.burn_stage = stage5
         if self.scorch < .2:
             self.hot_stamped = False
+
+        if self.p >= .95 and t > self.next_fire and t > self.fire_until:
+            self.ignite(.45 + random.random() * .45)
+            self.next_fire = t + (25 + random.random() * 55) * (1 - .6 * self.heat)
+        elif self.p < .5:
+            self.next_fire = max(self.next_fire, t + 6)   # never right as he appears
+        if self.fire_until and self.fire_until < t < self.fire_until + .05:
+            self.glitch_until = max(self.glitch_until, t + .1)   # glitch back out
 
         self.level = lerp(self.level, self.mic if self.state == "listening" else 0, .3)
         self.pulse = lerp(self.pulse, self.speech if self.state == "speaking" else 0, .35)
@@ -432,12 +494,19 @@ class Renderer:
 
     def draw_character(self, c, t):
         a = self.a
-        hot = sun_color(a.heat)
+        # A fire glitch is a flash of the high-heat scorch look at full strength.
+        fire = a.fire_level(t)
+        scorch = max(a.scorch, fire)
+        hot = sun_color(max(a.heat, fire))
         edge = rgba(hot, .55)
         tq = a.step / 12
 
         def wind(i):
             return math.sin(tq * 2.3 + i * 1.7) * .7 + math.sin(tq * 5.1 + i * .9) * .3
+
+        cam_x, cam_y, cam_s = a.camera(t)
+        c.save()
+        c.translate(cam_x * .5, cam_y * .5)   # the sun sits further back: half the drift
 
         # flat sun, bold cut stripes, tick ring
         c.set_source_rgba(*rgba(hot, .95))
@@ -483,11 +552,17 @@ class Renderer:
             c.fill()
             c.restore()
 
+        c.restore()
+        c.save()
+        c.translate(150 + cam_x, 240 + cam_y)   # Icarus: full drift, push-in around his chest
+        c.scale(cam_s, cam_s)
+        c.translate(-150, -240)
+
         # blade wings
         for side in (-1, 1):
             for i in (3, 2, 1, 0):
                 ang = -math.pi / 2 + side * lerp(.1 + i * .07, .55 + i * .33, a.spread) + wind(i + side * 4) * .02
-                L = (228 - i * 28) * (1 - a.scorch * .2 * (1 - i * .15))
+                L = (228 - i * 28) * (1 - scorch * .2 * (1 - i * .15))
                 rx, ry = 150 + side * 38, 252
                 ca, sa = math.cos(ang), math.sin(ang)
                 px, py = -sa, ca
@@ -501,11 +576,11 @@ class Renderer:
                 c.set_source_rgba(*edge)
                 c.set_line_width(1)
                 c.stroke()
-                if a.scorch > .05:
+                if scorch > .05:
                     tx, ty = rx + ca * L, ry + sa * L
-                    glow_line(c, EMBER, min(1, a.scorch * 1.5) * (.7 + .3 * math.sin(t * 9 + i)), 1.6, 8,
+                    glow_line(c, EMBER, min(1, scorch * 1.5) * (.7 + .3 * math.sin(t * 9 + i)), 1.6, 8,
                               lambda: (c.move_to(tx - ca * 10 + px * 3, ty - sa * 10 + py * 3), c.line_to(tx, ty)))
-                    if random.random() < a.scorch * .08:
+                    if random.random() < scorch * .08:
                         self.emit_burn(tx, ty)
 
         # the silhouette
@@ -520,9 +595,14 @@ class Renderer:
         c.set_source_rgba(*edge)
         c.set_line_width(1.2)
         c.stroke()
-        if a.scorch > .03:
+        if fire and a.fire_burst:
+            a.fire_burst = False
+            for _ in range(30):
+                x, y = random.choice(top + top_l)
+                self.emit_burn(x + (random.random() - .5) * 16, y - random.random() * 8)
+        if scorch > .03:
             c.save()
-            c.set_dash([2 + a.scorch * 10, 10], -t * 18)
+            c.set_dash([2 + scorch * 10, 10], -t * 18)
             ridge = top + top_l
             def ridge_path():
                 # two runs from the hood peak down each shoulder, never across the chest
@@ -530,9 +610,9 @@ class Renderer:
                     c.move_to(*run[0])
                     for pt in run[1:]:
                         c.line_to(*pt)
-            glow_line(c, EMBER, min(1, a.scorch * 1.6), 1.6, 8, ridge_path)
+            glow_line(c, EMBER, min(1, scorch * 1.6), 1.6, 8, ridge_path)
             c.restore()
-            if random.random() < a.scorch * .25:
+            if random.random() < scorch * .25:
                 x, y = random.choice(ridge)
                 self.emit_burn(x + (random.random() - .5) * 10, y)
 
@@ -566,7 +646,8 @@ class Renderer:
         if ACTIVITY[a.activity]["vent"] and turn < -.6 and (t % 2.6) < .6 and random.random() < .55:
             a.particles.append({"x": 92 + random.random() * 10, "y": 214, "vx": -12 - random.random() * 10, "vy": -16 - random.random() * 12, "life": 0, "max": 1.8 + random.random(), "s": 3 + random.random() * 3, "smoke": True, "col": (205, 215, 228)})
 
-        self.draw_frame_graphics(c, t, hot)
+        c.restore()
+        self.draw_frame_graphics(c, t, hot)   # fixed: the frame doesn't move with the projection
 
         for p in a.particles:
             k = 1 - p["life"] / p["max"]
@@ -721,6 +802,13 @@ class Renderer:
             cr.arc(ox, oy, R + 17, -t * 1.4, -t * 1.4 + TAU)
             cr.stroke()
             cr.set_dash([])
+        elif a.state == "connecting":
+            for k in range(3):  # incoming-call pulse
+                ph = ((t * 1.6) + k / 3) % 1
+                cr.set_line_width(1.6)
+                cr.set_source_rgba(*rgba(col, (1 - ph) * .9))
+                cr.arc(ox, oy, R + 6 + ph * 26, 0, TAU)
+                cr.stroke()
         elif a.state == "confirm":
             cr.set_line_width(2)
             cr.set_source_rgba(*rgba(AM, .5 + .5 * abs(math.sin(t * 4))))
@@ -822,6 +910,19 @@ class Renderer:
         tr = self.a.transcript
         if not tr:
             return
+        if tr["listening"] and not tr["text"] and tr.get("prompt"):
+            # follow-up window: the question plus a bar that drains until he gives up
+            lay = layout(cr, tr["prompt"].upper(), DISPLAY, 13, "SemiBold", spacing=1.8)
+            w, h = size_of(lay)
+            draw_layout(cr, lay, 820 - w, 548, rgba(CY))
+            left = 1 - min(1, (t - tr["t0"]) / tr["window"]) if tr["window"] else 1
+            cr.set_source_rgba(*rgba(CY, .18))
+            cr.rectangle(820 - w, 548 + h + 4, w, 2)
+            cr.fill()
+            cr.set_source_rgba(*rgba(CY, .9))
+            cr.rectangle(820 - w, 548 + h + 4, w * left, 2)
+            cr.fill()
+            return
         if tr["listening"] and not tr["text"]:
             lay = layout(cr, "LISTENING", DISPLAY, 11, "Medium", spacing=1.5)
             w, h = size_of(lay)
@@ -892,6 +993,418 @@ class Renderer:
 
 # ── window + event feed ──────────────────────────────────────────────────────
 
+TOKEN_COLORS = (   # pygments token family -> (hex colour, italic)
+    ("Comment", "#5d7486", True), ("Keyword", "#ff5f96", False), ("Name.Function", "#00f0ff", False),
+    ("Name.Class", "#00f0ff", False), ("Name.Builtin", "#7fd8e0", False), ("Literal.String", "#b8e07a", False),
+    ("Literal.Number", "#ffb000", False), ("Operator", "#8fa6b8", False), ("Punctuation", "#8fa6b8", False),
+)
+
+
+def highlight_lines(code, language):
+    """Pango markup for each line of code, coloured with Pygments if it's available."""
+    plain = [GLib.markup_escape_text(line) for line in code.split("\n")]
+    try:
+        from pygments import lex
+        from pygments.lexers import TextLexer, get_lexer_by_name, guess_lexer
+        from pygments.token import string_to_tokentype
+    except ImportError:
+        return plain
+    try:
+        lexer = get_lexer_by_name(language) if language else guess_lexer(code)
+    except Exception:
+        lexer = TextLexer()
+    families = [(string_to_tokentype(name), colour, italic) for name, colour, italic in TOKEN_COLORS]
+    lines = [""]
+    for ttype, value in lex(code, lexer):
+        colour, italic = "#cfe6ee", False
+        for family, c, it in families:
+            if ttype in family:
+                colour, italic = c, it
+                break
+        for i, part in enumerate(value.split("\n")):
+            if i:
+                lines.append("")
+            if part:
+                style = ' style="italic"' if italic else ""
+                lines[-1] += f'<span foreground="{colour}"{style}>{GLib.markup_escape_text(part)}</span>'
+    n = len(plain)
+    return (lines + plain[len(lines):])[:n]
+
+
+class BoardWindow(Gtk.Window):
+    """'Show me': code on a holo panel left of Icarus. The beat he's speaking lights its
+    lines; the rest dim; a note sits under the active lines. Click-through, display only."""
+    W, H = 660, 560
+    LH = 19
+
+    def __init__(self, monitor=None, margin=8):
+        super().__init__()
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_namespace(self, "icarus-board")
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.BOTTOM, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, margin + 40)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, margin + SW + 12)
+        GtkLayerShell.set_exclusive_zone(self, 0)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        if monitor:
+            GtkLayerShell.set_monitor(self, monitor)
+        self.set_size_request(self.W, self.H)
+        self.connect("draw", self.on_draw)
+        self.connect("realize", lambda _w: self.input_shape_combine_region(cairo.Region()))
+        self.board = None
+        self.ticking = False
+
+    def show_board(self, ev):
+        kind = ev.get("kind") or "code"
+        self.board = {"id": ev.get("id"), "kind": kind, "title": str(ev.get("title", "")), "language": str(ev.get("language", ""))}
+        if kind == "table":
+            self.board.update(rows=int(ev.get("rows", 1)), cols=int(ev.get("cols", 1)),
+                              grid=[list(r) for r in ev.get("cells") or []],
+                              row_labels=ev.get("row_labels") or [], col_labels=ev.get("col_labels") or [])
+            self.flash = {}
+        elif kind == "graph":
+            self.board.update(nodes=ev.get("nodes") or [], edges=ev.get("edges") or [])
+            self.board["pos"] = layered_layout(self.board["nodes"], self.board["edges"])
+        else:
+            self.board["markup"] = highlight_lines(str(ev.get("code", "")), str(ev.get("language", "")))
+        self.layouts = None
+        self.focus = None
+        self.scroll = 0.0
+        self.t_show, self.t_hide = time.monotonic(), None
+        self.show_all()
+        if not self.ticking:
+            self.ticking = True
+            GLib.timeout_add(33, self.on_tick)
+
+    def set_focus(self, ev):
+        if self.board and ev.get("id") == self.board["id"]:
+            now = time.monotonic()
+            self.focus = {"lines": set(ev.get("lines") or []), "note": ev.get("note") or "",
+                          "cells": {tuple(c) for c in ev.get("cells") or []}, "arrows": ev.get("arrows") or [],
+                          "nodes": set(ev.get("nodes") or []), "edges": {tuple(e) for e in ev.get("edges") or []},
+                          "index": int(ev.get("index", 0)), "total": int(ev.get("total", 0)), "t0": now}
+            if self.board["kind"] == "table":
+                grid = self.board["grid"]
+                for r, c, value in ev.get("fill") or []:
+                    if 0 <= r < len(grid) and 0 <= c < len(grid[r]):
+                        grid[r][c] = value
+                        self.flash[(r, c)] = now
+
+    def hide_board(self, _ev=None):
+        if self.board and self.t_hide is None:
+            self.t_hide = time.monotonic()
+
+    def on_tick(self):
+        if self.t_hide is not None and time.monotonic() - self.t_hide > .35:
+            self.board, self.t_hide, self.ticking = None, None, False
+            self.hide()
+            return False
+        self.queue_draw()
+        return True
+
+    def draw_code(self, cr, now):
+        b, W, H, LH = self.board, self.W, self.H, self.LH
+        if self.layouts is None:
+            self.layouts = []
+            for markup in b["markup"]:
+                lay = PangoCairo.create_layout(cr)
+                desc = Pango.FontDescription.from_string(MONO)
+                desc.set_absolute_size(12.5 * Pango.SCALE)
+                lay.set_font_description(desc)
+                lay.set_width(int((W - 70) * Pango.SCALE))
+                lay.set_ellipsize(Pango.EllipsizeMode.END)
+                lay.set_markup(markup or " ", -1)
+                self.layouts.append(lay)
+        y0, rows = 50, (H - 50 - 30) // LH
+        focus = self.focus["lines"] if self.focus else set()
+        if focus:
+            mid = (min(focus) + max(focus)) / 2 - 1
+            target = clamp(mid - rows / 2 + .5, 0, max(0, len(self.layouts) - rows))
+        else:
+            target = 0
+        self.scroll = lerp(self.scroll, target, .25)
+        cr.save()
+        cr.rectangle(8, y0 - 2, W - 16, rows * LH + 4)
+        cr.clip()
+        for i, lay in enumerate(self.layouts):
+            y = y0 + (i - self.scroll) * LH
+            if y < y0 - LH or y > y0 + rows * LH:
+                continue
+            on = (i + 1) in focus
+            if on:
+                cr.set_source_rgba(*rgba(CY, .10))
+                cr.rectangle(10, y - 1, W - 20, LH)
+                cr.fill()
+                cr.set_source_rgba(*rgba(CY, .9))
+                cr.rectangle(10, y - 1, 2, LH)
+                cr.fill()
+            alpha = 1.0 if (on or not focus) else .38
+            num = layout(cr, str(i + 1), MONO, 11)
+            draw_layout(cr, num, 46 - size_of(num)[0], y + 1, rgba(CY if on else (93, 116, 134), alpha))
+            cr.push_group()
+            cr.move_to(56, y)
+            PangoCairo.update_layout(cr, lay)
+            PangoCairo.show_layout(cr, lay)
+            cr.pop_group_to_source()
+            cr.paint_with_alpha(alpha)
+        cr.restore()
+
+        if self.focus and self.focus["note"] and focus:
+            last = max(focus) - 1
+            ny = y0 + (last + 1 - self.scroll) * LH + 6
+            note = layout(cr, self.focus["note"], MONO, 12, width=W * .6)
+            nw, nh = size_of(note)
+            nx = W - 22 - nw
+            ny = min(ny, y0 + rows * LH - nh - 8)
+            fade = min(1, (now - self.focus["t0"]) / .25)
+            cut_box(cr, nx - 10, ny, nw + 20, nh + 10, 7)
+            cr.set_source_rgba(.02, .06, .1, .95 * fade)
+            cr.fill_preserve()
+            cr.set_source_rgba(*rgba(CY, .7 * fade))
+            cr.stroke()
+            draw_layout(cr, note, nx, ny + 5, rgba((232, 251, 255), fade))
+
+    def draw_note(self, cr, now, y):
+        if not (self.focus and self.focus["note"]):
+            return
+        note = layout(cr, self.focus["note"], MONO, 12, width=self.W - 60)
+        nw, nh = size_of(note)
+        fade = min(1, (now - self.focus["t0"]) / .25)
+        x = (self.W - nw) / 2
+        cut_box(cr, x - 10, y, nw + 20, nh + 10, 7)
+        cr.set_source_rgba(.02, .06, .1, .95 * fade)
+        cr.fill_preserve()
+        cr.set_source_rgba(*rgba(CY, .7 * fade))
+        cr.set_line_width(1)
+        cr.stroke()
+        draw_layout(cr, note, x, y + 5, rgba((232, 251, 255), fade))
+
+    @staticmethod
+    def arrow(cr, x1, y1, x2, y2, col, alpha, width=1.6):
+        cr.set_source_rgba(*rgba(col, alpha))
+        cr.set_line_width(width)
+        cr.move_to(x1, y1)
+        cr.line_to(x2, y2)
+        cr.stroke()
+        ang = math.atan2(y2 - y1, x2 - x1)
+        for side in (-.45, .45):
+            cr.move_to(x2, y2)
+            cr.line_to(x2 - 8 * math.cos(ang + side), y2 - 8 * math.sin(ang + side))
+        cr.stroke()
+
+    def draw_table(self, cr, now):
+        b, W, H = self.board, self.W, self.H
+        rows, cols, grid = b["rows"], b["cols"], b["grid"]
+        focus = self.focus or {}
+        hot = focus.get("cells") or set()
+        left, top = 60, 74
+        cw = min(56, (W - left - 24) / cols)
+        ch = min(34, (H - top - 110) / rows)
+        gx = left + (W - left - 24 - cw * cols) / 2
+        gy = top
+        for c, label in enumerate(b["col_labels"][:cols]):
+            lay = layout(cr, str(label), MONO, 11)
+            draw_layout(cr, lay, gx + c * cw + (cw - size_of(lay)[0]) / 2, gy - 18, rgba((93, 116, 134)))
+        for r, label in enumerate(b["row_labels"][:rows]):
+            lay = layout(cr, str(label), MONO, 11)
+            draw_layout(cr, lay, gx - 10 - size_of(lay)[0], gy + r * ch + (ch - size_of(lay)[1]) / 2, rgba((93, 116, 134)))
+        for r in range(rows):
+            for c in range(cols):
+                x, y = gx + c * cw, gy + r * ch
+                on = (r, c) in hot
+                cr.rectangle(x + 1, y + 1, cw - 2, ch - 2)
+                cr.set_source_rgba(*(rgba(CY, .16) if on else (.025, .05, .09, 1)))
+                cr.fill_preserve()
+                cr.set_source_rgba(*rgba(CY, .85 if on else .16))
+                cr.set_line_width(1.4 if on else 1)
+                cr.stroke()
+                age = now - self.flash.get((r, c), -9)
+                if age < .6:
+                    cr.rectangle(x + 1, y + 1, cw - 2, ch - 2)
+                    cr.set_source_rgba(*rgba(AM, .35 * (1 - age / .6)))
+                    cr.fill()
+                value = grid[r][c] if r < len(grid) and c < len(grid[r]) else ""
+                if value != "":
+                    lay = layout(cr, str(value), MONO, 13, "SemiBold" if on else "")
+                    tw, th = size_of(lay)
+                    col = (255, 236, 200) if age < .6 else ((232, 251, 255) if on or not hot else (150, 170, 185))
+                    draw_layout(cr, lay, x + (cw - tw) / 2, y + (ch - th) / 2, rgba(col))
+        for r1, c1, r2, c2 in focus.get("arrows") or []:
+            x1, y1 = gx + c1 * cw + cw / 2, gy + r1 * ch + ch / 2
+            x2, y2 = gx + c2 * cw + cw / 2, gy + r2 * ch + ch / 2
+            d = math.hypot(x2 - x1, y2 - y1) or 1
+            ux, uy = (x2 - x1) / d, (y2 - y1) / d
+            self.arrow(cr, x1 + ux * 10, y1 + uy * 10, x2 - ux * 12, y2 - uy * 12, AM, .95)
+        self.draw_note(cr, now, min(H - 78, gy + rows * ch + 14))
+
+    def draw_graph(self, cr, now):
+        b, W, H = self.board, self.W, self.H
+        focus = self.focus or {}
+        lit_nodes, lit_edges = focus.get("nodes") or set(), focus.get("edges") or set()
+        active = bool(lit_nodes or lit_edges)
+        x0, y0, gw, gh = 40, 64, W - 80, H - 64 - 110
+        boxes = {}
+        for node in b["nodes"]:
+            px, py = b["pos"].get(node["id"], (.5, .5))
+            lay = layout(cr, node["label"], MONO, 12)
+            tw, th = size_of(lay)
+            bw, bh = tw + 22, th + 12
+            boxes[node["id"]] = (x0 + px * gw, y0 + py * gh, bw, bh, lay)
+        for e in b["edges"]:
+            if e["from"] not in boxes or e["to"] not in boxes:
+                continue
+            ax, ay, aw, _, _ = boxes[e["from"]]
+            bx, by, bw2, _, _ = boxes[e["to"]]
+            on = (e["from"], e["to"]) in lit_edges
+            sx, ex = (ax + aw / 2, bx - bw2 / 2) if bx > ax + 4 else (ax, bx)
+            self.arrow(cr, sx, ay, ex - 2, by, CY, .95 if on else (.14 if active else .45), 2 if on else 1.2)
+            if e.get("label"):
+                lay = layout(cr, e["label"], MONO, 10)
+                draw_layout(cr, lay, (sx + ex) / 2 - size_of(lay)[0] / 2, (ay + by) / 2 - 16, rgba((108, 129, 147)))
+        for nid, (cx, cy, bw, bh, lay) in boxes.items():
+            on = nid in lit_nodes
+            cut_box(cr, cx - bw / 2, cy - bh / 2, bw, bh, 6)
+            cr.set_source_rgba(*(rgba(CY, .14) if on else (.025, .05, .09, 1)))
+            cr.fill_preserve()
+            cr.set_source_rgba(*rgba(CY, .95 if on else (.18 if active else .45)))
+            cr.set_line_width(1.6 if on else 1)
+            cr.stroke()
+            draw_layout(cr, lay, cx - bw / 2 + 11, cy - bh / 2 + 6,
+                        rgba((232, 251, 255) if on or not active else (120, 140, 155)))
+        self.draw_note(cr, now, H - 92)
+
+    def on_draw(self, _w, cr):
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        b = self.board
+        if not b:
+            return False
+        now = time.monotonic()
+        k = min(1, (now - self.t_show) / .4)
+        if self.t_hide is not None:
+            k = max(0, 1 - (now - self.t_hide) / .35)
+        W, H, LH = self.W, self.H, self.LH
+        reveal = H * k
+        cr.save()
+        cr.rectangle(0, 0, W, reveal)
+        cr.clip()
+        cut_box(cr, .5, .5, W - 1, H - 1, 14)
+        cr.set_source_rgba(.016, .03, .063, 1.0)   # solid: anything translucent lets busy windows bleed through the code
+        cr.fill_preserve()
+        cr.set_source_rgba(*rgba(CY, .35))
+        cr.set_line_width(1)
+        cr.stroke()
+        draw_layout(cr, layout(cr, "◇ " + b["title"].upper(), DISPLAY, 13, "SemiBold", spacing=2), 16, 12, rgba(CY))
+        tag = (b["language"] or {"table": "table", "graph": "diagram"}.get(b.get("kind"), "code")).upper()
+        if self.focus and self.focus["total"]:
+            tag += f"   {self.focus['index'] + 1}/{self.focus['total']}"
+        lay = layout(cr, tag, MONO, 10, spacing=1.5)
+        draw_layout(cr, lay, W - 16 - size_of(lay)[0], 15, rgba((108, 129, 147)))
+        cr.set_source_rgba(*rgba(CY, .18))
+        cr.rectangle(12, 40, W - 24, 1)
+        cr.fill()
+
+        kind = b.get("kind", "code")
+        if kind == "table":
+            self.draw_table(cr, now)
+        elif kind == "graph":
+            self.draw_graph(cr, now)
+        else:
+            self.draw_code(cr, now)
+        hint = layout(cr, 'SAY "KEEP IT" TO OPEN IN YOUR BROWSER', DISPLAY, 9, "Medium", spacing=1.8)
+        draw_layout(cr, hint, 16, H - 22, rgba((108, 129, 147), .8))
+        cr.restore()
+        if 0 < k < 1:
+            cr.set_source_rgba(.9, 1, 1, .9)
+            cr.rectangle(0, reveal - 1, W, 1.5)
+            cr.fill()
+        return False
+
+
+class ScanFlash(Gtk.Window):
+    """A brief, click-through, full-monitor layer that sweeps a scan line over the window
+    Icarus just captured, so it's always visible when he looks at your screen."""
+    DURATION = .85
+
+    def __init__(self, rect):
+        super().__init__()
+        x, y, w, h = rect
+        display = Gdk.Display.get_default()
+        mon, geo = None, None
+        for i in range(display.get_n_monitors()):
+            m = display.get_monitor(i)
+            g = m.get_geometry()
+            if g.x <= x + w / 2 < g.x + g.width and g.y <= y + h / 2 < g.y + g.height:
+                mon, geo = m, g
+                break
+        if mon is None:
+            return
+        self.rect = (x - geo.x, y - geo.y, w, h)
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_namespace(self, "icarus-scan")
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM, GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        GtkLayerShell.set_exclusive_zone(self, -1)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_monitor(self, mon)
+        self.connect("draw", self.on_draw)
+        self.connect("realize", lambda _w: self.input_shape_combine_region(cairo.Region()))
+        self.t0 = time.monotonic()
+        self.show_all()
+        GLib.timeout_add(16, self.on_tick)
+
+    def on_tick(self):
+        if time.monotonic() - self.t0 > self.DURATION:
+            self.destroy()
+            return False
+        self.queue_draw()
+        return True
+
+    def on_draw(self, _w, cr):
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        k = (time.monotonic() - self.t0) / self.DURATION
+        alpha = 1.0 if k < .7 else max(0.0, (1 - k) / .3)
+        x, y, w, h = self.rect
+        cr.set_source_rgba(*rgba(CY, .05 * alpha))
+        cr.rectangle(x, y, w, h)
+        cr.fill()
+        L = min(42, w * .12, h * .12)
+        cr.set_source_rgba(*rgba(CY, .9 * alpha))
+        cr.set_line_width(2)
+        for cx, cy, dx, dy in ((x, y, 1, 1), (x + w, y, -1, 1), (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
+            cr.move_to(cx + dx * L, cy)
+            cr.line_to(cx, cy)
+            cr.line_to(cx, cy + dy * L)
+        cr.stroke()
+        sy = y + h * min(1, k / .75)
+        g = cairo.LinearGradient(0, sy - 70, 0, sy)
+        g.add_color_stop_rgba(0, *rgba(CY, 0))
+        g.add_color_stop_rgba(1, *rgba(CY, .22 * alpha))
+        cr.set_source(g)
+        cr.rectangle(x, sy - 70, w, 70)
+        cr.fill()
+        cr.set_source_rgba(.85, 1, 1, .95 * alpha)
+        cr.rectangle(x, sy - 1, w, 2)
+        cr.fill()
+        lay = layout(cr, "ICARUS // LOOKING", DISPLAY, 12, "SemiBold", spacing=2.4)
+        draw_layout(cr, lay, x + 10, y + 8, rgba(CY, alpha))
+        return False
+
+
 class Overlay(Gtk.Window):
     def __init__(self, avatar, monitor_index=None, margin=8, output=None):
         super().__init__()
@@ -915,6 +1428,7 @@ class Overlay(Gtk.Window):
             mon = Gdk.Display.get_default().get_monitor(monitor_index)
         if mon:
             GtkLayerShell.set_monitor(self, mon)
+        self.monitor = mon
         self.set_size_request(SW, SH)
         self.connect("draw", self.on_draw)
         self.connect("realize", self.on_realize)
@@ -989,7 +1503,8 @@ DEMO = [
     (0.0, {"type": "transcript_clear"}),
     (0.0, {"type": "state", "name": "speaking"}),
     (0.0, {"type": "subtitle", "text": "Done. The test was racing the registry cleanup.", "duration_ms": 2600}),
-    (2.8, {"type": "subtitle", "text": "Fix is on claude/sub-4471 when you're ready.", "duration_ms": 2400}),
+    (0.9, {"type": "fire", "seconds": .8}),
+    (1.9, {"type": "subtitle", "text": "Fix is on claude/sub-4471 when you're ready.", "duration_ms": 2400}),
     (2.6, {"type": "state", "name": "linger"}),
     (4.0, {"type": "clear"}),
     (0.0, {"type": "state", "name": "dormant"}),
@@ -1036,6 +1551,9 @@ def main():
     parser.add_argument("--socket", help="daemon renderer socket path")
     parser.add_argument("--demo", action="store_true", help="play a scripted walk through every state")
     parser.add_argument("--loop", action="store_true", help="with --demo, repeat forever")
+    parser.add_argument("--fire-demo", action="store_true", help="stay on screen and ignite every 2 s (for tuning the fire glitch)")
+    parser.add_argument("--board-demo", nargs="?", const="code", choices=("code", "table", "graph"),
+                        help="show a 'show me' board and step through its beats")
     parser.add_argument("--monitor", type=int, default=None, help="monitor index (default: compositor's choice)")
     parser.add_argument("--output", default=None, help="Hyprland output name, e.g. DP-2 (wins over --monitor)")
     parser.add_argument("--margin", type=int, default=8)
@@ -1046,7 +1564,74 @@ def main():
     avatar = Avatar()
     win = Overlay(avatar, args.monitor, args.margin, args.output)
     win.show_all()
-    if args.demo:
+    avatar.board_window = BoardWindow(win.monitor, args.margin)
+    if args.board_demo:
+        avatar.connected = True
+        code = ("def lcs(a, b):\n    n, m = len(a), len(b)\n    # dp[i][j]: LCS length of a[:i] and b[:j]\n"
+                "    dp = [[0] * (m + 1) for _ in range(n + 1)]\n    for i in range(1, n + 1):\n        for j in range(1, m + 1):\n"
+                "            if a[i - 1] == b[j - 1]:\n                dp[i][j] = dp[i - 1][j - 1] + 1\n            else:\n"
+                "                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])\n    return dp[n][m]")
+        beats = [([3, 4], "a table, one cell per prefix pair"), ([5, 6], "fill row by row"),
+                 ([7, 8], "match: extend the diagonal"), ([9, 10], "no match: best of skipping either"), ([11], "answer in the corner")]
+        avatar.apply({"type": "state", "name": "speaking"})
+        if args.board_demo == "table":
+            # 0/1 knapsack, capacity 0..5, items (w, v) = (1, 1), (3, 4), (4, 5)
+            vals = [[0, 1, 1, 1, 1, 1], [0, 1, 1, 4, 5, 5], [0, 1, 1, 4, 5, 6]]
+            grid = [["0"] + [""] * 5 for _ in range(3)]
+            avatar.apply({"type": "board", "id": "demo", "kind": "table", "title": "2D DP: 0/1 knapsack", "rows": 3, "cols": 6,
+                          "cells": grid, "row_labels": ["w1 v1", "w3 v4", "w4 v5"], "col_labels": [f"c={c}" for c in range(6)]})
+            beats = []
+            for r in range(3):
+                fill = [[r, c, str(vals[r][c])] for c in range(1, 6)]
+                arrows = [[r - 1, 4, r, 4], [r - 1, 4 - [1, 3, 4][r], r, 4]] if r and 4 - [1, 3, 4][r] >= 0 else []
+                beats.append(([[r, 4]], fill, arrows, f"row {r}: best value using items up to {r}"))
+            def next_beat():
+                cells, fill, arrows, note = beats[step["i"] % len(beats)]
+                if step["i"] % len(beats) == 0:
+                    avatar.apply({"type": "board", "id": "demo", "kind": "table", "title": "2D DP: 0/1 knapsack", "rows": 3, "cols": 6,
+                                  "cells": [["0"] + [""] * 5 for _ in range(3)], "row_labels": ["w1 v1", "w3 v4", "w4 v5"],
+                                  "col_labels": [f"c={c}" for c in range(6)]})
+                avatar.apply({"type": "board_focus", "id": "demo", "index": step["i"] % len(beats), "total": len(beats),
+                              "cells": cells, "fill": fill, "arrows": arrows, "note": note})
+                step["i"] += 1
+                return True
+            step = {"i": 0}
+            GLib.timeout_add(1300, next_beat)
+        elif args.board_demo == "graph":
+            nodes = [{"id": "hk", "label": "Hotkey"}, {"id": "mic", "label": "pw-record"}, {"id": "stt", "label": "Whisper"},
+                     {"id": "api", "label": "icarus-api"}, {"id": "l1", "label": "Icarus L1"}, {"id": "cl", "label": "Councilor"},
+                     {"id": "tts", "label": "Kokoro"}, {"id": "av", "label": "Avatar"}]
+            edges = [{"from": a, "to": b} for a, b in (("hk", "mic"), ("mic", "stt"), ("stt", "api"), ("api", "l1"), ("l1", "cl"),
+                                                        ("l1", "tts"), ("tts", "av"), ("cl", "av"))]
+            avatar.apply({"type": "board", "id": "demo", "kind": "graph", "title": "One voice turn", "nodes": nodes, "edges": edges})
+            gbeats = [(["hk", "mic", "stt"], [["hk", "mic"], ["mic", "stt"]], "your voice, transcribed locally"),
+                      (["api", "l1"], [["stt", "api"], ["api", "l1"]], "the text becomes an Icarus turn"),
+                      (["cl"], [["l1", "cl"]], "big jobs go to the Councilor"),
+                      (["tts", "av"], [["l1", "tts"], ["tts", "av"]], "the answer, spoken")]
+            step = {"i": 0}
+            def next_beat():
+                ns, es, note = gbeats[step["i"] % len(gbeats)]
+                avatar.apply({"type": "board_focus", "id": "demo", "index": step["i"] % len(gbeats), "total": len(gbeats),
+                              "nodes": ns, "edges": es, "note": note})
+                step["i"] += 1
+                return True
+            GLib.timeout_add(1300, next_beat)
+        else:
+          avatar.apply({"type": "board", "id": "demo", "title": "2D DP: longest common subsequence", "code": code, "language": "python"})
+          step = {"i": 0}
+          def next_beat():
+            lines, note = beats[step["i"] % len(beats)]
+            avatar.apply({"type": "board_focus", "id": "demo", "index": step["i"] % len(beats), "total": len(beats), "lines": lines, "note": note})
+            avatar.apply({"type": "subtitle", "text": note.capitalize() + ".", "duration_ms": 1500})
+            step["i"] += 1
+            return True
+          GLib.timeout_add(1200, next_beat)
+    elif args.fire_demo:
+        avatar.connected = True
+        avatar.apply({"type": "state", "name": "speaking"})
+        avatar.apply({"type": "subtitle", "text": "Testing the fire glitch.", "duration_ms": 2000})
+        GLib.timeout_add(1500, lambda: avatar.ignite(1.0) or True)
+    elif args.demo:
         run_demo(avatar, args.loop)
     elif args.socket:
         threading.Thread(target=feed_socket, args=(args.socket, avatar), daemon=True).start()

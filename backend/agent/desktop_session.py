@@ -47,6 +47,12 @@ class DesktopSession:
         finally:
             self._pending.pop(action_id, None)
 
+    async def push(self, message: dict) -> None:
+        """Send an event the daemon doesn't answer (e.g. a notification pop-up)."""
+        if self.closed:
+            raise DesktopUnavailable("desktop daemon is not connected")
+        await self._send(message)
+
     def resolve(self, action_id: str, ok: Any, result: Any) -> None:
         future = self._pending.get(action_id)
         if future and not future.done():

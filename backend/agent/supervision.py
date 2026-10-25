@@ -32,6 +32,7 @@ import os
 import re
 import ast
 import json
+import time
 import difflib
 import logging
 from typing import Any, Awaitable, Callable
@@ -392,6 +393,14 @@ def make_ask_supervisor(
             delivery_message_ids=message_ids, timeout_seconds=timeout,
         )
         await _activity("paused", "paused — waiting on the operator", question, severity="warning")
+        try:
+            # icarus-api turns this into a spoken pop-up if the desktop avatar is connected
+            await redis.lpush("icarus:desktop:announcements", json.dumps({
+                "type": "pause_question", "task_id": task_id, "question": question, "created": time.time(),
+            }))
+            await redis.ltrim("icarus:desktop:announcements", 0, 49)
+        except Exception as e:
+            logger.debug(f"[ask_supervisor {task_id}] desktop announcement skipped: {e}")
         logger.info(f"[ask_supervisor {task_id}] paused, waiting up to {timeout}s for the operator")
 
         reply = await wait_for_resume(redis, task_id, timeout)
