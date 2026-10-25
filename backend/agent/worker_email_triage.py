@@ -111,6 +111,9 @@ class EmailTriageWorker(WorkerBase):
         )
 
         try:
+            # Triage isn't urgent: let a live desktop conversation have the model first.
+            from backend.agent.foreground import wait_until_idle
+            await wait_until_idle(label="triage")
             response = await generate(
                 task_type="scoring",
                 messages=[{"role": "user", "text": prompt}],

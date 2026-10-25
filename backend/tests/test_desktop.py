@@ -9,7 +9,7 @@ from unittest import mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.agent import desktop_session, desktop_tools, engine
+from backend.agent import desktop_session, desktop_tools, engine, foreground
 from backend.agent.tools import current_platform
 from backend.routes import desktop
 from backend.tests.fake_llm import ScriptedLlamaServer, text_response
@@ -21,6 +21,10 @@ def _app() -> FastAPI:
     app = FastAPI()
     app.include_router(desktop.router)
     return app
+
+
+async def _no_hold(seconds, reason="desktop"):
+    return None
 
 
 async def _static_ambient():
@@ -42,6 +46,7 @@ class DesktopSocketTests(unittest.TestCase):
             mock.patch.dict(os.environ, {"DESKTOP_TOKEN": TOKEN}),
             mock.patch.object(desktop, "ambient_snapshot", _static_ambient),
             mock.patch.object(desktop, "AMBIENT_INTERVAL_SECONDS", 60),
+            mock.patch.object(foreground, "hold", _no_hold),  # never touch the live Redis
         ]
         for p in patches:
             p.start()
@@ -78,7 +83,7 @@ class DesktopSocketTests(unittest.TestCase):
             status = _recv_until(ws, "status")
             reply = _recv_until(ws, "reply")
         self.assertEqual(status, {"type": "status", "turn_id": "t1", "text": "Searching your history for “x”"})
-        self.assertEqual(reply, {"type": "reply", "turn_id": "t1", "text": "Two things today."})
+        self.assertEqual(reply, {"type": "reply", "turn_id": "t1", "text": "Two things today.", "streamed": False})
         self.assertEqual(calls, [("desktop", "operator", "what's on today", "desktop")])
 
     def test_desktop_tool_round_trips_through_the_daemon(self):

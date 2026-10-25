@@ -19,7 +19,6 @@ from backend.agent.metrics_consumer import run_metrics_consumer
 from backend.agent.activity_consumer import run_activity_consumer
 from backend.agent.calendar_watcher import run_calendar_watcher
 from backend.agent.spam_sweep import run_spam_sweep
-from backend.agent.github_repo_producer import run_repo_producer
 
 # Setup logging
 logging.basicConfig(
@@ -144,7 +143,6 @@ async def lifespan(app: FastAPI):
     activity_task = asyncio.create_task(run_activity_consumer())
     calendar_task = asyncio.create_task(run_calendar_watcher())
     spam_sweep_task = asyncio.create_task(run_spam_sweep())
-    repo_producer_task = asyncio.create_task(run_repo_producer())
     from backend.agent.desktop_notify import run_announcement_consumer
     desktop_announce_task = asyncio.create_task(run_announcement_consumer())
     from backend.agent.desktop_notify import run_task_event_consumer
@@ -167,7 +165,6 @@ async def lifespan(app: FastAPI):
     activity_task.cancel()
     calendar_task.cancel()
     spam_sweep_task.cancel()
-    repo_producer_task.cancel()
 
     if gmail_task:
         gmail_task.cancel()

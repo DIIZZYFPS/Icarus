@@ -24,6 +24,7 @@ string with tool calls resolved along the way.
 """
 
 import logging
+import os
 import socket
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -74,16 +75,7 @@ Use tools only when action is required:
 - github_create_pr(owner, repo, title, head, base, body) — open a PR from your working branch into base (default: main). This is the only way to land changes on main.
 - dispatch_worker_task(stream, data) — offload a heavy task to the worker cluster. Known streams:
   - "tasks:email_priority" — email prioritization.
-  - "tasks:job_scout" — score a job posting against DIIZZY's resume and GitHub project
-    history: match score, missing qualifications, and tailoring suggestions (e.g. "this
-    requirement isn't on your resume, but project X demonstrates it"). data is either
-    {"url": "<job posting URL>"} or {"jd_text": "<pasted job description>"}. Use this
-    when DIIZZY says something like "scout this job", "score this posting", or pastes a
-    job description and asks how he matches up.
-- get_worker_result(message_id) — wait for a task result from the worker cluster. For a
-  tasks:job_scout dispatch this may take up to a minute (LLM comparison, not a lookup) —
-  the result includes match_score, verdict, missing_qualifications, matched_qualifications,
-  and tailoring_suggestions.
+- get_worker_result(message_id) — wait for a task result from the worker cluster.
 - gmail_list_messages(query), gmail_get_message(message_id) — interact with Gmail.
 - calendar_list_upcoming_events(max_results, calendar_id) — read upcoming calendar events. Returns a clear "not configured" message until Calendar credentials exist.
 - web_search(query, num_results) — search the web for current information (titles, URLs, short snippets). Use when asked about something outside your knowledge or that may have changed since training. Returns a clear "not configured" message until TAVILY_API_KEY is set.
@@ -294,6 +286,7 @@ async def run_icarus(
     read_only: bool = False,
     on_activity: Callable[[str], Awaitable[None]] | None = None,
     image_urls: list[str] | None = None,
+    on_text: Callable[[str, bool], Awaitable[None]] | None = None,
 ) -> str:
     """Run one turn of the Icarus L1 agent loop against the local model.
 
@@ -304,10 +297,15 @@ async def run_icarus(
     on_activity, if given, is called with a short status string before each
     tool call executes — see local_llm.local_agent_loop().
 
-    image_urls — see local_llm.local_agent_loop(); passed straight through.
+    image_urls, on_text — see local_llm.local_agent_loop(); passed straight through.
     """
     tools = list(ICARUS_READONLY_TOOLS if read_only else ICARUS_TOOLS)
     system = build_system_prompt(read_only=read_only)
+    enable_thinking = True
+    if current_platform.get() == "desktop":
+        # Spoken turns skip reasoning: it was ~90% of each model call's time
+        # (8 s vs 0.7 s for the same short answer). DESKTOP_THINKING=1 turns it back on.
+        enable_thinking = os.getenv("DESKTOP_THINKING", "0").strip().lower() in ("1", "true", "yes")
     if not read_only and current_platform.get() == "desktop":
         # Spoken replies through the desktop avatar; desktop tools only while its daemon is connected.
         from .desktop_tools import desktop_prompt, desktop_tools_for_turn
@@ -318,6 +316,8 @@ async def run_icarus(
         tools=tools,
         system_instruction=system,
         max_turns=15,
+        enable_thinking=enable_thinking,
         on_activity=on_activity,
         image_urls=image_urls,
+        on_text=on_text,
     )

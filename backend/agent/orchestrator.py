@@ -5,7 +5,6 @@ from backend.database.redis_connection import get_redis_client
 logger = logging.getLogger(__name__)
 
 EMAIL_TRIAGE_STREAM = "tasks:email_triage"
-JOB_SCOUT_STREAM = "tasks:job_scout"
 EMAIL_PRIORITY_STREAM = "tasks:email_priority"
 _STREAM_ALIASES = {
     "tasks:email_triage":   EMAIL_TRIAGE_STREAM,
@@ -21,14 +20,11 @@ _STREAM_ALIASES = {
     "tasks:email_priority": EMAIL_PRIORITY_STREAM,
     "email_priority":       EMAIL_PRIORITY_STREAM,
     "email priority":       EMAIL_PRIORITY_STREAM,
-    "tasks:job_scout":      JOB_SCOUT_STREAM,
-    "job_scout":            JOB_SCOUT_STREAM,
-    "job scout":            JOB_SCOUT_STREAM,
 }
 
 # Every stream an actual worker consumes from — the only "not non-standard"
 # targets. Add a new entry here alongside a new worker's own stream_name.
-_KNOWN_STREAMS = {EMAIL_TRIAGE_STREAM, EMAIL_PRIORITY_STREAM, JOB_SCOUT_STREAM}
+_KNOWN_STREAMS = {EMAIL_TRIAGE_STREAM, EMAIL_PRIORITY_STREAM}
 
 
 def _normalize_stream(stream: str) -> str:

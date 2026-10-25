@@ -4,9 +4,15 @@ desktop.py — /ws/desktop, the link between icarus-api and the host desktop dae
 Protocol (JSON messages, ADR icarus_desktop_avatar.md §5.3):
 
   daemon -> server  hello{token}, utterance{turn_id, text}, action_result{id, ok, result},
-                    cancel{turn_id}, ping
-  server -> daemon  ready, status{turn_id, text}, reply{turn_id, text}, error{turn_id?, message},
-                    action{id, name, args}, ambient{heat, unread, tasks_running, recent_task}, pong
+                    cancel{turn_id}, listening, ping
+  server -> daemon  ready, status{turn_id, text}, say{turn_id, text}, reply{turn_id, text, streamed},
+                    error{turn_id?, message}, action{id, name, args},
+                    ambient{heat, unread, tasks_running, recent_task}, pong
+
+say carries one finished sentence of the reply while the model is still
+generating, so speech starts early. reply.streamed=true means every word of
+reply.text already went out as say messages; the daemon only speaks
+reply.text itself when streamed is false.
 
 Each utterance runs process_message(platform="desktop") as its own task, so the
 socket keeps reading while a turn is in flight: action results and cancels
@@ -37,6 +43,7 @@ LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 AMBIENT_INTERVAL_SECONDS = float(os.getenv("DESKTOP_AMBIENT_INTERVAL_SECONDS", "3"))
 RECENT_TASK_SECONDS = 10 * 60
 UNREAD_WINDOW_SECONDS = float(os.getenv("DESKTOP_UNREAD_WINDOW_HOURS", "6")) * 3600
+FOREGROUND_GRACE_SECONDS = float(os.getenv("DESKTOP_FOREGROUND_GRACE_SECONDS", "45"))
 
 
 def _user_id() -> str:
@@ -134,20 +141,87 @@ async def _ambient_loop(send) -> None:
 
 # ── Turns ────────────────────────────────────────────────────────────────────
 
+# End of a sentence: terminal punctuation, any closing quote/bracket, then whitespace; or a newline.
+_BOUNDARY = re.compile(r"(?<=[.!?…])[\"')\]”’]*(?=\s)|\n")
+_NO_OUTPUT = {"(Agent produced no output)", "[No response]"}
+
+
+class SentenceChunker:
+    """Turns streamed text deltas into whole sentences, so the daemon can start
+    speaking the first one while the rest is still being generated."""
+
+    def __init__(self):
+        self.buffer = ""
+
+    def feed(self, delta: str) -> list[str]:
+        self.buffer += delta
+        out, start = [], 0
+        for match in _BOUNDARY.finditer(self.buffer):
+            if match.end() >= len(self.buffer):
+                break  # whitespace after it hasn't arrived yet ("3." could still become "3.5")
+            sentence = self.buffer[start:match.end()].strip()
+            if sentence:
+                out.append(sentence)
+            start = match.end()
+        self.buffer = self.buffer[start:]
+        return out
+
+    def flush(self) -> list[str]:
+        rest, self.buffer = self.buffer.strip(), ""
+        return [rest] if rest else []
+
+
+def _normalized(text: str) -> str:
+    return " ".join(text.split())
+
+
+def reply_was_spoken(reply: str, spoken: list[str]) -> bool:
+    """True when every word of the final reply already went out as `say` chunks."""
+    if not spoken:
+        return False
+    return reply.strip() in _NO_OUTPUT or _normalized(reply) in _normalized(" ".join(spoken))
+
+
+async def _hold_foreground() -> None:
+    """Keep background model work deferred while this turn runs (see foreground.py)."""
+    from backend.agent.foreground import hold
+    while True:
+        await hold(30)
+        await asyncio.sleep(10)
+
+
 async def _run_turn(send, turn_id: str, text: str, reply_to: str | None = None,
                     images: list[str] | None = None) -> None:
     async def on_activity(status: str) -> None:
         await send({"type": "status", "turn_id": turn_id, "text": clean_status(status)})
 
+    chunker = SentenceChunker()
+    spoken: list[str] = []
+
+    async def on_text(delta: str, done: bool) -> None:
+        parts = chunker.feed(delta) + (chunker.flush() if done else [])
+        for part in parts:
+            spoken.append(part)
+            await send({"type": "say", "turn_id": turn_id, "text": part})
+
+    keeper = asyncio.create_task(_hold_foreground())
     try:
         reply = await process_message(PLATFORM, _user_id(), text, chat_id=CHAT_ID, on_activity=on_activity,
-                                      reply_to_message_id=reply_to, image_urls=images or None)
-        await send({"type": "reply", "turn_id": turn_id, "text": reply})
+                                      reply_to_message_id=reply_to, image_urls=images or None, on_text=on_text)
+        streamed = reply_was_spoken(reply, spoken)
+        if reply.strip() in _NO_OUTPUT:
+            reply = ""
+        await send({"type": "reply", "turn_id": turn_id, "text": reply, "streamed": streamed})
     except asyncio.CancelledError:
         raise
     except Exception:
         logger.exception("[desktop] turn %s failed", turn_id)
         await send({"type": "error", "turn_id": turn_id, "message": "Icarus couldn't finish that turn."})
+    finally:
+        keeper.cancel()
+        # He's still speaking, then the follow-up window is open: keep background work waiting.
+        from backend.agent.foreground import hold
+        await hold(FOREGROUND_GRACE_SECONDS)
 
 
 @router.websocket("/ws/desktop")
@@ -204,6 +278,10 @@ async def desktop_ws(ws: WebSocket):
                 task = turns.get(str(message.get("turn_id")))
                 if task:
                     task.cancel()
+            elif kind == "listening":
+                # The mic is open: free the model slot before the utterance arrives.
+                from backend.agent.foreground import hold
+                await hold(30)
             elif kind == "ping":
                 await send({"type": "pong"})
     except WebSocketDisconnect:

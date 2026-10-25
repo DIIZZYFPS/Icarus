@@ -35,7 +35,7 @@ async def _poll_mailbox():
         chat_id = data.get("chat_id")
 
         # ── Email notification — run through Qwen for Icarus's voice ──────
-        if resp_type in ("email_notification", "job_notification", "job_scout_notification"):
+        if resp_type in ("email_notification", "job_notification"):
             import os
             user_id = data.get("user_id") or os.environ.get("DISCORD_OPERATOR_ID", "0")
 

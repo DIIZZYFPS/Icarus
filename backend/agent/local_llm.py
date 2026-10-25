@@ -353,6 +353,64 @@ async def _execute_tool(
             return json.dumps(payload)
 
 
+async def _stream_completion(
+    client: httpx.AsyncClient,
+    body: dict,
+    on_text: Callable[[str, bool], Awaitable[None]],
+) -> dict:
+    """POST one chat completion with stream=true and rebuild the final message.
+
+    Reply text is passed to on_text(delta, False) as it arrives, then
+    on_text("", True) once the response ends, so the caller can flush a
+    partial sentence. Reasoning deltas are never passed on. Returns
+    {"content", "tool_calls"} shaped like a non-streamed message."""
+    content: list[str] = []
+    calls: dict[int, dict] = {}
+
+    async def emit(delta: str, done: bool) -> None:
+        try:
+            await on_text(delta, done)
+        except Exception as e:
+            logger.warning(f"[local_llm] on_text callback failed: {e}")
+
+    async with client.stream("POST", f"{LOCAL_LLM_URL}/chat/completions", json={**body, "stream": True}) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                text = delta.get("content")
+                if text:
+                    content.append(text)
+                    await emit(text, False)
+                for part in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(part.get("index", len(calls)), {
+                        "id": None, "type": "function", "function": {"name": "", "arguments": ""},
+                    })
+                    if part.get("id"):
+                        slot["id"] = part["id"]
+                    fn = part.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+    await emit("", True)
+    tool_calls = []
+    for index in sorted(calls):
+        call = calls[index]
+        call["id"] = call["id"] or f"call_{index}"
+        tool_calls.append(call)
+    return {"content": "".join(content), "tool_calls": tool_calls}
+
+
 async def local_agent_loop(
     initial_prompt: str,
     tools: list[Callable],
@@ -363,8 +421,16 @@ async def local_agent_loop(
     on_activity: Callable[[str], Awaitable[None]] | None = None,
     image_urls: list[str] | None = None,
     supervisor: Callable[[dict], Awaitable[dict | None]] | None = None,
+    on_text: Callable[[str, bool], Awaitable[None]] | None = None,
 ) -> str:
     """Multi-turn tool-calling loop against the local llama-server.
+
+    on_text, if given, switches every model call to streaming: reply text
+    is passed on as on_text(delta, False) while it's generated, and
+    on_text("", True) marks the end of each model response (see
+    _stream_completion). That includes any short text the model writes
+    before a tool call, not just the final answer. The return value is
+    unchanged: the last response's text.
 
     supervisor, if given, is awaited with an event dict whenever a tool
     call can't be executed as written — before the failure is serialized
@@ -438,14 +504,16 @@ async def local_agent_loop(
             if has_images:
                 body["speculative.n_max"] = 0
             try:
-                resp = await client.post(f"{LOCAL_LLM_URL}/chat/completions", json=body)
-                resp.raise_for_status()
-                data = resp.json()
+                if on_text is not None:
+                    message = await _stream_completion(client, body, on_text)
+                else:
+                    resp = await client.post(f"{LOCAL_LLM_URL}/chat/completions", json=body)
+                    resp.raise_for_status()
+                    message = resp.json()["choices"][0]["message"]
             except Exception as e:
-                logger.error(f"[local_llm] agent_loop turn {turn} failed: {e}")
+                logger.error(f"[local_llm] agent_loop turn {turn} failed: {e!r}")
                 return f"Agent loop error on turn {turn}: {e}"
 
-            message = data["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
 
             if not tool_calls:

@@ -207,6 +207,7 @@ async def process_message(
     conversation_id: str | None = None,
     reply_to_message_id: str | None = None,
     image_urls: list[str] | None = None,
+    on_text: Callable[[str, bool], Awaitable[None]] | None = None,
 ) -> str:
     """Core message processing logic — runs the L1 agent loop against the local model.
 
@@ -219,6 +220,9 @@ async def process_message(
     into chat history or the transcript (only a text marker is), since
     history/transcript are plain-text records replayed as text on later
     turns — see run_icarus/local_agent_loop for how they're actually sent.
+
+    on_text — streams reply text as it's generated (the desktop avatar speaks
+    it sentence by sentence); see local_llm.local_agent_loop().
 
     skip_history — for system-generated hydration prompts (a Councilor
     mailbox relay, an email-notification relay): these are self-contained,
@@ -343,6 +347,7 @@ async def process_message(
             read_only=effective_read_only,
             on_activity=on_activity,
             image_urls=image_urls,
+            on_text=on_text,
         )
 
         if response_text:

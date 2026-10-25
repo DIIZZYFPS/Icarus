@@ -193,9 +193,9 @@ async def recall(query: str, limit: int = 8) -> str:
 
 async def list_tracked_items(item_type: str = "") -> str:
     """List structured, stateful items tracked on your behalf — job
-    applications and bills extracted from triaged email, plus scored job
-    opportunities from job_scout (see dispatch_worker_task's tasks:job_scout
-    stream) — most recently updated first. Use this for "what's outstanding",
+    applications and bills extracted from triaged email, plus job
+    opportunities scored earlier (the job scout worker is retired, so no new
+    ones arrive) — most recently updated first. Use this for "what's outstanding",
     "where do things stand with my job search", "what bills are due", "what
     opportunities have you scored" — it reads current state directly rather
     than trying to reconstruct it from scattered email mentions.

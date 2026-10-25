@@ -2,7 +2,7 @@
 daemon.py — the Icarus desktop daemon: eyes, ears and hands for the avatar.
 
   hotkey ─ctl socket─▶ daemon ─pw-record─▶ faster-whisper ─/ws/desktop─▶ icarus-api (Icarus L1)
-                         │◀──────────── status / action / reply / ambient ─────────┘
+                         │◀───────── status / action / say / reply / ambient ──────┘
                          ├─ actions (hyprctl, playerctl, Spotify) ─▶ action_result
                          ├─ Piper ─pw-play─▶ speakers
                          └─ events ─renderer socket─▶ avatar overlay
@@ -180,6 +180,9 @@ class Daemon:
         self.chip_ids = itertools.count(1)
         self.last_chip: str | None = None
         self.speak_task: asyncio.Task | None = None
+        self.speech_q: asyncio.Queue | None = None    # lines of the reply being streamed in; None ends it
+        self.speech_idle = asyncio.Event()            # set while nothing is being spoken
+        self.speech_idle.set()
         self.linger_task: asyncio.Task | None = None
         self.in_followup = False
         self.reply_to: str | None = None     # pop-up id a follow-up reply answers
@@ -298,10 +301,12 @@ class Daemon:
         if self.turn_id:
             await self.link.send({"type": "cancel", "turn_id": self.turn_id})
             self.turn_id = None
+        self.speech_q = None
         for task in (self.speak_task, self.linger_task):
             if task and not task.done():
                 task.cancel()
         await self.player.stop()
+        self.speech_idle.set()
         self._clear()
 
     async def listen_start(self):
@@ -320,6 +325,7 @@ class Daemon:
         await self.recorder.start()
         self.set_state("listening")
         self.emit(type="transcript", text="", listening=True)
+        await self.link.send({"type": "listening"})  # icarus-api holds background model work
 
     async def look_start(self):
         """SUPER+SHIFT+I: grab the focused window *before* he appears, then listen as usual.
@@ -441,10 +447,23 @@ class Daemon:
             return  # a superseded turn
         elif kind == "status":
             self._chip(str(msg.get("text", "")))
+        elif kind == "say":
+            # One finished sentence while the model is still generating: start speaking now.
+            queue = self._speech_queue()
+            for item in self._board_beats() + sentences(str(msg.get("text", ""))):
+                queue.put_nowait(item)
         elif kind == "reply":
             self.turn_id = None
             self._finish_chips()
-            self.speak_task = asyncio.create_task(self.say_lines(self.narration(str(msg.get("text", ""))), self.generation))
+            text = str(msg.get("text", ""))
+            if self.speech_q is None:
+                self.speak_task = asyncio.create_task(self.say_lines(self.narration(text), self.generation))
+            else:
+                # Already speaking the streamed reply: add anything not yet said, then end it.
+                queue, self.speech_q = self.speech_q, None
+                for item in (self._board_beats() if msg.get("streamed") else self.narration(text)):
+                    queue.put_nowait(item)
+                queue.put_nowait(None)
         elif kind == "error":
             self.turn_id = None
             await self.fail(str(msg.get("message") or "Something went wrong."))
@@ -484,22 +503,54 @@ class Daemon:
 
     # ── speaking ────────────────────────────────────────────────────────────
 
+    def _speech_queue(self) -> asyncio.Queue:
+        """The queue for the reply being streamed in, starting its speaker on first use."""
+        if self.speech_q is None:
+            self.speech_q = asyncio.Queue()
+            self.speak_task = asyncio.create_task(self.speak(self.speech_q, self.generation))
+        return self.speech_q
+
     async def say_lines(self, lines: list, gen: int, followup: bool = True):
+        queue: asyncio.Queue = asyncio.Queue()
+        for line in lines or ["Done."]:
+            queue.put_nowait(line)
+        queue.put_nowait(None)
+        await self.speak(queue, gen, followup)
+
+    async def speak(self, queue: asyncio.Queue, gen: int, followup: bool = True):
+        """Speak lines as they arrive on `queue` until None, then open the follow-up window.
+
+        A line is text, or (text, focus event) for a board beat. Synthesis runs one
+        line ahead of playback, so the next sentence is ready when this one ends."""
+        audio: asyncio.Queue = asyncio.Queue(maxsize=2)
+
+        async def synthesize():
+            while True:
+                item = await queue.get()
+                if item is None:
+                    await audio.put(None)
+                    return
+                text, focus = (item, None) if isinstance(item, str) else item
+                pcm, rate = await self.tts.synthesize(text)
+                await audio.put((text, focus, pcm, rate))
+
+        producer = asyncio.create_task(synthesize())
+        spoke = False
         try:
-            if not lines:
-                lines = ["Done."]
-            items = [(x, None) if isinstance(x, str) else x for x in lines]
-            lines = [text for text, _ in items]
-            self.emit(type="transcript_clear")
-            self.set_state("speaking")
-            next_audio = asyncio.create_task(self.tts.synthesize(lines[0]))
-            for i, line in enumerate(lines):
-                pcm, rate = await next_audio
-                if i + 1 < len(lines):
-                    next_audio = asyncio.create_task(self.tts.synthesize(lines[i + 1]))
+            while True:
+                if audio.empty() and spoke and self.state == "speaking":
+                    self.set_state("thinking")  # between sentences while a tool runs
+                got = await audio.get()
+                if got is None:
+                    break
+                line, focus, pcm, rate = got
                 if gen != self.generation:
                     return
-                focus = items[i][1]
+                if not spoke:
+                    self.emit(type="transcript_clear")
+                    spoke = True
+                self.speech_idle.clear()
+                self.set_state("speaking")
                 if focus:
                     self.emit(**focus)
                     self.board_server.broadcast(focus)
@@ -508,7 +559,12 @@ class Daemon:
                 if gen != self.generation:
                     return
                 await asyncio.sleep(.25)
-            if followup and self.config.followup_seconds > 0:
+                if audio.empty():
+                    self.speech_idle.set()
+            self.speech_idle.set()
+            if not spoke:
+                await self.linger(gen)
+            elif followup and self.config.followup_seconds > 0:
                 await self.follow_up(gen)
             else:
                 await self.linger(gen)
@@ -517,6 +573,9 @@ class Daemon:
         except Exception:
             logger.exception("[tts] speaking failed")
             await self.fail("My voice failed.", speak=False)
+        finally:
+            producer.cancel()
+            self.speech_idle.set()
 
     async def follow_up(self, gen: int):
         """'Anything else?': keep the mic open briefly so a conversation can continue hands-free.
@@ -531,6 +590,7 @@ class Daemon:
             await self.linger(gen)
             return
         self.in_followup = True
+        await self.link.send({"type": "listening"})
         window = self.config.followup_seconds
         self.set_state("listening")
         self.emit(type="transcript", text="", listening=True, prompt="Anything else?", window_ms=int(window * 1000))
@@ -592,6 +652,8 @@ class Daemon:
     async def confirm(self, args: dict) -> bool:
         """Ask before anything that changes files: amber AUTHORIZE, a spoken question, yes/no.
         SUPER+I confirms, SUPER+Esc declines, anything unclear or silence counts as no."""
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self.speech_idle.wait(), 15)  # finish the sentence in progress first
         loop = asyncio.get_running_loop()
         self._confirm = loop.create_future()
         title = str(args.get("title") or "Go ahead?")
@@ -659,6 +721,10 @@ class Daemon:
 
     def narration(self, text: str) -> list:
         """The board's beats (each with its focus event), then the spoken reply."""
+        return self._board_beats() + sentences(text)
+
+    def _board_beats(self) -> list:
+        """The current board's narration beats as (line, focus) items, once per board."""
         items: list = []
         board = self.board
         if board and board["beats"] and not board["narrated"]:
@@ -670,7 +736,6 @@ class Daemon:
                          **{k: beat.get(k) or [] for k in ("lines", "cells", "fill", "arrows", "nodes", "edges")}}
                 for j, line in enumerate(sentences(beat.get("say", ""))):
                     items.append((line, focus if j == 0 else None))
-        items += sentences(text)
         return items
 
     def on_task_event(self, msg: dict):

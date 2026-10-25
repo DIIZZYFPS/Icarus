@@ -641,3 +641,76 @@ class ConfirmTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamedReplyTests(unittest.IsolatedAsyncioTestCase):
+    """Sentences arrive as `say` while the model is still generating; the reply ends the stream."""
+
+    def setUp(self):
+        self.daemon = Daemon(Config(linger_seconds=.05, followup_seconds=0, token="t"))
+        self.daemon.link = FakeLink()
+        self.daemon.tts = FakeTTS()
+        self.daemon.player = FakePlayer()
+        self.events = []
+        self.daemon.bus.emit = self.events.append
+
+    def subtitles(self):
+        return [e["text"] for e in self.events if e["type"] == "subtitle"]
+
+    async def _turn(self) -> str:
+        await self.daemon.on_control("say", "play something")
+        return self.daemon.link.sent[-1]["turn_id"]
+
+    async def test_speaking_starts_before_the_reply(self):
+        turn = await self._turn()
+        await self.daemon.on_api_message({"type": "say", "turn_id": turn, "text": "Putting on some Daft Punk."})
+        for _ in range(50):
+            if self.subtitles():
+                break
+            await asyncio.sleep(.01)
+        self.assertEqual(self.subtitles(), ["Putting on some Daft Punk."])  # no reply yet
+        await self.daemon.on_api_message({"type": "say", "turn_id": turn, "text": "It's queued up now."})
+        await self.daemon.on_api_message({"type": "reply", "turn_id": turn, "text": "Putting on some Daft Punk. It's queued up now.",
+                                          "streamed": True})
+        await self.daemon.speak_task
+        self.assertEqual(self.subtitles(), ["Putting on some Daft Punk.", "It's queued up now."])  # nothing twice
+        self.assertEqual(self.daemon.state, "dormant")
+        self.assertIsNone(self.daemon.speech_q)
+
+    async def test_unstreamed_tail_is_still_spoken(self):
+        turn = await self._turn()
+        await self.daemon.on_api_message({"type": "say", "turn_id": turn, "text": "Let me check that for you."})
+        await self.daemon.on_api_message({"type": "reply", "turn_id": turn, "text": "Agent loop error on turn 1.", "streamed": False})
+        await self.daemon.speak_task
+        self.assertEqual(self.subtitles(), ["Let me check that for you.", "Agent loop error on turn 1."])
+
+    async def test_say_for_a_superseded_turn_is_ignored(self):
+        first = await self._turn()
+        await self._turn()
+        await self.daemon.on_api_message({"type": "say", "turn_id": first, "text": "Stale sentence here."})
+        self.assertIsNone(self.daemon.speech_q)
+
+    async def test_interrupt_drops_the_stream(self):
+        turn = await self._turn()
+        await self.daemon.on_api_message({"type": "say", "turn_id": turn, "text": "This will be cut off."})
+        await self.daemon.interrupt()
+        self.assertIsNone(self.daemon.speech_q)
+        self.assertTrue(self.daemon.speech_idle.is_set())
+
+    async def test_board_beats_come_before_the_closing_line(self):
+        turn = await self._turn()
+        self.daemon.board_action("show_visual", {"title": "Loop", "code": "for x in y:\n    pass",
+                                                 "beats": [{"say": "First we loop over everything.", "lines": [1]}]})
+        await self.daemon.on_api_message({"type": "say", "turn_id": turn, "text": "That's the whole trick."})
+        await self.daemon.on_api_message({"type": "reply", "turn_id": turn, "text": "That's the whole trick.", "streamed": True})
+        await self.daemon.speak_task
+        self.assertEqual(self.subtitles(), ["First we loop over everything.", "That's the whole trick."])
+
+    async def test_listening_tells_the_api(self):
+        class FakeRecorder:
+            active = False
+            async def start(self):
+                self.active = True
+        self.daemon.recorder = FakeRecorder()
+        await self.daemon.listen_start()
+        self.assertEqual(self.daemon.link.sent[-1], {"type": "listening"})
