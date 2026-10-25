@@ -28,7 +28,7 @@ import socket
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from .tools import ICARUS_TOOLS, ICARUS_READONLY_TOOLS
+from .tools import ICARUS_TOOLS, ICARUS_READONLY_TOOLS, current_platform
 from .local_llm import local_agent_loop
 
 # The container runs with network_mode: host (see docker-compose.yml), which
@@ -306,8 +306,13 @@ async def run_icarus(
 
     image_urls — see local_llm.local_agent_loop(); passed straight through.
     """
-    tools = ICARUS_READONLY_TOOLS if read_only else ICARUS_TOOLS
+    tools = list(ICARUS_READONLY_TOOLS if read_only else ICARUS_TOOLS)
     system = build_system_prompt(read_only=read_only)
+    if not read_only and current_platform.get() == "desktop":
+        # Spoken replies through the desktop avatar; desktop tools only while its daemon is connected.
+        from .desktop_tools import DESKTOP_PROMPT, desktop_tools_for_turn
+        system += DESKTOP_PROMPT
+        tools += desktop_tools_for_turn()
     return await local_agent_loop(
         initial_prompt=prompt,
         tools=tools,

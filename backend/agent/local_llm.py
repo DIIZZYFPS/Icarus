@@ -247,6 +247,12 @@ _ACTIVITY_LABELS: dict[str, Callable[[dict], str]] = {
     "github_write_file": lambda a: f"🐙 Writing `{a.get('path', '')}`…",
     "github_create_pr": lambda a: "🐙 Opening a PR…",
     "github_clone_repo": lambda a: "🐙 Cloning a repo…",
+    "open_app": lambda a: f"🖥️ Opening {a.get('name', 'an app')}…",
+    "focus_window": lambda a: f"🖥️ Switching to {a.get('name', 'a window')}…",
+    "media_control": lambda a: f"🎵 Media: {a.get('action', '')}…",
+    "now_playing": lambda a: "🎵 Checking what's playing…",
+    "spotify_play": lambda a: f"🎵 Searching Spotify for “{str(a.get('query', ''))[:50]}”…",
+    "show_on_screen": lambda a: "🖥️ Putting it on screen…",
 }
 
 

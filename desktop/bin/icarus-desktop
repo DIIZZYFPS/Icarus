@@ -1,0 +1,4 @@
+#!/bin/sh
+# Wrapper so Hyprland binds and systemd can call the daemon without activating the venv.
+DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$DIR/.venv/bin/python" -m icarus_desktop "$@"
