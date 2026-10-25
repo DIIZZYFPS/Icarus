@@ -185,7 +185,7 @@ class Daemon:
         self.reply_to: str | None = None     # pop-up id a follow-up reply answers
         self.announcements: list[dict] = []  # spoken pop-ups waiting for a good moment
         self._confirm: asyncio.Future | None = None   # pending yes/no for an edit request
-        self.task_progress: dict[str, str] = {}       # Claude task id -> latest progress
+        self.task_progress: dict[str, dict] = {}      # Claude task id -> {title, text, steps, started, ...}
         self.pending_image: str | None = None         # screenshot to send with the next utterance
         self.call_image: str | None = None            # ...and re-sent with follow-ups in the same call
         self.board: dict | None = None                # code on screen ("show me")
@@ -206,7 +206,7 @@ class Daemon:
     # ── renderer ────────────────────────────────────────────────────────────
 
     def _snapshot(self):
-        return [self.ambient, {"type": "state", "name": self.state}]
+        return [self.ambient, {"type": "state", "name": self.state}, self._tasks_event()]
 
     def emit(self, **ev):
         self.bus.emit(ev)
@@ -243,6 +243,11 @@ class Daemon:
 
     def _emit_ambient(self):
         self.bus.emit({**self.ambient, "unread": int(self.ambient.get("unread") or 0) + len(self.announcements)})
+
+    def _tasks_event(self) -> dict:
+        """Running Claude tasks for the badge beside the orb, newest first."""
+        items = sorted(self.task_progress.values(), key=lambda v: v["started"], reverse=True)
+        return {"type": "tasks", "items": [{k: v for k, v in item.items() if k != "seen"} for item in items]}
 
     def _clear(self):
         self._finish_chips()
@@ -429,6 +434,14 @@ class Daemon:
         if kind == "ambient":
             self.ambient = {k: msg.get(k) for k in ("type", "heat", "unread", "tasks_running", "recent_task")}
             self._emit_ambient()
+            if self.task_progress and not self.ambient.get("tasks_running"):
+                # The registry says nothing is running: a lost "done" event mustn't leave the badge up.
+                # Only quiet entries go, so one failed registry read doesn't blink a live task away.
+                stale = [k for k, v in self.task_progress.items() if time.monotonic() - v["seen"] > 60]
+                for k in stale:
+                    del self.task_progress[k]
+                if stale:
+                    self.bus.emit(self._tasks_event())
         elif kind == "task_event":
             self.on_task_event(msg)
         elif kind == "notify":
@@ -678,7 +691,14 @@ class Daemon:
         if msg.get("done"):
             self.task_progress.pop(task_id, None)
         else:
-            self.task_progress[task_id] = text
+            entry = self.task_progress.setdefault(task_id, {"id": task_id, "steps": 0, "started": time.time()})
+            if not text.startswith("Claude:"):   # the kickoff line isn't a tool call
+                entry["steps"] += 1
+            entry["text"], entry["seen"] = text, time.monotonic()
+            for key in ("title", "project", "mode", "started"):
+                if msg.get(key):
+                    entry[key] = msg[key]
+        self.bus.emit(self._tasks_event())
         if self.state != "dormant":
             self.emit(type="chip", id=f"task-{task_id}", text=text, done=bool(msg.get("done")))
 

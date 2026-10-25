@@ -920,10 +920,11 @@ async def process_delegation(data: dict):
 TASK_EVENTS_LIST = "icarus:desktop:task_events"
 
 
-async def _task_event(task_id: str, text: str, done: bool = False):
+async def _task_event(task_id: str, text: str, done: bool = False, **meta):
+    """meta (title, project, mode, started) lets the avatar's task badge name the task."""
     try:
         r = await _get_redis()
-        await r.lpush(TASK_EVENTS_LIST, json.dumps({"task_id": task_id, "text": text, "done": done, "created": time.time()}))
+        await r.lpush(TASK_EVENTS_LIST, json.dumps({"task_id": task_id, "text": text, "done": done, "created": time.time(), **meta}))
         await r.ltrim(TASK_EVENTS_LIST, 0, 199)
     except Exception as e:
         logger.debug(f"[{task_id}] task event skipped: {e}")
@@ -961,9 +962,10 @@ async def process_claude_code(data: dict):
         error = "no task given" if not task else f"unknown project {project_name!r} (configured: {', '.join(projects) or 'none'})"
         result = None
     else:
-        await _task_event(task_id, f"Claude: {'editing' if mode == 'edit' else 'looking into'} {project_name}")
+        meta = {"title": task.splitlines()[0][:80], "project": project_name, "mode": mode, "started": time.time()}
+        await _task_event(task_id, f"Claude: {'editing' if mode == 'edit' else 'looking into'} {project_name}", **meta)
         result = await run_claude(task_id=task_id, project_name=project_name, project=project, task=task, mode=mode,
-                                  on_progress=lambda text: _task_event(task_id, text))
+                                  on_progress=lambda text: _task_event(task_id, text, **meta))
         error = result.error if not result.ok else None
     failed = result is None or not result.ok
     summary = (result.summary if result else "") or ""

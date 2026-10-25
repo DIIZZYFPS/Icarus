@@ -215,6 +215,9 @@ class Avatar:
         self.unread = 0
         self.tasks_running = 0
         self.recent_task = False
+        self.tasks = []          # running Claude tasks [{id, title, project, mode, text, steps, started}]
+        self.tasks_t0 = 0.0      # when the badge appeared / started fading
+        self.tasks_last = []     # what the badge showed, kept while it fades out
         self.particles = []
         self.fire_t0 = 0.0       # fire glitch: a brief flash of Icarus burning
         self.fire_until = 0.0
@@ -243,6 +246,13 @@ class Avatar:
             self.unread = int(ev.get("unread") or 0)
             self.tasks_running = int(ev.get("tasks_running") or 0)
             self.recent_task = bool(ev.get("recent_task"))
+        elif kind == "tasks":
+            items = [i for i in (ev.get("items") or []) if isinstance(i, dict)]
+            if bool(items) != bool(self.tasks):
+                self.tasks_t0 = now
+            if items:
+                self.tasks_last = items
+            self.tasks = items
         elif kind == "mic_level":
             self.mic = clamp(float(ev.get("rms", 0)) * 6, 0, 1)
         elif kind == "speech_level":
@@ -834,6 +844,96 @@ class Renderer:
         cr.pop_group_to_source()
         cr.paint_with_alpha(a.orb_a)
 
+    def draw_task_badge(self, cr, t):
+        """Running Claude task, beside the orb: what it is, what it's doing, how long it's been.
+        Lives in orb mode; fades out while he's on screen (the chips carry progress then)."""
+        a = self.a
+        items = a.tasks or a.tasks_last
+        if not items:
+            return
+        age = t - a.tasks_t0
+        k = min(1, age / .3) if a.tasks else max(0, 1 - age / .4)
+        k *= 1 - a.p
+        if k <= .01:
+            if not a.tasks:
+                a.tasks_last = []
+            return
+        task = items[0]
+        ox, oy = ORB
+        bw, pad = 300, 11
+        right = ox - 44 + (1 - k) ** 2 * 18
+        x0 = right - bw
+        inner = bw - pad * 2
+
+        def line(text, family, px, weight="", width=inner, spacing=0.0):
+            lay = layout(cr, text, family, px, weight, spacing=spacing)
+            lay.set_width(int(width * Pango.SCALE))
+            lay.set_ellipsize(Pango.EllipsizeMode.END)
+            return lay
+
+        elapsed = max(0, int(time.time() - float(task.get("started") or time.time())))
+        clock = (f"{elapsed // 3600}:{elapsed // 60 % 60:02}:{elapsed % 60:02}" if elapsed >= 3600
+                 else f"{elapsed // 60:02}:{elapsed % 60:02}")
+        more = f"+{len(items) - 1} · " if len(items) > 1 else ""
+        right_lay = layout(cr, more + clock, MONO, 10, "SemiBold")
+        rw, _ = size_of(right_lay)
+        scope = " · ".join(str(task[key]).upper() for key in ("mode", "project") if task.get(key))
+        head = line("CLAUDE TASK" + (f" // {scope}" if scope else ""), DISPLAY, 9.5, "SemiBold", inner - rw - 8, 1.8)
+        title = line(task.get("title") or "Running Claude task…", MONO, 12.5, "Medium")
+        steps = int(task.get("steps") or 0)
+        steps_lay = layout(cr, f"{steps} STEP{'S' if steps != 1 else ''}", MONO, 9.5) if steps else None
+        sw = size_of(steps_lay)[0] + 8 if steps_lay else 0
+        sub = line("› " + (task.get("text") or "starting"), MONO, 10.5, width=inner - sw)
+        hh, th, sh = size_of(head)[1], size_of(title)[1], size_of(sub)[1]
+        bh = pad + hh + 5 + th + 3 + sh + 9 + 2 + pad - 3
+        y0 = clamp(oy - bh / 2, 8, SH - bh - 8)
+
+        cut_box(cr, x0, y0, bw, bh, 9)
+        cr.set_source_rgba(.016, .03, .063, .9 * k)   # near-opaque: Hyprland shows layers through
+        cr.fill_preserve()
+        cr.set_source_rgba(*rgba(CY, .45 * k))
+        cr.set_line_width(1)
+        cr.stroke()
+        cr.set_source_rgba(*rgba(CY, .9 * k))   # left accent rail
+        cr.rectangle(x0, y0 + 9, 2, bh - 18)
+        cr.fill()
+        # tether to the orb
+        cr.set_source_rgba(*rgba(CY, .35 * k))
+        cr.move_to(right, oy + .5)
+        cr.line_to(ox - a.orb_r - 10, oy + .5)
+        cr.stroke()
+        cr.rectangle(ox - a.orb_r - 12, oy - 1.5, 3, 3)
+        cr.fill()
+
+        x, y = x0 + pad, y0 + pad - 2
+        blink = .55 + .45 * (1 if int(t * 2) % 2 == 0 else 0)   # stepped, like the rest
+        draw_layout(cr, layout(cr, "◆", DISPLAY, 9.5), x, y, rgba(CY, blink * k))
+        draw_layout(cr, head, x + 14, y, rgba(CY, k))
+        draw_layout(cr, right_lay, x0 + bw - pad - rw, y - 1, rgba((157, 179, 194), k))
+        y += hh + 5
+        draw_layout(cr, title, x, y, rgba((232, 248, 255), k))
+        y += th + 3
+        draw_layout(cr, sub, x, y, rgba((127, 180, 189), k))
+        if steps_lay:
+            draw_layout(cr, steps_lay, x0 + bw - pad - sw + 8, y + 1, rgba((108, 129, 147), k))
+        y += sh + 9
+        # no percentage from Claude: an indeterminate sweep, so it reads as alive at a glance
+        cr.set_source_rgba(*rgba(CY, .14 * k))
+        cr.rectangle(x, y, inner, 2)
+        cr.fill()
+        seg = inner * .28
+        head_x = ((t * .45) % 1) * (inner + seg) - seg
+        cr.save()
+        cr.rectangle(x, y - 1, inner, 4)
+        cr.clip()
+        g = cairo.LinearGradient(x + head_x, 0, x + head_x + seg, 0)
+        g.add_color_stop_rgba(0, *rgba(CY, 0))
+        g.add_color_stop_rgba(1, *rgba(CY, .95 * k))
+        cr.set_source(g)
+        cr.rectangle(x + head_x, y, seg, 2)
+        cr.fill()
+        cr.restore()
+
     def draw_column(self, cr, t):
         """Card, chips and subtitles, stacked upward from the panel's bottom-left."""
         a = self.a
@@ -983,6 +1083,7 @@ class Renderer:
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
         self.draw_orb(cr, t)
+        self.draw_task_badge(cr, t)
         if self.a.p > .001:
             self.render_character(t)
             self.composite_character(cr, t)
@@ -1508,6 +1609,12 @@ DEMO = [
     (2.6, {"type": "state", "name": "linger"}),
     (4.0, {"type": "clear"}),
     (0.0, {"type": "state", "name": "dormant"}),
+    (0.0, {"type": "tasks", "items": [{"id": "sub-4472", "title": "add a running-task badge beside the orb", "project": "icarus",
+                                        "mode": "edit", "text": "Claude: editing icarus", "steps": 0, "started": time.time() - 64}]}),
+    (2.0, {"type": "tasks", "items": [{"id": "sub-4472", "title": "add a running-task badge beside the orb", "project": "icarus",
+                                        "mode": "edit", "text": "Editing avatar.py", "steps": 7, "started": time.time() - 64}]}),
+    (2.0, {"type": "tasks", "items": [{"id": "sub-4472", "title": "add a running-task badge beside the orb", "project": "icarus",
+                                        "mode": "edit", "text": "Running python -m unittest discover", "steps": 12, "started": time.time() - 64}]}),
     (2.0, {"type": "ambient", "heat": .9, "unread": 0, "tasks_running": 1, "recent_task": False}),
     (0.0, {"type": "state", "name": "listening"}),
     (0.0, {"type": "transcript", "text": "", "listening": True}),
@@ -1519,6 +1626,7 @@ DEMO = [
     (9.0, {"type": "state", "name": "linger"}),
     (3.0, {"type": "clear"}),
     (0.0, {"type": "state", "name": "dormant"}),
+    (3.0, {"type": "tasks", "items": []}),
     (0.0, {"type": "ambient", "heat": .3, "unread": 0, "tasks_running": 0, "recent_task": False}),
 ]
 
