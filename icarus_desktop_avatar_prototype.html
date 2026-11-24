@@ -1,0 +1,1316 @@
+<title>Icarus Hologram</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: direction tabs, one scaled 960x600 "desktop" stage with the avatar over it, controls underneath. Single committed dark look. */
+:root {
+  --void: #05080f;
+  --surface: #0b111d;
+  --ink: #cfe6ee;
+  --dim: #6c8193;
+  --cy: #00f0ff;
+  --mg: #ff2a6d;
+  --amber: #ffb000;
+  --hair: rgba(0, 240, 255, .32);
+  --display: "Chakra Petch", "Rajdhani", ui-sans-serif, sans-serif;
+  --body: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+  color-scheme: dark;
+}
+html, body { background: var(--void); color: var(--ink); }
+body {
+  font-family: var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 40px;
+}
+.page { max-width: 1040px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 20px; }
+h1 { font-family: var(--display); font-weight: 600; font-size: 22px; letter-spacing: .14em; margin: 0; text-transform: uppercase; }
+h1 span { color: var(--cy); font-weight: 400; }
+header p { margin: 0; color: var(--dim); font-size: 13.5px; max-width: 62ch; }
+
+/* ---------- direction tabs ---------- */
+.tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 1100px) { .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .tabs { grid-template-columns: 1fr; } }
+.tab .pick { font: 600 9.5px var(--display); letter-spacing: .2em; color: var(--void); background: var(--cy); padding: 1px 6px; margin-left: 6px; vertical-align: 1px; }
+.tab { all: unset; box-sizing: border-box; cursor: pointer; display: grid; gap: 4px; padding: 12px 14px 13px; min-width: 0;
+  background: var(--surface); border: 1px solid #172133;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%); }
+.tab:hover { border-color: #2c3b54; }
+.tab:focus-visible { outline: 2px solid var(--cy); outline-offset: 2px; }
+.tab[aria-selected="true"] { border-color: var(--cy); background: #0a1622; }
+.tab .tn { font: 600 13px var(--display); letter-spacing: .18em; text-transform: uppercase; color: var(--ink); }
+.tab[aria-selected="true"] .tn { color: var(--cy); }
+.tab .td { font-size: 13px; color: #a9bccb; line-height: 1.45; }
+.tab .tr { font: 11px var(--mono); color: var(--dim); line-height: 1.5; }
+
+/* ---------- stage ---------- */
+.stage-wrap { position: relative; width: 100%; aspect-ratio: 960 / 600; max-width: 100%; overflow: hidden; border: 1px solid #1a2436; }
+.stage { position: absolute; left: 0; top: 0; width: 960px; height: 600px; transform-origin: 0 0; overflow: hidden;
+  background:
+    radial-gradient(900px 500px at 78% 110%, rgba(255, 42, 109, .08), transparent 60%),
+    radial-gradient(700px 500px at 10% -10%, rgba(0, 120, 160, .14), transparent 60%),
+    linear-gradient(160deg, #0a0f1b, #0d0a18);
+}
+.stage * { pointer-events: none; }
+.bar { position: absolute; inset: 0 0 auto 0; height: 26px; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 12px; background: rgba(8, 11, 20, .9); font: 500 11px var(--mono); color: #71839a; border-bottom: 1px solid #141c2b; }
+.ws { display: flex; gap: 4px; }
+.ws b { display: inline-grid; place-items: center; width: 20px; height: 18px; font-weight: 500; color: #4d5d72; }
+.ws b.on { color: var(--void); background: #5f7896; }
+.bar .right { display: flex; gap: 14px; font-variant-numeric: tabular-nums; }
+.win { position: absolute; background: rgba(11, 15, 26, .94); border: 2px solid #1f2a3d; border-radius: 9px; padding: 12px 14px;
+  font: 11.5px/1.65 var(--mono); color: #5f7286; white-space: pre; overflow: hidden; }
+.win.active { border-color: #3c5577; }
+.win .c { color: #3f8a9a; } .win .k { color: #8a6aa8; } .win .s { color: #7c9a62; } .win .p { color: #78a6c8; }
+
+canvas#fx { position: absolute; inset: 0; width: 960px; height: 600px; }
+
+.panel { --p: 0; position: absolute; right: 20px; bottom: 130px; width: 520px; height: 440px; visibility: hidden;
+  opacity: calc(.3 + .7 * var(--p)); clip-path: inset(calc((1 - var(--p)) * 100%) -40px 0 -40px); }
+.panel canvas { position: absolute; inset: 0; width: 520px; height: 440px; }
+
+.col { position: absolute; right: 548px; bottom: 150px; width: 360px; height: 400px; display: flex; flex-direction: column;
+  justify-content: flex-end; align-items: flex-end; gap: 10px; }
+.chips { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.chip { font: 500 10.5px var(--display); letter-spacing: .16em; color: var(--cy); padding: 4px 10px 4px 9px;
+  background: rgba(0, 240, 255, .07); border: 1px solid rgba(0, 240, 255, .35);
+  clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 0 100%); animation: chipIn .25s ease-out both; }
+.chip.done { color: #7fb4bd; border-color: rgba(0, 240, 255, .16); background: transparent; }
+@keyframes chipIn { from { opacity: 0; transform: translateX(14px); } }
+
+.card { width: 320px; padding: 11px 14px 12px; background: rgba(6, 10, 20, .8); border: 1px solid var(--hair);
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  animation: cardIn .3s cubic-bezier(.2, .8, .2, 1) both; display: grid; gap: 4px; }
+.card .t { font: 600 11px var(--display); letter-spacing: .2em; color: var(--cy); display: flex; align-items: center; gap: 8px; }
+.card .b { font: 13px/1.45 var(--mono); color: var(--ink); }
+.card .m { font: 11px var(--mono); color: var(--dim); }
+.card.confirm { border-color: rgba(255, 176, 0, .6); }
+.card.confirm .t { color: var(--amber); }
+.card .acts { display: flex; gap: 8px; margin-top: 6px; }
+.card .acts button { pointer-events: auto; }
+.eq { display: inline-flex; gap: 2px; align-items: flex-end; height: 10px; }
+.eq u { width: 2px; background: var(--cy); animation: eq .8s ease-in-out infinite alternate; }
+.eq u:nth-child(2) { animation-delay: -.3s; } .eq u:nth-child(3) { animation-delay: -.55s; } .eq u:nth-child(4) { animation-delay: -.15s; }
+@keyframes eq { from { height: 2px; } to { height: 10px; } }
+@keyframes cardIn { from { opacity: 0; transform: translateX(22px); } }
+
+.subs { position: relative; max-width: 360px; padding: 10px 14px 11px; background: rgba(4, 8, 16, .74);
+  border-top: 1px solid var(--hair); border-bottom: 1px solid var(--hair); opacity: 0; transition: opacity .25s; }
+.subs.on { opacity: 1; }
+.subs .who { font: 500 9.5px var(--display); letter-spacing: .24em; color: var(--cy); display: block; margin-bottom: 4px; }
+.subs .txt { font: 15px/1.5 var(--mono); color: #e8fbff; text-shadow: 0 0 10px rgba(0, 240, 255, .35); }
+.subs .cur { display: inline-block; width: .55em; height: 1.05em; vertical-align: -2px; margin-left: 2px; background: var(--cy);
+  animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.transcript { position: absolute; right: 140px; bottom: 32px; max-width: 460px; text-align: right;
+  font: 13px var(--mono); color: #9db3c2; opacity: 0; transition: opacity .3s; }
+.transcript.on { opacity: 1; }
+.transcript b { color: var(--cy); font-weight: 500; margin-right: 6px; }
+.transcript em { font-style: normal; color: var(--dim); letter-spacing: .12em; font-size: 11px; font-family: var(--display); }
+
+.stamp { --sc: var(--amber); position: absolute; right: 560px; top: 72px; display: grid; justify-items: end; gap: 6px; opacity: 0; }
+.stamp.on { opacity: 1; animation: stampIn .24s steps(4) both; }
+.st-top { display: flex; align-items: center; gap: 8px; font: 500 10px var(--mono); letter-spacing: .22em; color: var(--sc); }
+.st-top::before { content: ""; width: 9px; height: 9px; border: 1px solid var(--sc); border-radius: 50%;
+  background: linear-gradient(var(--sc), var(--sc)) center / 1px 100% no-repeat, linear-gradient(var(--sc), var(--sc)) center / 100% 1px no-repeat; }
+.st-word { font: 700 66px/.86 var(--display); letter-spacing: -.01em; color: var(--sc); text-transform: uppercase; }
+.stamp.on .st-word { animation: jit .16s steps(1) 3; }
+.st-bar { height: 3px; width: 0; background: var(--sc); justify-self: stretch; }
+.stamp.on .st-bar { animation: fillbar .8s steps(10) forwards; }
+@keyframes stampIn { 0% { clip-path: inset(0 0 100% 0); transform: translateX(-14px); } 100% { clip-path: inset(0); transform: none; } }
+@keyframes jit { 50% { transform: translateX(4px); text-shadow: -4px 0 rgba(255, 42, 109, .75), 4px 0 rgba(42, 125, 255, .75); } }
+@keyframes fillbar { to { width: 100%; } }
+.cutin { display: none; --cc: var(--cy); position: absolute; left: 0; right: 0; top: 205px; height: 130px; background: #020409;
+  border-top: 2px solid var(--cc); border-bottom: 2px solid var(--cc); clip-path: inset(50% 0 50% 0); transition: clip-path .16s steps(3); }
+.cutin.on { clip-path: inset(0 0 0 0); }
+.cutin canvas { position: absolute; inset: 0; width: 960px; height: 130px; }
+.cut-label { position: absolute; left: 40px; top: 50%; transform: translateY(-50%); display: grid; gap: 2px; }
+.cut-label small { font: 500 11px var(--display); letter-spacing: .4em; color: var(--dim); }
+.cut-label b { font: 700 38px var(--display); letter-spacing: .08em; color: var(--cc); text-shadow: 3px 0 0 rgba(255, 42, 109, .55), -3px 0 0 rgba(42, 125, 255, .55); }
+
+/* ---------- controls ---------- */
+.controls { display: grid; gap: 14px; padding: 16px; background: var(--surface); border: 1px solid #172133; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.field { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
+.field.grow { flex: 1 1 260px; min-width: 0; }
+select, input[type=range], input[type=checkbox] { accent-color: var(--cy); }
+select { flex: 1; min-width: 0; font: 13.5px var(--body); color: var(--ink); background: #060a12; border: 1px solid #253249; padding: 8px 10px; }
+button { font: 600 12px var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--ink); background: transparent;
+  border: 1px solid #2c3b54; padding: 9px 16px; cursor: pointer;
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+button:hover { border-color: var(--cy); color: var(--cy); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--cy); outline-offset: 2px; }
+button.primary { color: var(--void); background: var(--cy); border-color: var(--cy); touch-action: none; user-select: none; -webkit-user-select: none; }
+button.primary:hover { color: var(--void); filter: brightness(1.1); }
+button.primary.on { background: var(--mg); border-color: var(--mg); }
+button.warn { color: var(--void); background: var(--amber); border-color: var(--amber); }
+.state { margin-left: auto; font: 500 11px var(--display); letter-spacing: .2em; color: var(--dim); text-transform: uppercase; }
+.state b { color: var(--cy); font-weight: 600; }
+.hint { margin: 0; font-size: 13px; color: var(--dim); line-height: 1.55; max-width: 78ch; }
+kbd { font: 11px var(--mono); color: var(--ink); border: 1px solid #2c3b54; padding: 1px 5px; }
+@media (max-width: 520px) { .state { margin-left: 0; } }
+</style>
+
+<div class="page">
+  <header>
+    <h1>Icarus <span>// character builds</span></h1>
+    <p>D (stripped) is the working pick. The earlier directions stay here for comparison. Every build looks away while idle and only turns to face you when you call it.</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Character direction">
+    <button class="tab" role="tab" id="tab-stripped" data-style="stripped" aria-selected="true">
+      <span class="tn">D · Stripped<span class="pick">PICK</span></span>
+      <span class="td">One black silhouette, two red eyes, a flat sun. Blade wings stay folded until a big moment.</span>
+      <span class="tr">Marathon-style minimalism · Designers Republic frame graphics</span>
+    </button>
+    <button class="tab" role="tab" id="tab-icarus" data-style="icarus" aria-selected="false">
+      <span class="tn">A + B · Icarus</span>
+      <span class="td">Hooded netrunner backlit by the sun. Answers like a holo call, caught mid-activity, and scorches when your GPU runs hot.</span>
+      <span class="tr">Sunward's sun and wings · Engram's hood, optics and glitching</span>
+    </button>
+    <button class="tab" role="tab" id="tab-sunward" data-style="sunward" aria-selected="false">
+      <span class="tn">A · Sunward</span>
+      <span class="td">Machine Icarus. A silhouette against a sun that runs hotter as your GPU works.</span>
+      <span class="tr">Draper's Icarus · Ultrakill's Gabriel · NieR: Automata</span>
+    </button>
+    <button class="tab" role="tab" id="tab-engram" data-style="engram" aria-selected="false">
+      <span class="tn">B · Engram</span>
+      <span class="td">A hooded netrunner ghost living in your machine. Two red optics and a respirator.</span>
+      <span class="tr">Johnny's Relic glitch · Edgerunners · Ghost in the Shell</span>
+    </button>
+    <button class="tab" role="tab" id="tab-oracle" data-style="oracle" aria-selected="false">
+      <span class="tn">C · Oracle</span>
+      <span class="td">A faceless mask in orbiting rings. It turns edge-on when idle and opens one eye for you.</span>
+      <span class="tr">Evangelion's Ramiel · Destiny's Ghost · HAL 9000</span>
+    </button>
+  </div>
+
+  <div class="stage-wrap" id="stageWrap">
+    <div class="stage" id="stage">
+      <div class="bar">
+        <div class="ws"><b class="on">1</b><b>2</b><b>3</b><b>4</b></div>
+        <div>kitty — ~/Projects/Icarus</div>
+        <div class="right"><span id="gpuBar">GPU 35%</span><span id="clock">--:--</span></div>
+      </div>
+      <div class="win active" style="left:10px;top:36px;width:452px;height:552px"><span class="p">~/Projects/Icarus</span> <span class="k">main</span> ❯ git log --oneline -4
+be0e616 Merge pull request #28 from DIIZZYFPS/feat/…
+3df1d84 Feat: subagents
+6f470ea docs: requirements-councilor.txt for the…
+6cc8674 feat: ask_supervisor pause/resume with…
+
+<span class="p">~/Projects/Icarus</span> <span class="k">main</span> ❯ python councilor.py
+THE COUNCILOR - INFO - Listening on icarus:requests
+THE COUNCILOR - INFO - Reconciled 2 persistent subagents
+THE COUNCILOR - INFO - Heartbeat ok (llama-server 200)
+▋</div>
+      <div class="win" style="left:472px;top:36px;width:478px;height:552px"><span class="c"># councilor.py</span>
+<span class="k">async def</span> <span class="p">process_delegation</span>(data: dict):
+    req = DelegationRequest.from_wire(data)
+    resolved = resolve_tools(req)
+    system = _build_delegation_system_prompt(
+        req, resolved)
+    response, failed = <span class="k">await</span> _run_delegation_loop(
+        req, resolved.tools, system)
+    envelope = CompletionEnvelope.build(
+        task_id=req.task_id,
+        status=<span class="s">"failed"</span> <span class="k">if</span> failed <span class="k">else</span> <span class="s">"completed"</span>,
+        summary=response,
+    )
+    <span class="k">await</span> _deliver_envelope(req, envelope,
+        notify_label=<span class="s">"Task"</span>)
+
+<span class="c"># ── desktop avatar (draft) ──</span>
+<span class="k">async def</span> <span class="p">process_claude_code</span>(data: dict):
+    ...</div>
+
+      <canvas id="fx" width="960" height="600"></canvas>
+
+      <div class="col">
+        <div id="cardSlot"></div>
+        <div class="chips" id="chips"></div>
+        <div class="subs" id="subs"><span class="who">Icarus</span><span class="txt" id="subText"></span><span class="cur"></span></div>
+      </div>
+
+      <div class="panel" id="panel"><canvas id="char"></canvas></div>
+
+      <div class="transcript" id="transcript"></div>
+
+      <div class="stamp" id="stamp"><div class="st-top" id="stampSub">ICARUS // SIGNAL</div><div class="st-word" id="stampWord">COMPLETE</div><div class="st-bar"></div></div>
+      <div class="cutin" id="cutin">
+        <canvas id="cutCv"></canvas>
+        <div class="cut-label"><small>ICARUS</small><b id="cutText">TASK COMPLETE</b></div>
+      </div>
+    </div>
+  </div>
+
+  <section class="controls" aria-label="Demo controls">
+    <div class="row">
+      <label class="field grow" for="scenario">Request
+        <select id="scenario">
+          <option value="music">“Play something by Perturbator”</option>
+          <option value="app">“Open Firefox and pull up the dashboard”</option>
+          <option value="day">“What’s left on my plate today?”</option>
+          <option value="claude">“Have Claude fix the failing subagent test”</option>
+        </select>
+      </label>
+      <button class="primary" id="talk" type="button">Hold to talk</button>
+      <button id="cancel" type="button">Cancel</button>
+    </div>
+    <div class="row">
+      <label class="field" for="voice"><input type="checkbox" id="voice"> Speak aloud (browser voice)</label>
+      <label class="field" for="gpu">GPU load <input type="range" id="gpu" min="0" max="100" value="35"></label>
+      <label class="field" for="unread"><input type="checkbox" id="unread"> Unread notification</label>
+      <div class="state">State <b id="stateOut">dormant</b></div>
+    </div>
+    <p class="hint">Pick a build above to see it introduce itself. Then hold <kbd>Space</kbd> or the button, let go, and it answers. <kbd>Esc</kbd> cancels; in the confirm step <kbd>Space</kbd> or <kbd>Enter</kbd> approves. Try the Claude request for the two stamp moments (authorize and complete). Each call catches Icarus mid-activity: back turned watching the sun when nothing's going on, working his holo screen if there's an unread notification or a task just finished, venting heat when GPU load is above 60%. Push GPU load past 70% while he's on screen to see the scorch; drop it and he recovers. Replies are scripted; nothing is connected to Icarus.</p>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = s => document.querySelector(s);
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const CY = [0, 240, 255], MG = [255, 42, 109], AM = [255, 176, 0], PALE = [225, 240, 255];
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const lerp = (a, b, k) => a + (b - a) * k;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const mix = (c1, c2, k) => [lerp(c1[0], c2[0], k), lerp(c1[1], c2[1], k), lerp(c1[2], c2[2], k)];
+const hash = n => { const s = Math.sin(n * 12.9898) * 43758.5453; return s - Math.floor(s); };
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+const PW = 520, PH = 440, OFFX = 110, OFFY = 30; // character panel size; designs are drawn in a 300x400 frame offset into it
+const W = PW * DPR, H = PH * DPR;
+
+/* ---------- stage scaling + clock ---------- */
+const wrap = $('#stageWrap'), stage = $('#stage');
+const fit = () => { stage.style.transform = `scale(${wrap.clientWidth / 960})`; };
+new ResizeObserver(fit).observe(wrap); fit();
+const clock = $('#clock');
+const tick = () => { const d = new Date(); clock.textContent = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) + '  ' + d.toTimeString().slice(0, 5); };
+tick(); setInterval(tick, 10000);
+
+/* ---------- state ---------- */
+const S = {
+  style: 'stripped', state: 'dormant', p: 0, pTarget: 0, orbR: 18, orbA: .42, level: 0,
+  mouthT: { w: 16, h: 0 }, pulse: 0, turn: -1, step: -1, deck: 0, scorch: 0, burnStage: 0, hotCut: false, activity: 'sun', callT0: 0, glanceUntil: 0, nextGlance: 0, recentTask: false, spread: 0, spreadUntil: 0, answered: true, freezeUntil: 0, flashUntil: 0, flashCol: CY,
+  glitchUntil: 0, gpu: 35, unread: false, holding: false, pp: []
+};
+const VISIBLE = ['connecting', 'listening', 'thinking', 'acting', 'confirm', 'speaking', 'linger'];
+const TURN = { dormant: -1, listening: 0, thinking: -.65, acting: -.65, confirm: 0, speaking: 0, linger: -1 };
+const GLITCH = { stripped: 2.4, icarus: 2.4, sunward: 1, engram: 2.2, oracle: .6 };
+const panel = $('#panel'), stateOut = $('#stateOut');
+
+// Holo-call behaviour: when you call, he's caught mid-activity, holds it for a beat, then turns to you.
+// What he's doing reflects real state.
+const ACTIVITY = {
+  sun:  { turn: -2,   deck: 0, up: 1 },              // back turned, watching the sun: nothing going on
+  deck: { turn: -1,   deck: 1, up: 0 },              // working the holo screen: unread notification or a task just ran
+  vent: { turn: -1.3, deck: 0, up: 0, vent: true }   // venting heat: GPU running hot
+};
+function pickActivity() {
+  if (S.gpu > 60) return 'vent';
+  if (S.unread || S.recentTask) return 'deck';
+  return 'sun';
+}
+function poseTarget(t) {
+  const A = ACTIVITY[S.activity];
+  switch (S.state) {
+    case 'listening': return t - S.callT0 < .8 ? A : { turn: 0, deck: 0 };
+    case 'thinking': case 'acting': return { turn: -.65, deck: 1 };
+    case 'confirm': return { turn: 0, deck: 1 };
+    case 'speaking': return { turn: t < S.glanceUntil ? -.5 : 0, deck: 0 };
+    default: return A; // dormant, connecting, linger
+  }
+}
+function setState(name) {
+  const fresh = S.p < .5;
+  S.state = name;
+  if ((name === 'listening' || name === 'connecting') && fresh) { S.activity = pickActivity(); S.callT0 = performance.now() / 1000; S.answered = false; }
+  if (name === 'speaking') S.nextGlance = performance.now() / 1000 + 2.5;
+  S.pTarget = VISIBLE.includes(name) ? 1 : 0;
+  stateOut.textContent = name;
+}
+
+/* ---------- direction tabs ---------- */
+const tabs = [...document.querySelectorAll('.tab')];
+function selectStyle(name, preview) {
+  S.style = name; S.pp = [];
+  tabs.forEach(t => t.setAttribute('aria-selected', String(t.dataset.style === name)));
+  try { localStorage.setItem('icarus-style', name); } catch (_) {}
+  if (preview) { cancelTurn(false); runTurn(INTROS[name]); }
+}
+tabs.forEach(t => t.addEventListener('click', () => selectStyle(t.dataset.style, true)));
+try { const saved = localStorage.getItem('icarus-style'); if (saved && GLITCH[saved]) selectStyle(saved, false); } catch (_) {}
+
+/* ---------- UI pieces ---------- */
+const chipsEl = $('#chips'), cardSlot = $('#cardSlot'), subs = $('#subs'), subText = $('#subText'), transcript = $('#transcript');
+function addChip(text) { const el = document.createElement('div'); el.className = 'chip'; el.textContent = '◇ ' + text; chipsEl.appendChild(el); while (chipsEl.children.length > 4) chipsEl.firstChild.remove(); return el; }
+function doneChip(el) { el.classList.add('done'); el.textContent = el.textContent.replace('◇', '◆'); }
+function showCard(c) {
+  const eq = c.kind === 'play' ? '<span class="eq"><u></u><u></u><u></u><u></u></span>' : '';
+  const acts = c.kind === 'confirm' ? '<div class="acts"><button class="warn" type="button" data-ok="1">Confirm</button><button type="button" data-ok="0">Cancel</button></div>' : '';
+  cardSlot.innerHTML = `<div class="card ${c.kind}"><div class="t">${eq}${c.title}</div><div class="b">${c.body}</div>${c.meta ? `<div class="m">${c.meta}</div>` : ''}${acts}</div>`;
+}
+function hideCard() { cardSlot.innerHTML = ''; }
+cardSlot.addEventListener('click', e => { const b = e.target.closest('button'); if (b && confirmResolve) confirmResolve(b.dataset.ok === '1'); });
+function clearAll() { chipsEl.innerHTML = ''; hideCard(); subs.classList.remove('on'); subText.textContent = ''; transcript.classList.remove('on'); }
+
+/* ---------- cut-ins ---------- */
+const cutEl = $('#cutin'), cutText = $('#cutText'), cutCv = $('#cutCv'), cutCtx = cutCv.getContext('2d');
+cutCv.width = 960 * DPR; cutCv.height = 130 * DPR;
+const cut = { on: false, t0: 0, col: CY };
+let cutTimer = 0;
+// Impact moment: freeze the hologram, flash it flat in the signal colour for two frames,
+// and stamp a word beside him. Replaces the old full-screen cut-in band.
+const stampEl = $('#stamp'), stampWord = $('#stampWord'), stampSub = $('#stampSub');
+function cutIn(text, col, ms, sub) {
+  stampEl.style.setProperty('--sc', rgba(col, 1));
+  stampWord.textContent = text; stampSub.textContent = sub || 'ICARUS // SIGNAL';
+  stampEl.classList.remove('on'); void stampEl.offsetWidth; stampEl.classList.add('on');
+  const now = performance.now() / 1000;
+  S.freezeUntil = now + .14; S.flashUntil = now + .07; S.flashCol = col; S.glitchUntil = now + .16;
+  clearTimeout(cutTimer);
+  cutTimer = setTimeout(() => stampEl.classList.remove('on'), ms);
+}
+const CROP = { icarus: [104, 104, 92, 70], sunward: [92, 118, 116, 50], engram: [104, 112, 92, 64], oracle: [108, 124, 84, 72] };
+
+/* ---------- mouth / speech pulse ---------- */
+const VIS = { rest: { h: 0 }, A: { h: 7.5 }, E: { h: 3.2 }, O: { h: 6.5 }, M: { h: 0 }, C: { h: 2.4 } };
+function setMouth(ch) {
+  ch = (ch || ' ').toLowerCase(); let v = 'rest';
+  if (ch === 'a') v = 'A'; else if ('eiy'.includes(ch)) v = 'E'; else if ('ouw'.includes(ch)) v = 'O';
+  else if ('mbp'.includes(ch)) v = 'M'; else if (/[a-z0-9]/.test(ch)) v = 'C';
+  S.mouthT = VIS[v];
+}
+
+/* ---------- voice ---------- */
+let voice = null;
+function pickVoice() {
+  if (!('speechSynthesis' in window)) return;
+  const vs = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang));
+  voice = vs.find(v => /male|daniel|david|guy|ryan|uk english male/i.test(v.name) && !/female/i.test(v.name)) || vs[0] || null;
+}
+if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+const voiceBox = $('#voice');
+
+/* ---------- turns ---------- */
+const CANCEL = Symbol('cancel');
+let turnId = 0, confirmResolve = null;
+const SCENARIOS = {
+  music: { say: 'play something by perturbator',
+    chips: [['SEARCHING SPOTIFY', 900]],
+    card: { kind: 'play', title: 'SPOTIFY', body: 'Future Club — Perturbator', meta: 'Dangerous Days · 1 of 13' }, after: [['SENDING TO PLAYER', 500]],
+    reply: ['Future Club. Perturbator.', 'Volume stays where you left it.'] },
+  app: { say: 'open firefox and pull up the dashboard',
+    chips: [['FINDING APP', 600]],
+    card: { kind: 'app', title: 'LAUNCH', body: 'firefox → workspace 2', meta: 'gtk-launch firefox.desktop' }, after: [['OPENING DASHBOARD', 700]],
+    reply: ['Firefox is on workspace two.', 'Dashboard is loading.'] },
+  day: { say: "what's left on my plate today",
+    chips: [['READING CALENDAR', 900], ['CHECKING TRACKED ITEMS', 800]],
+    reply: ['Two things.', 'A recruiter call at three, and the Gmail token expires tonight.', 'Want a reminder at half two?'] },
+  claude: { say: 'have claude fix the failing subagent test',
+    chips: [['PREPARING CLAUDE TASK', 800]],
+    confirm: { kind: 'confirm', title: 'EDIT ICARUS WITH CLAUDE?', body: 'Runs in a worktree on branch claude/sub-4471. Nothing merges.', meta: 'Space or Enter to confirm · Esc to cancel' },
+    card: { kind: 'claude', title: '⧉ CLAUDE · ICARUS', body: 'running in claude/sub-4471', meta: 'mode: edit · timeout 30 min' },
+    after: [['READING TESTS', 900], ['RUNNING PYTEST', 1100], ['PATCH READY', 600]],
+    done: 'TASK COMPLETE',
+    reply: ['Done. The test was racing the registry cleanup.', "Fix is on claude/sub-4471 when you're ready to look."] }
+};
+const INTROS = {
+  stripped: { chips: [], reply: ['Icarus.', 'Go ahead.'] },
+  icarus: { chips: [], reply: ['Icarus.', 'Keep the GPU cool and the wings stay on.'] },
+  sunward: { chips: [], reply: ['Sunward build.', 'Push the GPU and watch what happens.'] },
+  engram: { chips: [], reply: ["Engram build.", "I've been in this machine the whole time."] },
+  oracle: { chips: [], reply: ['Oracle build.', "One eye's enough."] }
+};
+
+function cancelTurn(full) {
+  turnId++;
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  if (confirmResolve) { const r = confirmResolve; confirmResolve = null; r(false); }
+  clearAll(); setMouth(' ');
+  if (full) setState('dormant');
+}
+
+async function speak(text, w) {
+  subs.classList.add('on'); subText.textContent = '';
+  let shown = 0, target = 0, ended = true;
+  if (voiceBox.checked && 'speechSynthesis' in window) {
+    ended = false;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1; u.pitch = .8; if (voice) u.voice = voice;
+    u.onboundary = e => { const end = text.indexOf(' ', e.charIndex); target = Math.max(target, end < 0 ? text.length : end); };
+    u.onend = u.onerror = () => { ended = true; };
+    speechSynthesis.speak(u);
+  }
+  const t0 = performance.now();
+  while (shown < text.length || !ended) {
+    await w(45);
+    const el = performance.now() - t0;
+    const tgt = Math.min(text.length, Math.max(target, Math.floor(el / 1000 * (ended ? 30 : 14))));
+    if (tgt > shown) { shown = Math.min(tgt, shown + 2); subText.textContent = text.slice(0, shown); setMouth(text[shown - 1]); }
+    else if (!ended) setMouth('aeomc'[(Math.random() * 5) | 0]);
+    else setMouth(' ');
+    if (el > 15000) break;
+  }
+  setMouth(' ');
+  await w(500);
+}
+
+async function typeTranscript(text, w) {
+  transcript.classList.add('on');
+  for (let i = 1; i <= text.length; i += 2) { transcript.innerHTML = `<b>&gt;</b>${text.slice(0, i)}`; await w(reduce ? 0 : 14); }
+  transcript.innerHTML = `<b>&gt;</b>${text}`;
+}
+
+async function runTurn(sc) {
+  const id = ++turnId;
+  const w = ms => new Promise((res, rej) => setTimeout(() => id === turnId ? res() : rej(CANCEL), ms));
+  try {
+    if (sc.say) { await typeTranscript(sc.say, w); setState('thinking'); await w(reduce ? 150 : 900); }
+    else { setState('connecting'); await w(reduce ? 200 : 1700); }
+    for (const [t, ms] of sc.chips) { const el = addChip(t); await w(ms); doneChip(el); }
+    if (sc.confirm) {
+      setState('confirm');
+      cutIn('AUTHORIZE', AM, 1600, 'REQ 4471 // EDIT ICARUS'); S.spreadUntil = performance.now() / 1000 + 1.2;
+      await w(1050);
+      showCard(sc.confirm);
+      const ok = await new Promise(res => { confirmResolve = res; setTimeout(() => res(false), 30000); });
+      confirmResolve = null;
+      if (id !== turnId) return;
+      hideCard();
+      if (!ok) { setState('speaking'); transcript.classList.remove('on'); await speak('Cancelled. Nothing was started.', w); return await finish(w); }
+    }
+    if (sc.card) {
+      setState('acting'); showCard(sc.card);
+      for (const [t, ms] of sc.after || []) { const el = addChip(t); await w(ms); doneChip(el); }
+    }
+    if (sc.done) { S.recentTask = true; cutIn('COMPLETE', CY, 1500, 'CLAUDE // claude/sub-4471'); S.spreadUntil = performance.now() / 1000 + 1.8; await w(1350); }
+    setState('speaking'); transcript.classList.remove('on');
+    await w(reduce ? 0 : 350); // let the head turn land before the first word
+    for (const line of sc.reply) await speak(line, w);
+    await finish(w);
+  } catch (e) { if (e !== CANCEL) console.error(e); }
+}
+async function finish(w) {
+  setState('linger');
+  await w(5500);
+  clearAll(); setState('dormant');
+}
+
+/* ---------- input ---------- */
+const talk = $('#talk');
+function startHold() {
+  if (S.holding || S.state === 'confirm') return;
+  cancelTurn(false);
+  S.holding = true; talk.classList.add('on'); talk.textContent = 'Listening…';
+  setState('listening');
+  transcript.innerHTML = '<em>LISTENING</em>'; transcript.classList.add('on');
+}
+function endHold() {
+  if (!S.holding) return;
+  S.holding = false; talk.classList.remove('on'); talk.textContent = 'Hold to talk';
+  runTurn(SCENARIOS[$('#scenario').value]);
+}
+talk.addEventListener('pointerdown', e => { e.preventDefault(); try { talk.setPointerCapture(e.pointerId); } catch (_) {} startHold(); });
+talk.addEventListener('pointerup', endHold);
+talk.addEventListener('pointercancel', endHold);
+talk.addEventListener('click', e => { if (e.detail === 0) { startHold(); setTimeout(endHold, 900); } });
+$('#cancel').addEventListener('click', () => { S.holding = false; talk.classList.remove('on'); talk.textContent = 'Hold to talk'; cancelTurn(true); });
+
+const typing = el => el && (el.tagName === 'SELECT' || el.tagName === 'INPUT');
+window.addEventListener('keydown', e => {
+  if (S.state === 'confirm' && confirmResolve && (e.code === 'Space' || e.key === 'Enter')) { e.preventDefault(); confirmResolve(true); return; }
+  if (e.key === 'Escape') { e.preventDefault(); $('#cancel').click(); return; }
+  if (e.code === 'Space' && !e.repeat && !typing(document.activeElement)) { e.preventDefault(); startHold(); }
+});
+window.addEventListener('keyup', e => { if (e.code === 'Space' && S.holding) { e.preventDefault(); endHold(); } });
+$('#gpu').addEventListener('input', e => { S.gpu = +e.target.value; $('#gpuBar').textContent = `GPU ${S.gpu}%`; });
+$('#unread').addEventListener('change', e => { S.unread = e.target.checked; });
+
+/* ---------- shared drawing helpers ---------- */
+function sunColor() {
+  const k = clamp(S.gpu / 100, 0, 1);
+  return k < .6 ? mix([150, 225, 255], [255, 168, 60], k / .6) : mix([255, 168, 60], [255, 64, 56], (k - .6) / .4);
+}
+const RIM = { dx: -2.2, dy: 1.8 };
+// Backlit silhouette: fill the shape in the rim colour, then cover it with the dark fill shifted
+// away from the light, leaving a thin lit edge on the top/right.
+function rimShape(c, path, rim, dark) {
+  c.save(); path(); c.fillStyle = rim; c.fill(); c.clip();
+  c.translate(RIM.dx, RIM.dy); path(); c.fillStyle = dark; c.fill();
+  c.restore();
+}
+function glowLine(c, col, a, w, blur, fn) {
+  c.save(); c.shadowColor = rgba(col, 1); c.shadowBlur = blur; c.strokeStyle = rgba(col, a); c.lineWidth = w; c.lineCap = 'round';
+  c.beginPath(); fn(); c.stroke(); c.restore();
+}
+
+/* ---------- A: Sunward ---------- */
+function drawSunward(c, e) {
+  const { t, tq, turn, pulse, J, wind } = e;
+  const temp = clamp(S.gpu / 100, 0, 1), hot = sunColor();
+  const sx = 150, sy = 146, sr = 100;
+  let g = c.createRadialGradient(sx, sy, sr * .55, sx, sy, sr * 1.8);
+  g.addColorStop(0, rgba(hot, .3)); g.addColorStop(1, rgba(hot, 0));
+  c.fillStyle = g; c.beginPath(); c.arc(sx, sy, sr * 1.8, 0, 7); c.fill();
+  g = c.createLinearGradient(0, sy - sr, 0, sy + sr);
+  g.addColorStop(0, 'rgba(255,248,232,.95)'); g.addColorStop(.5, rgba(hot, .92)); g.addColorStop(1, rgba(mix(hot, MG, .55), .8));
+  c.fillStyle = g; c.beginPath(); c.arc(sx, sy, sr, 0, 7); c.fill();
+  c.save(); c.globalCompositeOperation = 'destination-out';
+  const so = (t * 5) % 12;
+  for (let k = 0; k < 10; k++) { const y = sy + 4 + k * 12 + so; if (y > sy + sr) break; c.fillRect(sx - sr - 2, y, sr * 2 + 4, 1 + k * .8); }
+  c.restore();
+
+  const rim = rgba(mix(hot, [255, 255, 255], .35), 1), dark = '#05070d';
+  const tips = [];
+  for (const side of [-1, 1]) for (let i = 6; i >= 0; i--) {
+    const rx = 150 + side * 44, ry = 262 - i * 5;
+    const a = -Math.PI / 2 + side * (.28 + i * .14) + wind(i + side * 3) * .035;
+    const L = 200 - i * 17, ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca;
+    const tx = rx + ca * L + J(i * 7 + side), ty = ry + sa * L + J(i * 5 - side);
+    tips.push([tx, ty]);
+    rimShape(c, () => { c.beginPath(); c.moveTo(rx + px * 6, ry + py * 6); c.lineTo(rx + ca * L * .45 + px * 9, ry + sa * L * .45 + py * 9); c.lineTo(tx, ty); c.lineTo(rx + ca * L * .5 - px * 4, ry + sa * L * .5 - py * 4); c.lineTo(rx - px * 6, ry - py * 6); c.closePath(); }, rim, dark);
+  }
+  // coat + collar
+  rimShape(c, () => { c.beginPath(); c.moveTo(150, 232); c.bezierCurveTo(112, 236, 74, 248, 54, 282); c.lineTo(36 + wind(1) * 5, 404); c.lineTo(264 + wind(2) * 5, 404); c.lineTo(246, 282); c.bezierCurveTo(226, 248, 188, 236, 150, 232); c.closePath(); }, rim, dark);
+  rimShape(c, () => { c.beginPath(); c.moveTo(108, 258); c.lineTo(122 + J(1), 190); c.lineTo(146, 214); c.lineTo(142, 270); c.closePath(); }, rim, dark);
+  rimShape(c, () => { c.beginPath(); c.moveTo(192, 258); c.lineTo(178 + J(2), 190); c.lineTo(154, 214); c.lineTo(158, 270); c.closePath(); }, rim, dark);
+  c.strokeStyle = rgba(CY, .3); c.lineWidth = 1; c.beginPath(); c.moveTo(150, 272); c.lineTo(150, 404); c.stroke();
+  glowLine(c, CY, .8, 1.4, 6, () => { c.moveTo(196, 300); c.lineTo(214, 300); });
+
+  // head group
+  c.save(); c.translate(150, 214); c.rotate(turn * .07); c.translate(-150 + turn * 5, -214 - turn * 3);
+  rimShape(c, () => { c.beginPath(); c.rect(138, 194, 24, 44); }, rim, dark);
+  rimShape(c, () => { c.beginPath(); c.moveTo(110, 126); c.bezierCurveTo(108, 160, 115, 185, 132, 203); c.quadraticCurveTo(150, 218, 168, 203); c.bezierCurveTo(185, 185, 192, 160, 190, 126); c.bezierCurveTo(188, 90, 168, 74, 150, 74); c.bezierCurveTo(132, 74, 112, 90, 110, 126); c.closePath(); }, rim, dark);
+  rimShape(c, () => {
+    c.beginPath(); c.moveTo(191, 124); c.bezierCurveTo(195, 88, 172, 58, 146, 58);
+    c.lineTo(102 + wind(1) * 7, 56 + J(3)); c.lineTo(122, 72);
+    c.lineTo(82 + wind(2) * 9, 84 + J(4)); c.lineTo(113, 95);
+    c.lineTo(78 + wind(3) * 10, 116 + J(5)); c.lineTo(109, 115);
+    c.lineTo(92 + wind(4) * 8, 146 + J(6)); c.lineTo(113, 134);
+    c.bezierCurveTo(132, 118, 160, 104, 178, 108); c.lineTo(194, 152); c.closePath();
+  }, rim, dark);
+  // visor slit
+  const vx1 = 124 + turn * 20, vx2 = 178 + turn * 12, vy = 146;
+  glowLine(c, [120, 255, 255], .55 + pulse * .45, 2.4, 12 + pulse * 10, () => { c.moveTo(vx1, vy); c.lineTo(vx2, vy - 1.5); });
+  const gp = (t * .3) % 1;
+  if (gp < .22) { c.fillStyle = '#fff'; c.beginPath(); c.arc(lerp(vx1, vx2, gp / .22), vy - .8, 1.8, 0, 7); c.fill(); }
+  c.restore();
+
+  // embers off the wing tips; many more when the sun runs hot
+  if (Math.random() < .2 + temp * .9) {
+    const [x, y] = tips[(Math.random() * tips.length) | 0];
+    S.pp.push({ x, y, vx: -8 - Math.random() * 18, vy: -10 - Math.random() * 22 + (temp > .6 ? 30 : 0), life: 0, max: 1.4 + Math.random() * 1.6, s: 1 + Math.random() * 1.6, col: Math.random() < .3 ? [255, 255, 255] : hot });
+  }
+}
+
+/* ---------- B: Engram ---------- */
+const GLYPHS = Array.from('01ｱｲｳｴｵｶｷｸｹｺｻｼｽｾﾊﾋﾌﾍﾎ#$%&<>/=');
+function drawEngram(c, e) {
+  const { t, turn, pulse, J, wind } = e;
+  c.font = '500 10px "JetBrains Mono", monospace'; c.textAlign = 'center';
+  const sp = .5 + S.gpu / 100;
+  for (let k = 0; k < 14; k++) {
+    const x = 14 + k * 20.5, spd = (28 + hash(k) * 46) * sp, head = ((t * spd + hash(k + 9) * 420) % 470) - 30;
+    for (let j = 0; j < 14; j++) {
+      const y = head - j * 13; if (y < -10 || y > 410) continue;
+      const ch = GLYPHS[(hash(k * 31 + Math.floor(y / 13) + (j === 0 ? Math.floor(t * 6) : 0)) * GLYPHS.length) | 0];
+      c.fillStyle = j === 0 ? 'rgba(220,255,255,.85)' : rgba(j % 5 === 0 ? MG : CY, .5 * (1 - j / 14));
+      c.fillText(ch, x, y);
+    }
+  }
+  c.textAlign = 'start';
+  c.save(); c.globalCompositeOperation = 'destination-in';
+  const mg = c.createRadialGradient(150, 180, 40, 150, 180, 200); mg.addColorStop(0, 'rgba(0,0,0,.85)'); mg.addColorStop(1, 'rgba(0,0,0,0)');
+  c.fillStyle = mg; c.fillRect(0, 0, 300, 400); c.restore();
+
+  const rim = 'rgb(90,240,255)', dark = '#04060c';
+  rimShape(c, () => { c.beginPath(); c.moveTo(150, 224); c.bezierCurveTo(102, 226, 64, 242, 42, 276); c.lineTo(28 + wind(1) * 4, 404); c.lineTo(272 + wind(2) * 4, 404); c.lineTo(258, 276); c.bezierCurveTo(236, 242, 198, 226, 150, 224); c.closePath(); }, rim, dark);
+  c.strokeStyle = rgba(CY, .25); c.lineWidth = 1; c.beginPath(); c.moveTo(138, 250); c.lineTo(126, 404); c.moveTo(162, 250); c.lineTo(174, 404); c.stroke();
+  c.save(); c.setLineDash([4, 10]); c.lineDashOffset = -t * 40; c.strokeStyle = rgba(CY, .75); c.lineWidth = 1.6;
+  c.beginPath(); c.moveTo(118, 236); c.bezierCurveTo(104, 270, 96, 320, 104, 404); c.stroke();
+  c.beginPath(); c.moveTo(182, 236); c.bezierCurveTo(196, 270, 204, 320, 196, 404); c.stroke();
+  c.restore();
+
+  // holo deck he reads while thinking
+  if (S.deck > .02) {
+    c.save(); c.globalAlpha = S.deck;
+    c.beginPath(); c.moveTo(110, 300); c.lineTo(190, 300); c.lineTo(182, 332); c.lineTo(102, 332); c.closePath();
+    c.fillStyle = rgba(CY, .1); c.fill(); c.strokeStyle = rgba(CY, .8); c.lineWidth = 1; c.stroke();
+    for (let k = 0; k < 4; k++) { const wdt = 20 + hash(k + Math.floor(t * 5)) * 46; c.fillStyle = rgba(k === 1 ? MG : CY, .7); c.fillRect(112 - k * 2, 307 + k * 6, wdt, 2); }
+    c.restore();
+  }
+
+  c.save(); c.translate(150, 230); c.rotate(turn * .05); c.translate(-150 + turn * 3, -230 - turn * 5);
+  rimShape(c, () => { c.beginPath(); c.moveTo(150, 60 + J(1)); c.bezierCurveTo(198 + wind(3) * 3, 60, 216 + wind(4) * 5, 108, 210, 160); c.bezierCurveTo(206, 200, 198, 226, 188, 242); c.lineTo(112, 242); c.bezierCurveTo(102, 226, 94, 200, 90, 160); c.bezierCurveTo(84, 108, 102, 60, 150, 60); c.closePath(); }, rim, dark);
+  const fx = 150 + turn * 9, fy = 156 - turn * 4;
+  c.fillStyle = '#000'; c.beginPath(); c.ellipse(fx, fy, 25, 38, 0, 0, 7); c.fill();
+  c.strokeStyle = rgba(CY, .16); c.lineWidth = 1; c.stroke();
+  const ey = fy - 12 - turn * 3, eL = 9 + turn * 3;
+  const eb = Math.min(1, .7 + pulse * .3 + (S.state === 'listening' ? .3 : 0));
+  for (const ox of [-11, 11]) glowLine(c, [255, 80, 130], eb, 2.6, 14, () => { c.moveTo(fx + ox - eL / 2, ey + (ox < 0 ? -.6 : .6)); c.lineTo(fx + ox + eL / 2, ey + (ox < 0 ? .6 : -.6)); });
+  c.beginPath(); if (c.roundRect) c.roundRect(fx - 17, fy + 12, 34, 26, 6); else c.rect(fx - 17, fy + 12, 34, 26);
+  c.fillStyle = '#0a0e17'; c.fill(); c.strokeStyle = rgba(CY, .45); c.lineWidth = 1; c.stroke();
+  for (let k = 0; k < 3; k++) glowLine(c, CY, .18 + pulse * .82, 1.6, 2 + pulse * 10, () => { c.moveTo(fx - 9, fy + 19 + k * 6); c.lineTo(fx + 9, fy + 19 + k * 6); });
+  c.restore();
+
+  if (Math.random() < .07) S.pp.push({ x: 60 + Math.random() * 180, y: 250 + Math.random() * 40, vx: 4 + Math.random() * 8, vy: -12 - Math.random() * 10, life: 0, max: 1.2 + Math.random(), s: 9, ch: GLYPHS[(Math.random() * GLYPHS.length) | 0], col: Math.random() < .3 ? MG : CY });
+}
+
+/* ---------- C: Oracle ---------- */
+function drawOracle(c, e) {
+  const { t, tq, turn, pulse } = e;
+  const spin = t * (.3 + S.gpu / 100 * 1.2), cx = 150, cy = 168;
+  const rings = [
+    { r: 128, ry: .2, tilt: -.28, dash: [2, 7], a: .7, w: 1 },
+    { r: 104, ry: .3, tilt: .24, dash: [22, 9], a: .55, w: 1.4 },
+    { r: 146, ry: .14, tilt: .06, dash: [1, 12], a: .45, w: 1 }
+  ];
+  const ring = front => rings.forEach((R, i) => {
+    const dir = i % 2 ? -1 : 1;
+    c.save(); c.translate(cx, cy); c.rotate(R.tilt);
+    c.setLineDash(R.dash); c.lineDashOffset = -spin * dir * R.r;
+    c.strokeStyle = rgba(PALE, R.a * (front ? 1 : .35)); c.lineWidth = R.w;
+    c.beginPath(); c.ellipse(0, 0, R.r, R.r * R.ry, 0, front ? 0 : Math.PI, front ? Math.PI : Math.PI * 2); c.stroke();
+    const na = ((spin * dir * 1.3 + i * 2) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    if ((Math.sin(na) > 0) === front) { c.setLineDash([]); c.fillStyle = rgba(i === 1 ? CY : PALE, front ? .95 : .35); c.fillRect(Math.cos(na) * R.r - 2, Math.sin(na) * R.r * R.ry - 2, 4, 4); }
+    c.restore();
+  });
+  ring(false);
+
+  const rim = 'rgb(225,240,255)', dark = '#05070c';
+  [-92, -58, -20, 20, 58, 92].forEach((x, i) => {
+    const y = 300 - Math.abs(x) * .32 + Math.sin(tq * 1.4 + i * 1.3) * 3;
+    rimShape(c, () => { c.save(); c.translate(150 + x, y); c.rotate(x * .006); c.beginPath(); c.moveTo(-14, -6); c.lineTo(13, -8); c.lineTo(15, 6); c.lineTo(-12, 8); c.closePath(); c.restore(); }, rim, dark);
+  });
+  for (const s of [-1, 1]) {
+    const y = 262 + Math.sin(tq * 1.1 + s) * 2.5;
+    rimShape(c, () => { c.save(); c.translate(150 + s * 116, y); c.rotate(s * .45); c.beginPath(); c.moveTo(-20, -8); c.lineTo(18, -10); c.lineTo(22, 7); c.lineTo(-16, 9); c.closePath(); c.restore(); }, rim, dark);
+  }
+
+  const sx = .26 + .74 * clamp(1 + turn, 0, 1);
+  c.save(); c.translate(cx, 0); c.scale(sx, 1); c.translate(-cx, 0);
+  const mask = () => { c.beginPath(); c.moveTo(150, 66); c.bezierCurveTo(198, 78, 208, 138, 200, 188); c.bezierCurveTo(192, 228, 172, 252, 150, 264); c.bezierCurveTo(128, 252, 108, 228, 100, 188); c.bezierCurveTo(92, 138, 102, 78, 150, 66); c.closePath(); };
+  rimShape(c, mask, rim, dark);
+  c.save(); mask(); c.clip();
+  const sg = c.createLinearGradient(100, 66, 200, 264); sg.addColorStop(0, 'rgba(200,230,255,.12)'); sg.addColorStop(.5, 'rgba(200,230,255,0)');
+  c.fillStyle = sg; c.fillRect(90, 60, 120, 210);
+  c.strokeStyle = 'rgba(200,235,255,.26)'; c.lineWidth = 1; c.beginPath();
+  c.moveTo(150, 74); c.lineTo(150, 136); c.moveTo(150, 186); c.lineTo(150, 256);
+  c.moveTo(124, 200); c.lineTo(136, 222); c.lineTo(136, 246); c.moveTo(176, 200); c.lineTo(164, 222); c.lineTo(164, 246);
+  c.moveTo(116, 120); c.lineTo(134, 140); c.moveTo(184, 120); c.lineTo(166, 140); c.stroke();
+  c.restore();
+  const open = clamp(1 + turn, 0, 1) * (S.state === 'listening' ? 1.3 : 1);
+  const ew = 1.2 + 5.5 * open * (.75 + pulse * .55);
+  c.save(); c.shadowColor = rgba(CY, 1); c.shadowBlur = 18; c.fillStyle = 'rgba(210,255,255,.95)';
+  c.beginPath(); c.ellipse(150, 160, ew / 2, 16, 0, 0, 7); c.fill(); c.restore();
+  c.restore();
+  ring(true);
+
+  if (Math.random() < .08) S.pp.push({ x: 80 + Math.random() * 140, y: 330 + Math.random() * 50, vx: (Math.random() - .5) * 4, vy: -8 - Math.random() * 8, life: 0, max: 2 + Math.random() * 2, s: 1.2, col: PALE });
+}
+/* ---------- A + B: Icarus ---------- */
+const EMBER = [255, 122, 40];
+function emitBurn(x, y, temp) {
+  if (S.pp.length > 320) return;
+  const r = Math.random();
+  if (r < .5) S.pp.push({ x, y, vx: -10 - Math.random() * 16, vy: -14 - Math.random() * 22, life: 0, max: 1.2 + Math.random() * 1.6, s: 1 + Math.random() * 1.5, col: Math.random() < .35 ? [255, 236, 200] : EMBER });
+  else if (r < .85) S.pp.push({ x, y, vx: -6 - Math.random() * 10, vy: -6 - Math.random() * 10, life: 0, max: 2 + Math.random() * 2, s: 1.6 + Math.random() * 1.6, col: [26, 22, 24], ash: true });
+  else if (temp > .7) S.pp.push({ x, y, vx: 0, vy: 4, g: 160, life: 0, max: .9, s: 1.6, col: [255, 190, 110] });
+}
+// One feather: intact from the root up to the burn front, a jagged charred stub past it,
+// and a glowing burn line at the front that creeps toward the root as `burn` grows.
+function feather(c, e, o) {
+  const { rx, ry, a, L, wMax, burn, seed, rim, dark, hot, temp } = o;
+  const ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca;
+  const P = (s, h) => [rx + ca * s + px * h, ry + sa * s + py * h];
+  const hw = s => s < .42 * L ? lerp(wMax * .6, wMax, s / (.42 * L)) : lerp(wMax, 0, (s - .42 * L) / (.58 * L));
+  const s1 = L * (1 - burn), mid = Math.min(.42 * L, s1);
+  rimShape(c, () => {
+    c.beginPath(); c.moveTo(...P(0, hw(0))); c.lineTo(...P(mid, hw(mid)));
+    if (burn < .01) { const tp = P(L, 0); c.lineTo(tp[0] + e.J(seed), tp[1] + e.J(seed + 1)); }
+    else { c.lineTo(...P(s1, hw(s1))); c.lineTo(...P(s1, -hw(s1) * .55)); }
+    c.lineTo(...P(Math.min(.5 * L, s1), -hw(Math.min(.5 * L, s1)) * .55)); c.lineTo(...P(0, -hw(0) * .55)); c.closePath();
+  }, rim, dark);
+  c.strokeStyle = rgba(hot, .22); c.lineWidth = .8; c.beginPath(); c.moveTo(...P(8, 0)); c.lineTo(...P(Math.min(s1, L * .9), 0)); c.stroke();
+  if (burn < .01) return;
+  const h1 = hw(s1), ch = Math.min(burn * L * .55, 22), v = k => .6 + hash(seed * 7 + k) * .6;
+  c.beginPath(); c.moveTo(...P(s1, h1));
+  c.lineTo(...P(s1 + ch * .7 * v(1), h1 * .6)); c.lineTo(...P(s1 + ch * .3 * v(2), h1 * .2));
+  c.lineTo(...P(s1 + ch * v(3), -h1 * .1)); c.lineTo(...P(s1 + ch * .4 * v(4), -h1 * .35)); c.lineTo(...P(s1, -h1 * .55)); c.closePath();
+  c.fillStyle = '#0c0705'; c.fill(); c.strokeStyle = rgba(EMBER, .35); c.lineWidth = .8; c.stroke();
+  const fl = .65 + .35 * Math.sin(e.t * 9 + seed * 3);
+  glowLine(c, EMBER, fl, 1.9, 10, () => { c.moveTo(...P(s1, h1)); c.lineTo(...P(s1, -h1 * .55)); });
+  if (Math.random() < .04 + temp * .1) emitBurn(...P(s1, (Math.random() - .3) * h1), temp);
+}
+
+/* Burn field: value noise biased so whatever sits nearest the sun chars first.
+   Each frame it is thresholded against the scorch level into char / burn-front / hole layers
+   at half resolution and laid over the character's own pixels only. */
+const GW = 260, GH = 220; // 2 design px per cell across the 520x440 panel
+const mkSmall = () => { const o = document.createElement('canvas'); o.width = GW; o.height = GH; return o; };
+const gridCv = mkSmall(), burnCv = mkSmall(), holeCv = mkSmall(), emberCv = mkSmall();
+const gridCtx = gridCv.getContext('2d', { willReadFrequently: true });
+const burnImg = new ImageData(GW, GH), holeImg = new ImageData(GW, GH), emberImg = new ImageData(GW, GH);
+const bodyCv = document.createElement('canvas'), glowCv = document.createElement('canvas');
+bodyCv.width = glowCv.width = W; bodyCv.height = glowCv.height = H;
+const bodyCtx = bodyCv.getContext('2d'), glowCtx = glowCv.getContext('2d');
+const NOISE = (() => {
+  const lat = (x, y) => hash(x * 157.31 + y * 311.7);
+  const vn = (x, y) => {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    return lerp(lerp(lat(xi, yi), lat(xi + 1, yi), u), lerp(lat(xi, yi + 1), lat(xi + 1, yi + 1), u), v);
+  };
+  const out = new Float32Array(GW * GH);
+  for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) {
+    const n = vn(x / 22, y / 22) * .55 + vn(x / 9 + 40, y / 9) * .3 + vn(x / 4 + 80, y / 4) * .15;
+    out[y * GW + x] = n * .62 + clamp(Math.hypot(x * 2 - 260, y * 2 - 166) / 300, 0, 1) * .38;
+  }
+  return out;
+})();
+
+function applyBurn(b, t) {
+  const L = S.scorch * .42;
+  if (L < .01) return false;
+  gridCtx.clearRect(0, 0, GW, GH); gridCtx.drawImage(bodyCv, 0, 0, GW, GH);
+  const A = gridCtx.getImageData(0, 0, GW, GH).data;
+  const bd = burnImg.data, hd = holeImg.data, ed = emberImg.data, tick = Math.floor(t * 10), temp = S.gpu / 100;
+  for (let i = 0, j = 0; i < GW * GH; i++, j += 4) {
+    bd[j + 3] = hd[j + 3] = ed[j + 3] = 0;
+    if (A[j + 3] < 30) continue;
+    const k4 = j + 3, e2 = 8, r2 = GW * 8;
+    const edge = (A[k4 - e2] | 0) < 30 || (A[k4 + e2] | 0) < 30 || (A[k4 - r2] | 0) < 30 || (A[k4 + r2] | 0) < 30;
+    const d = L - NOISE[i] + (edge ? .12 : -.1); // only frays from the silhouette edges
+    if (d > 0) {
+      bd[j] = 20; bd[j + 1] = 10; bd[j + 2] = 7; bd[j + 3] = 190;
+      if (d < .08 && hash(i * .13 + tick) > .986) { bd[j] = ed[j] = 255; bd[j + 1] = ed[j + 1] = 110; bd[j + 2] = ed[j + 2] = 40; bd[j + 3] = ed[j + 3] = 255; }
+      if (Math.random() < .0004 && S.pp.length < 320) S.pp.push({ x: (i % GW) * 2 - OFFX, y: ((i / GW) | 0) * 2 - OFFY, vx: -6 - Math.random() * 8, vy: -16 - Math.random() * 10, life: 0, max: 2.2 + Math.random(), s: 5 + Math.random() * 4, smoke: true, col: [46, 40, 44] });
+      continue;
+    }
+    if (d > -.035) {
+      const k = 1 + d / .035, f = .7 + .3 * Math.sin(t * 9 + i * .37);
+      bd[j] = ed[j] = 255; bd[j + 1] = ed[j + 1] = lerp(80, 225, k) | 0; bd[j + 2] = ed[j + 2] = lerp(20, 150, k) | 0;
+      bd[j + 3] = ed[j + 3] = (255 * f * (.55 + .45 * k)) | 0;
+      if (Math.random() < .0015) emitBurn((i % GW) * 2 - OFFX, ((i / GW) | 0) * 2 - OFFY, temp);
+    }
+  }
+  burnCv.getContext('2d').putImageData(burnImg, 0, 0);
+  holeCv.getContext('2d').putImageData(holeImg, 0, 0);
+  emberCv.getContext('2d').putImageData(emberImg, 0, 0);
+  b.save(); b.setTransform(1, 0, 0, 1, 0, 0); b.imageSmoothingEnabled = true;
+  b.globalCompositeOperation = 'source-atop'; b.drawImage(burnCv, 0, 0, W, H);
+  b.restore();
+  return true;
+}
+
+function wingPoint(side, u) {
+  const s0 = [186, 236], el = [232, 176], wr = [268, 108];
+  const p = u < .5 ? [lerp(s0[0], el[0], u * 2), lerp(s0[1], el[1], u * 2)] : [lerp(el[0], wr[0], (u - .5) * 2), lerp(el[1], wr[1], (u - .5) * 2)];
+  return side > 0 ? p : [300 - p[0], p[1]];
+}
+// Wing arm is the top edge (shoulder -> elbow -> wrist); feathers hang down and fan outward from it.
+function drawWings(c, e, rim, dark, hot, temp) {
+  const { t, wind } = e;
+  for (const side of [-1, 1]) {
+    const ang = a => side > 0 ? a : Math.PI - a;
+    const n = 12;
+    for (let k = n - 1; k >= 0; k--) {
+      const u = k / (n - 1), [rx, ry] = wingPoint(side, u);
+      feather(c, e, { rx, ry, a: ang(lerp(1.0, -.62, Math.pow(u, 1.15)) + wind(k + side * 5) * .03), L: lerp(112, 166, u), wMax: 10 + u * 3,
+        burn: clamp(S.scorch * 1.1 - (1 - u) * .5, 0, .45), seed: k * 3 + (side > 0 ? 50 : 0), rim, dark, hot, temp });
+    }
+    for (let k = 7; k >= 0; k--) {
+      const u = k / 7 * .95, [rx, ry] = wingPoint(side, u);
+      feather(c, e, { rx, ry: ry + 2, a: ang(lerp(1.15, -.35, Math.pow(u, 1.15)) + wind(k + 20) * .025), L: 48 + u * 28, wMax: 12,
+        burn: 0, seed: 120 + k + (side > 0 ? 30 : 0), rim, dark, hot, temp });
+    }
+    const pts = [wingPoint(side, 0), wingPoint(side, .5), wingPoint(side, 1)];
+    const strut = (dx, dy) => { c.beginPath(); c.moveTo(pts[0][0] + dx, pts[0][1] + dy); c.lineTo(pts[1][0] + dx, pts[1][1] + dy); c.lineTo(pts[2][0] + dx, pts[2][1] + dy); };
+    c.lineCap = 'round'; c.strokeStyle = rim; c.lineWidth = 8; strut(0, 0); c.stroke();
+    c.strokeStyle = '#0a0d16'; c.lineWidth = 6; strut(-1.3, 1.1); c.stroke();
+    for (const p of pts.slice(1)) {
+      c.beginPath(); c.arc(p[0], p[1], 4.2, 0, 7); c.fillStyle = dark; c.fill();
+      glowLine(c, CY, .85, 1.2, 6, () => c.arc(p[0], p[1], 4.2, 0, 7));
+    }
+    if (((t * 1.4 + (side > 0 ? .5 : 0)) % 1) < .15) { c.save(); c.shadowColor = rgba(MG, 1); c.shadowBlur = 10; c.fillStyle = 'rgb(255,80,130)'; c.beginPath(); c.arc(pts[2][0], pts[2][1] - 7, 1.8, 0, 7); c.fill(); c.restore(); }
+  }
+}
+
+function drawIcarusBody(c, e, hot, temp) {
+  const { t, turn, pulse, J, wind } = e;
+  const rim = rgba(mix(hot, [255, 255, 255], .35), 1), dark = '#05070d';
+  const back = turn < -1.45;               // back to the viewer: wings drawn over the body
+  const act = ACTIVITY[S.activity];
+  const tf = Math.max(turn, -1);
+  const ox = tf * 9 + (turn < -1 ? (turn + 1) * 26 : 0), oy = -tf * 4;
+
+  if (!back) drawWings(c, e, rim, dark, hot, temp);
+
+  // techwear jacket
+  rimShape(c, () => { c.beginPath(); c.moveTo(150, 222); c.bezierCurveTo(108, 222, 70, 236, 48, 268); c.lineTo(38, 302); c.lineTo(30 + wind(1) * 4, 404); c.lineTo(270 + wind(2) * 4, 404); c.lineTo(262, 302); c.lineTo(252, 268); c.bezierCurveTo(230, 236, 192, 222, 150, 222); c.closePath(); }, rim, dark);
+  c.strokeStyle = rgba(hot, .22); c.lineWidth = 1; c.beginPath();
+  c.moveTo(48, 268); c.lineTo(84, 256); c.lineTo(96, 302); c.moveTo(252, 268); c.lineTo(216, 256); c.lineTo(204, 302);
+  c.moveTo(40, 340); c.lineTo(78, 336); c.moveTo(260, 340); c.lineTo(222, 336);
+  if (back) { c.moveTo(150, 240); c.lineTo(150, 404); c.moveTo(104, 270); c.lineTo(124, 330); c.moveTo(196, 270); c.lineTo(176, 330); }
+  c.stroke();
+  if (!back) {
+    glowLine(c, CY, .55, 1.2, 5, () => { c.moveTo(178, 262); c.lineTo(152, 310); c.lineTo(148, 404); });
+    rimShape(c, () => { c.beginPath(); c.moveTo(64, 258); c.lineTo(76, 251); c.lineTo(206, 356); c.lineTo(195, 366); c.closePath(); }, rim, '#0b0f18');
+    c.strokeStyle = rgba(CY, .85); c.lineWidth = 1.2; c.strokeRect(128, 299, 15, 10);
+    glowLine(c, CY, .9, 2, 6, () => { c.moveTo(134, 304); c.lineTo(137, 304); });
+    glowLine(c, CY, .7, 1.4, 6, () => { c.moveTo(234, 292); c.lineTo(258, 287); });
+    glowLine(c, CY, .7, 1.4, 6, () => { c.moveTo(233, 300); c.lineTo(259, 295); });
+    c.font = '600 7px "JetBrains Mono", monospace'; c.fillStyle = rgba(hot, .55); c.fillText('ICR-01', 58, 290);
+  } else {
+    c.font = '600 8px "JetBrains Mono", monospace'; c.fillStyle = rgba(CY, .6); c.fillText('ICR-01', 134, 372);
+  }
+
+  // head
+  const up = back && act.up ? 1 : 0;
+  c.save(); c.translate(150, 230); c.rotate(tf * .05 - up * .05); c.translate(-150 + tf * 3, -230 - tf * 5 - up * 3);
+  c.lineJoin = 'miter';
+  rimShape(c, () => { c.beginPath(); c.moveTo(156, 46 + J(1)); c.lineTo(199 + wind(3) * 2, 70); c.lineTo(215 + wind(4) * 3, 124); c.lineTo(208, 186); c.lineTo(194, 236); c.lineTo(106, 236); c.lineTo(92, 186); c.lineTo(85, 124); c.lineTo(107, 67); c.closePath(); }, rim, dark);
+  c.strokeStyle = rgba(hot, .24); c.lineWidth = 1; c.beginPath();
+  if (back) {
+    c.moveTo(156, 48); c.lineTo(150, 236); c.moveTo(199, 70); c.lineTo(194, 200); c.moveTo(107, 67); c.lineTo(106, 200); c.stroke();
+    glowLine(c, CY, .6, 1.2, 5, () => { c.moveTo(143, 208); c.lineTo(157, 208); });
+  } else {
+    c.moveTo(156, 48); c.lineTo(152, 100); c.moveTo(199, 70); c.lineTo(180, 104); c.moveTo(107, 67); c.lineTo(121, 104);
+    c.moveTo(215, 124); c.lineTo(191, 140); c.moveTo(85, 124); c.lineTo(110, 140); c.moveTo(208, 186); c.lineTo(187, 176); c.moveTo(92, 186); c.lineTo(113, 176); c.stroke();
+    const fo = clamp(turn + 2, 0, 1); // how much of the face opening shows as he turns
+    c.save(); c.translate(150 + ox, 0); c.scale(Math.max(fo, .05), 1); c.translate(-150 - ox, 0);
+    const opening = () => { c.beginPath(); c.moveTo(116 + ox, 114 + oy); c.lineTo(150 + ox, 103 + oy); c.lineTo(184 + ox, 114 + oy); c.lineTo(189 + ox, 152 + oy); c.lineTo(177 + ox, 192 + oy); c.lineTo(123 + ox, 192 + oy); c.lineTo(111 + ox, 152 + oy); c.closePath(); };
+    opening(); c.fillStyle = '#000'; c.fill();
+    c.strokeStyle = rgba(hot, .5); c.lineWidth = 1.6; c.beginPath(); c.moveTo(116 + ox, 114 + oy); c.lineTo(150 + ox, 103 + oy); c.lineTo(184 + ox, 114 + oy); c.stroke();
+    const ey = 137 + oy - tf * 3;
+    c.save(); opening(); c.clip();
+    let sp = c.createRadialGradient(150 + ox, ey, 0, 150 + ox, ey, 34); sp.addColorStop(0, 'rgba(255,40,90,.18)'); sp.addColorStop(1, 'rgba(255,40,90,0)');
+    c.fillStyle = sp; c.fillRect(100 + ox, ey - 34, 100, 68);
+    if (S.deck > .02) { sp = c.createRadialGradient(150 + ox, 200 + oy, 0, 150 + ox, 200 + oy, 60); sp.addColorStop(0, rgba(CY, .38 * S.deck)); sp.addColorStop(1, rgba(CY, 0)); c.fillStyle = sp; c.fillRect(100 + ox, 120 + oy, 100, 80); }
+    c.restore();
+    if (fo > .4) {
+      const eL = 12 + tf * 3, eb = Math.min(1, .72 + pulse * .28 + (S.state === 'listening' ? .3 : 0));
+      const eyeCol = S.scorch > .5 ? [255, 120, 150] : [255, 70, 120];
+      glowLine(c, eyeCol, eb, 2.6, 15 + S.scorch * 10, () => { c.moveTo(126 + ox, ey - 3); c.lineTo(126 + ox + eL, ey + 1.5); });
+      glowLine(c, eyeCol, eb, 2.6, 15 + S.scorch * 10, () => { c.moveTo(174 + ox, ey - 3); c.lineTo(174 + ox - eL, ey + 1.5); });
+    }
+    rimShape(c, () => { c.beginPath(); c.moveTo(111 + ox, 155 + oy); c.lineTo(150 + ox, 146 + oy); c.lineTo(189 + ox, 155 + oy); c.lineTo(187 + ox, 198 + oy); c.lineTo(150 + ox, 216 + oy); c.lineTo(113 + ox, 198 + oy); c.closePath(); }, rim, '#090c15');
+    c.strokeStyle = rgba(hot, .2); c.lineWidth = 1; c.beginPath();
+    c.moveTo(118 + ox, 166 + oy); c.lineTo(150 + ox, 182 + oy); c.lineTo(182 + ox, 166 + oy);
+    c.moveTo(122 + ox, 182 + oy); c.lineTo(150 + ox, 198 + oy); c.lineTo(178 + ox, 182 + oy); c.stroke();
+    glowLine(c, CY, .14 + pulse * .86, 1.3, 2 + pulse * 10, () => { c.moveTo(141 + ox, 172 + oy); c.lineTo(159 + ox, 172 + oy); });
+    c.restore();
+  }
+  c.lineJoin = 'round';
+  c.restore();
+
+  // high angular collar
+  rimShape(c, () => { c.beginPath(); c.moveTo(98, 254); c.lineTo(116, 204); c.lineTo(150, 226); c.lineTo(150, 268); c.closePath(); }, rim, '#080b14');
+  rimShape(c, () => { c.beginPath(); c.moveTo(202, 254); c.lineTo(184, 204); c.lineTo(150, 226); c.lineTo(150, 268); c.closePath(); }, rim, '#080b14');
+
+  // scarf tails, blowing off to the left
+  for (const [k, oy2] of [[0, 0], [1, 9]]) {
+    rimShape(c, () => {
+      c.beginPath(); c.moveTo(118, 232 + oy2);
+      c.bezierCurveTo(96 + wind(5 + k) * 4, 238 + oy2, 74 + wind(6 + k) * 9, 250 + oy2 + wind(7 + k) * 4, 46 + wind(8 + k) * 14, 264 + oy2 + wind(9 + k) * 7);
+      c.lineTo(53 + wind(8 + k) * 14, 275 + oy2 + wind(9 + k) * 7);
+      c.bezierCurveTo(82 + wind(6 + k) * 9, 266 + oy2, 102, 258 + oy2, 122, 250 + oy2); c.closePath();
+    }, rim, '#0a0d16');
+  }
+
+  // holo screen + its light thrown up into the hood
+  if (!back && S.deck > .02) {
+    c.save(); c.globalAlpha = S.deck;
+    const rg = c.createLinearGradient(0, 298, 0, 196); rg.addColorStop(0, rgba(CY, .2)); rg.addColorStop(1, rgba(CY, 0));
+    c.fillStyle = rg; c.beginPath(); c.moveTo(108, 298); c.lineTo(192, 298); c.lineTo(172 + ox, 196 + oy); c.lineTo(128 + ox, 196 + oy); c.closePath(); c.fill();
+    c.beginPath(); c.moveTo(106, 298); c.lineTo(196, 298); c.lineTo(188, 338); c.lineTo(98, 338); c.closePath();
+    c.fillStyle = rgba(CY, .1); c.fill(); c.strokeStyle = rgba(CY, .85); c.lineWidth = 1; c.stroke();
+    c.fillStyle = rgba(CY, .8); c.fillRect(108, 302, 30, 3); c.fillStyle = rgba(MG, .9); c.fillRect(176, 302, 10, 3);
+    for (let k = 0; k < 5; k++) { const wdt = 16 + hash(k + Math.floor(t * 6)) * 60; c.fillStyle = rgba(k === 2 ? MG : CY, .65); c.fillRect(110 - k * 1.6, 310 + k * 5, wdt, 2); }
+    c.restore();
+  }
+
+  if (back) drawWings(c, e, rim, dark, hot, temp);
+
+  // venting heat: short bursts of vapour off the collar, his version of a cigarette
+  if (act.vent && turn < -.8 && (t % 2.6) < .6 && Math.random() < .55 && S.pp.length < 320)
+    S.pp.push({ x: 112 + Math.random() * 10, y: 212 + Math.random() * 6, vx: -12 - Math.random() * 10, vy: -16 - Math.random() * 12, life: 0, max: 1.8 + Math.random(), s: 3 + Math.random() * 3, smoke: true, col: [205, 215, 228] });
+}
+
+function drawIcarus(c, e) {
+  const { t } = e;
+  const temp = clamp(S.gpu / 100, 0, 1), hot = sunColor();
+  const sx = 150, sy = 136, sr = 116;
+  let g = c.createRadialGradient(sx, sy, sr * .55, sx, sy, sr * 1.8);
+  g.addColorStop(0, rgba(hot, .3)); g.addColorStop(1, rgba(hot, 0));
+  c.fillStyle = g; c.beginPath(); c.arc(sx, sy, sr * 1.8, 0, 7); c.fill();
+  g = c.createLinearGradient(0, sy - sr, 0, sy + sr);
+  g.addColorStop(0, 'rgba(255,248,232,.95)'); g.addColorStop(.5, rgba(hot, .92)); g.addColorStop(1, rgba(mix(hot, MG, .55), .8));
+  c.fillStyle = g; c.beginPath(); c.arc(sx, sy, sr, 0, 7); c.fill();
+  c.save(); c.beginPath(); c.arc(sx, sy, sr, 0, 7); c.clip();
+  c.font = '600 9px "JetBrains Mono", monospace'; c.textAlign = 'center';
+  for (let k = 0; k < 13; k++) {
+    const x = sx - sr + 8 + k * 18.5, spd = (18 + hash(k) * 30) * (.6 + temp), head = ((t * spd + hash(k + 5) * 300) % 300) + sy - sr - 20;
+    for (let j = 0; j < 10; j++) { const y = head - j * 11; c.fillStyle = rgba([12, 8, 18], .5 * (1 - j / 10)); c.fillText(GLYPHS[(hash(k * 17 + Math.floor(y / 11)) * GLYPHS.length) | 0], x, y); }
+  }
+  c.textAlign = 'start'; c.restore();
+  c.save(); c.globalCompositeOperation = 'destination-out';
+  const so = (t * 5) % 12;
+  for (let k = 0; k < 12; k++) { const y = sy + 4 + k * 12 + so; if (y > sy + sr) break; c.fillRect(sx - sr - 2, y, sr * 2 + 4, 1 + k * .75); }
+  c.restore();
+
+  // character on its own layer so the burn only touches him, never the sun
+  const b = bodyCtx;
+  b.setTransform(1, 0, 0, 1, 0, 0); b.globalCompositeOperation = 'source-over'; b.clearRect(0, 0, W, H);
+  b.setTransform(DPR, 0, 0, DPR, OFFX * DPR, OFFY * DPR); b.lineJoin = 'round';
+  drawIcarusBody(b, e, hot, temp);
+  const burning = applyBurn(b, t);
+
+  c.save(); c.setTransform(1, 0, 0, 1, 0, 0);
+  if (temp > .6 && !reduce) { // heat shimmer
+    const amp = (temp - .6) * 7 * DPR, sh = Math.round(6 * DPR);
+    for (let y = 0; y < H; y += sh) c.drawImage(bodyCv, 0, y, W, sh, Math.sin(y / DPR * .045 + t * 7) * amp, y, W, sh);
+  } else c.drawImage(bodyCv, 0, 0);
+  if (burning) {
+    glowCtx.globalCompositeOperation = 'source-over'; glowCtx.clearRect(0, 0, W, H);
+    glowCtx.drawImage(emberCv, 0, 0, W, H);
+    glowCtx.globalCompositeOperation = 'destination-in'; glowCtx.drawImage(bodyCv, 0, 0);
+    glowCtx.globalCompositeOperation = 'source-over';
+    c.globalCompositeOperation = 'lighter';
+    if ('filter' in c) { c.filter = `blur(${5 * DPR}px)`; c.drawImage(glowCv, 0, 0); c.filter = 'none'; }
+    c.drawImage(glowCv, 0, 0);
+  }
+  c.restore();
+
+  if (S.scorch > .01 || temp > .55) {
+    const integ = Math.round(100 - S.scorch * 30), col = integ < 82 ? EMBER : hot;
+    c.font = '600 8px "JetBrains Mono", monospace'; c.fillStyle = rgba(col, .9);
+    c.fillText(`INTEGRITY ${integ}%`, -100, -12);
+    c.fillStyle = rgba(hot, .2); c.fillRect(-100, -7, 90, 2); c.fillStyle = rgba(col, .9); c.fillRect(-100, -7, 90 * integ / 100, 2);
+  }
+}
+/* ---------- D: Stripped ---------- */
+// One flat silhouette, two red eyes, a flat sun, a few blade wings that only open for big moments.
+// Detail lives in the frame graphics around him, not on him.
+const INK = '#030406';
+const silhouette = c => {
+  c.beginPath(); c.moveTo(156, 50); c.lineTo(205, 82); c.lineTo(215, 150); c.lineTo(205, 206); c.lineTo(234, 222); c.lineTo(277, 262);
+  c.lineTo(285, 404); c.lineTo(15, 404); c.lineTo(23, 262); c.lineTo(66, 222); c.lineTo(95, 206); c.lineTo(85, 150); c.lineTo(97, 82); c.closePath();
+};
+const SIL_TOP = [[156, 50], [205, 82], [215, 150], [205, 206], [234, 222], [277, 262], [23, 262], [66, 222], [95, 206], [85, 150], [97, 82]];
+
+function drawFrame(c, t, hot) {
+  const col = rgba(hot, .85), dim = rgba(hot, .38);
+  c.save(); c.translate(-74, 318); c.rotate(-Math.PI / 2);
+  c.font = '700 34px "Chakra Petch", sans-serif'; c.fillStyle = col; c.fillText('ICARUS', 0, 0);
+  c.font = '500 7px "JetBrains Mono", monospace'; c.fillStyle = dim; c.fillText('L1 // LOCAL INTELLIGENCE // ICR-01', 0, 14);
+  c.restore();
+  c.strokeStyle = dim; c.lineWidth = 1;
+  for (const [x, y] of [[-96, -16], [398, -16], [-96, 398], [398, 398]]) {
+    c.beginPath(); c.arc(x, y, 4.5, 0, 7); c.moveTo(x - 8, y); c.lineTo(x + 8, y); c.moveTo(x, y - 8); c.lineTo(x, y + 8); c.stroke();
+  }
+  c.fillStyle = dim;
+  for (let k = 0, x = -96; k < 22; k++) { const w = hash(k + 3) < .5 ? 1 : 2.5; c.fillRect(x, 362, w, 14); x += w + 1.6; }
+  c.font = '600 7px "JetBrains Mono", monospace'; c.fillStyle = col;
+  c.fillText(S.state.toUpperCase(), 316, 358);
+  c.fillStyle = dim; c.fillText('HEAT', 316, 372);
+  for (let k = 0; k < 10; k++) { c.fillStyle = k < Math.round(S.gpu / 10) ? (k >= 7 ? rgba(EMBER, .95) : col) : rgba(hot, .15); c.fillRect(338 + k * 6, 366, 4, 7); }
+  c.fillStyle = dim; c.fillText('INTEGRITY ' + Math.round(100 - S.scorch * 30) + '%', 316, 386);
+}
+
+function drawStripped(c, e) {
+  const { t, turn, pulse, wind } = e;
+  const hot = sunColor(), temp = clamp(S.gpu / 100, 0, 1), edge = rgba(hot, .55);
+  // flat sun with bold cut stripes and a tick ring
+  c.fillStyle = rgba(hot, .95); c.beginPath(); c.arc(150, 138, 100, 0, 7); c.fill();
+  c.save(); c.globalCompositeOperation = 'destination-out';
+  for (let k = 0; k < 4; k++) c.fillRect(40, 176 + k * 15, 220, 3 + k * 1.6);
+  c.restore();
+  c.strokeStyle = rgba(hot, .45); c.lineWidth = 1; c.beginPath(); c.arc(150, 138, 113, 0, 7); c.stroke();
+  for (let k = 0; k < 36; k++) { const a = k / 36 * Math.PI * 2 + t * .05; const r1 = 113, r2 = k % 9 ? 117 : 123; c.beginPath(); c.moveTo(150 + Math.cos(a) * r1, 138 + Math.sin(a) * r1); c.lineTo(150 + Math.cos(a) * r2, 138 + Math.sin(a) * r2); c.stroke(); }
+
+  // blade wings: folded behind him, open for big moments
+  const sp = S.spread;
+  for (const side of [-1, 1]) for (let i = 3; i >= 0; i--) {
+    const a = -Math.PI / 2 + side * lerp(.1 + i * .07, .55 + i * .33, sp) + wind(i + side * 4) * .02;
+    const L = (228 - i * 28) * (1 - S.scorch * .2 * (1 - i * .15));
+    const rx = 150 + side * 38, ry = 252, ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca;
+    c.beginPath(); c.moveTo(rx + px * 8, ry + py * 8); c.lineTo(rx + ca * L * .55 + px * 6, ry + sa * L * .55 + py * 6);
+    c.lineTo(rx + ca * L, ry + sa * L); c.lineTo(rx - px * 5, ry - py * 5); c.closePath();
+    c.fillStyle = INK; c.fill(); c.strokeStyle = edge; c.lineWidth = 1; c.stroke();
+    if (S.scorch > .05) {
+      const tx = rx + ca * L, ty = ry + sa * L;
+      glowLine(c, EMBER, Math.min(1, S.scorch * 1.5) * (.7 + .3 * Math.sin(t * 9 + i)), 1.6, 8, () => { c.moveTo(tx - ca * 10 + px * 3, ty - sa * 10 + py * 3); c.lineTo(tx, ty); });
+      if (Math.random() < S.scorch * .08) emitBurn(tx, ty, temp);
+    }
+  }
+
+  // the silhouette itself
+  silhouette(c); c.fillStyle = INK; c.fill(); c.strokeStyle = edge; c.lineWidth = 1.2; c.stroke();
+  if (S.scorch > .03) {
+    c.save(); c.setLineDash([2 + S.scorch * 10, 10]); c.lineDashOffset = -t * 18;
+    c.shadowColor = rgba(EMBER, 1); c.shadowBlur = 8; c.strokeStyle = rgba(EMBER, Math.min(1, S.scorch * 1.6)); c.lineWidth = 1.6;
+    c.beginPath(); SIL_TOP.forEach(([x, y], k) => k ? c.lineTo(x, y) : c.moveTo(x, y)); c.stroke(); c.restore();
+    if (Math.random() < S.scorch * .25) { const [x, y] = SIL_TOP[(Math.random() * SIL_TOP.length) | 0]; emitBurn(x + (Math.random() - .5) * 10, y, temp); }
+  }
+
+  // eyes do all the acting
+  const ox = turn * 12;
+  const thinking = S.state === 'thinking' || S.state === 'acting';
+  const down = (S.activity === 'deck' && turn < -.5) || thinking ? 3 : 0;
+  const ey = 142 + down, narrow = thinking ? .45 : 1;
+  const blink = (t % 4.3) < .1 || (t % 7.1) < .08;
+  const bright = Math.min(1, .72 + pulse * .28 + (S.state === 'listening' ? .3 : 0));
+  const far = lerp(1, .25, clamp(-turn, 0, 1));
+  const eye = (x1, x2, a) => {
+    if (blink) { c.strokeStyle = rgba([255, 70, 120], .6 * a); c.lineWidth = 1; c.beginPath(); c.moveTo(x1, ey); c.lineTo(x2, ey); c.stroke(); return; }
+    glowLine(c, [255, 70, 120], bright * a, 2.8 * (narrow < 1 ? .8 : 1), 16, () => { c.moveTo(x1, ey - 3 * narrow); c.lineTo(x2, ey + 1.5 * narrow); });
+  };
+  eye(125 + ox, 139 + ox, 1);
+  eye(175 + ox, 175 + ox - 14 * lerp(1, .6, clamp(-turn, 0, 1)), far);
+
+  if (S.deck > .05) glowLine(c, CY, .8 * S.deck, 1.5, 8, () => { c.moveTo(118, 300); c.lineTo(182, 300); });
+  if (ACTIVITY[S.activity].vent && turn < -.6 && (t % 2.6) < .6 && Math.random() < .55 && S.pp.length < 320)
+    S.pp.push({ x: 92 + Math.random() * 10, y: 214, vx: -12 - Math.random() * 10, vy: -16 - Math.random() * 12, life: 0, max: 1.8 + Math.random(), s: 3 + Math.random() * 3, smoke: true, col: [205, 215, 228] });
+
+  drawFrame(c, t, hot);
+}
+
+const RENDER = { stripped: drawStripped, icarus: drawIcarus, sunward: drawSunward, engram: drawEngram, oracle: drawOracle };
+
+/* ---------- FX canvas: orb ---------- */
+const fx = $('#fx'), fctx = fx.getContext('2d');
+fx.width = 960 * DPR; fx.height = 600 * DPR;
+const OX = 904, OY = 544;
+function orbColor() {
+  if (S.state === 'confirm') return AM;
+  if (S.style === 'sunward' || S.style === 'icarus' || S.style === 'stripped') return sunColor();
+  if (S.style === 'oracle') return PALE;
+  return CY;
+}
+function drawFx(t) {
+  const c = fctx;
+  c.setTransform(DPR, 0, 0, DPR, 0, 0); c.clearRect(0, 0, 960, 600);
+  const active = S.state !== 'dormant';
+  S.orbR = lerp(S.orbR, S.state === 'listening' ? 30 : active ? 23 : 17, .12);
+  S.orbA = lerp(S.orbA, active ? 1 : .45, .08);
+  const col = orbColor();
+  const R = S.orbR * (S.state === 'dormant' ? 1 + .05 * Math.sin(t * Math.PI / 2) : 1);
+  c.globalAlpha = S.orbA;
+  let g = c.createRadialGradient(OX, OY, 0, OX, OY, R * 3);
+  g.addColorStop(0, rgba(col, .32)); g.addColorStop(1, rgba(col, 0));
+  c.fillStyle = g; c.beginPath(); c.arc(OX, OY, R * 3, 0, 7); c.fill();
+
+  if (S.style === 'engram') {
+    c.save(); c.translate(OX, OY); c.rotate(Math.PI / 4 + Math.floor(t * 6) / 6 * (active ? .6 : .1));
+    const s = R * 1.2;
+    c.fillStyle = '#04060c'; c.fillRect(-s / 2, -s / 2, s, s);
+    c.strokeStyle = rgba(col, .9); c.lineWidth = 1.5; c.strokeRect(-s / 2, -s / 2, s, s);
+    c.restore();
+    for (const ox of [-5, 5]) { c.save(); c.shadowColor = rgba(MG, 1); c.shadowBlur = 8; c.fillStyle = 'rgb(255,80,130)'; c.fillRect(OX + ox - 3, OY - 1, 6, 2); c.restore(); }
+  } else if (S.style === 'oracle') {
+    c.fillStyle = '#05070c'; c.beginPath(); c.ellipse(OX, OY, R * .7, R, 0, 0, 7); c.fill();
+    c.strokeStyle = rgba(col, .9); c.lineWidth = 1.4; c.stroke();
+    c.save(); c.shadowColor = rgba(CY, 1); c.shadowBlur = 10; c.fillStyle = 'rgba(210,255,255,.95)';
+    c.beginPath(); c.ellipse(OX, OY - R * .1, active ? 2.6 : 1, R * .35, 0, 0, 7); c.fill(); c.restore();
+  } else {
+    g = c.createRadialGradient(OX - R * .3, OY - R * .35, 1, OX, OY, R);
+    g.addColorStop(0, 'rgba(255,250,240,.95)'); g.addColorStop(.4, rgba(col, .85)); g.addColorStop(1, rgba(col, .12));
+    c.fillStyle = g; c.beginPath(); c.arc(OX, OY, R, 0, 7); c.fill();
+    c.save(); c.beginPath(); c.arc(OX, OY, R, 0, 7); c.clip(); c.globalCompositeOperation = 'destination-out';
+    for (let k = 0; k < 5; k++) c.fillRect(OX - R, OY + 2 + k * 4 + ((t * 4) % 4), R * 2, 1 + k * .4);
+    c.restore();
+    if (S.style === 'icarus' || S.style === 'stripped') {
+      c.save(); c.fillStyle = 'rgba(5,7,13,.85)'; c.beginPath(); c.ellipse(OX, OY - R * .1, R * .62, R * .42, 0, 0, 7); c.fill();
+      c.shadowColor = 'rgba(255,40,90,1)'; c.shadowBlur = 8; c.fillStyle = 'rgb(255,70,120)';
+      c.fillRect(OX - R * .45, OY - R * .18, R * .32, 2); c.fillRect(OX + R * .13, OY - R * .18, R * .32, 2);
+      c.restore();
+    }
+  }
+
+  c.lineWidth = 1;
+  if (S.state === 'listening') {
+    for (let i = 0; i < 56; i++) {
+      const a = i / 56 * Math.PI * 2;
+      const amp = S.level * (.35 + .65 * Math.abs(Math.sin(i * 1.7 + t * 9) * Math.cos(i * .63 - t * 5.3)));
+      const r1 = R + 7, r2 = r1 + 3 + amp * 24;
+      c.strokeStyle = rgba(col, .85); c.lineWidth = 2;
+      c.beginPath(); c.moveTo(OX + Math.cos(a) * r1, OY + Math.sin(a) * r1); c.lineTo(OX + Math.cos(a) * r2, OY + Math.sin(a) * r2); c.stroke();
+    }
+  } else if (S.state === 'thinking' || S.state === 'acting') {
+    c.lineWidth = 1.5; c.setLineDash([7, 9]);
+    c.strokeStyle = rgba(col, .8); c.beginPath(); c.arc(OX, OY, R + 10, t * 2.2, t * 2.2 + Math.PI * 2); c.stroke();
+    c.setLineDash([3, 12]); c.strokeStyle = rgba(col, .5); c.beginPath(); c.arc(OX, OY, R + 17, -t * 1.4, -t * 1.4 + Math.PI * 2); c.stroke();
+    c.setLineDash([]);
+  } else if (S.state === 'confirm') {
+    c.strokeStyle = rgba(AM, .5 + .5 * Math.abs(Math.sin(t * 4))); c.lineWidth = 2;
+    c.beginPath(); c.arc(OX, OY, R + 10, 0, 7); c.stroke();
+  } else {
+    c.strokeStyle = rgba(col, .4 + S.pulse * .5); c.lineWidth = 1 + S.pulse * 1.5;
+    c.beginPath(); c.arc(OX, OY, R + 8 + S.pulse * 6, 0, 7); c.stroke();
+  }
+  if (S.unread) {
+    const a = t * 1.3, rr = R + 16, x = OX + Math.cos(a) * rr, y = OY + Math.sin(a) * rr * .55;
+    const gg = c.createRadialGradient(x, y, 0, x, y, 9); gg.addColorStop(0, rgba(MG, .9)); gg.addColorStop(1, rgba(MG, 0));
+    c.fillStyle = gg; c.beginPath(); c.arc(x, y, 9, 0, 7); c.fill();
+    c.fillStyle = '#ffd5e1'; c.beginPath(); c.arc(x, y, 2.2, 0, 7); c.fill();
+  }
+  c.globalAlpha = 1;
+}
+
+/* ---------- character compositing ---------- */
+const cv = $('#char'), cctx = cv.getContext('2d');
+cv.width = W; cv.height = H;
+const mk = () => { const o = document.createElement('canvas'); o.width = W; o.height = H; return o; };
+const off = mk(), tintA = mk(), tintB = mk();
+const octx = off.getContext('2d');
+const scan = (() => { const p = document.createElement('canvas'); p.width = 1; p.height = Math.round(3 * DPR); const x = p.getContext('2d'); x.fillStyle = 'rgba(0,0,0,.32)'; x.fillRect(0, 0, 1, Math.max(1, Math.round(DPR))); return cctx.createPattern(p, 'repeat'); })();
+
+function tint(src, dst, color) {
+  const d = dst.getContext('2d');
+  d.globalCompositeOperation = 'source-over'; d.clearRect(0, 0, W, H); d.drawImage(src, 0, 0);
+  d.globalCompositeOperation = 'source-atop'; d.fillStyle = color; d.fillRect(0, 0, W, H);
+  d.globalCompositeOperation = 'source-over';
+}
+
+function drawChar(t, dt) {
+  if (S.p <= .001 && !cut.on) { cctx.setTransform(1, 0, 0, 1, 0, 0); cctx.clearRect(0, 0, W, H); S.pp = []; return; }
+  const tq = S.step / 12;
+  const env = {
+    t, tq, turn: S.style === 'icarus' ? Math.max(-1.4, S.turn) : Math.max(-1, S.turn), pulse: S.pulse,
+    J: i => (hash(i * 3.17 + S.step * 1.913) - .5) * 1.1,
+    wind: i => Math.sin(tq * 2.3 + i * 1.7) * .7 + Math.sin(tq * 5.1 + i * .9) * .3
+  };
+  const frozen = t < S.freezeUntil;
+  const o = octx;
+  if (!frozen) {
+  o.setTransform(1, 0, 0, 1, 0, 0); o.clearRect(0, 0, W, H);
+  o.setTransform(DPR, 0, 0, DPR, OFFX * DPR, OFFY * DPR); o.lineJoin = 'round';
+  RENDER[S.style](o, env);
+  // particles
+  S.pp = S.pp.filter(p => (p.life += dt) < p.max);
+  for (const p of S.pp) {
+    if (p.g) p.vy += p.g * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    const a = (1 - p.life / p.max) * (p.ash ? .8 : 1);
+    if (p.smoke) { const r = p.s * (1 + 1.5 * p.life / p.max); const sg = o.createRadialGradient(p.x, p.y, 0, p.x, p.y, r); sg.addColorStop(0, rgba(p.col, .3 * a)); sg.addColorStop(1, rgba(p.col, 0)); o.fillStyle = sg; o.beginPath(); o.arc(p.x, p.y, r, 0, 7); o.fill(); }
+    else if (p.ch) { o.font = '500 9px "JetBrains Mono", monospace'; o.fillStyle = rgba(p.col, a * .9); o.fillText(p.ch, p.x, p.y); }
+    else { o.fillStyle = rgba(p.col, a); o.fillRect(p.x, p.y, p.s, p.s); }
+  }
+
+  tint(off, tintA, '#ff2a6d'); tint(off, tintB, '#2a7dff');
+  }
+  const c = cctx, mul = GLITCH[S.style];
+  c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W, H);
+  const glitch = t < S.glitchUntil;
+  const split = (glitch ? 5 : 1.3) * mul * DPR;
+  const y0 = H * (1 - S.p);
+  c.save(); c.beginPath(); c.rect(0, y0, W, H - y0); c.clip();
+  if (glitch && mul > 2 && Math.random() < .5) c.translate((Math.random() - .5) * 12 * DPR, 0); // whole-frame jolt
+  c.globalCompositeOperation = 'lighter'; c.globalAlpha = .45;
+  c.drawImage(tintA, -split, 0); c.drawImage(tintB, split, 0);
+  c.globalAlpha = .5;
+  if ('filter' in c) { c.filter = `blur(${5 * DPR}px)`; c.drawImage(off, 0, 0); c.filter = 'none'; }
+  c.globalCompositeOperation = 'source-over'; c.globalAlpha = reduce ? 1 : (Math.random() < .03 ? .82 : 1);
+  c.drawImage(off, 0, 0);
+  c.globalAlpha = 1; c.globalCompositeOperation = 'source-atop'; c.fillStyle = scan; c.fillRect(0, 0, W, H);
+  if (t < S.flashUntil) { c.fillStyle = rgba(S.flashCol, 1); c.fillRect(0, 0, W, H); }
+  if (glitch) {
+    c.globalCompositeOperation = 'source-over';
+    const n = Math.round(3 * mul);
+    for (let k = 0; k < n; k++) {
+      const y = Math.random() * H, h = (3 + Math.random() * 12) * DPR, dx = (Math.random() - .5) * 18 * mul * DPR;
+      c.clearRect(0, y, W, h);
+      c.drawImage(Math.random() < .5 ? tintA : off, 0, y, W, h, dx, y, W, h);
+    }
+  }
+  c.restore();
+  if (S.p > .001 && S.p < .999) {
+    const col = orbColor();
+    const g = c.createLinearGradient(0, y0 - 14 * DPR, 0, y0 + 2 * DPR);
+    g.addColorStop(0, rgba(col, 0)); g.addColorStop(1, rgba(col, .5));
+    c.fillStyle = g; c.fillRect(0, y0 - 14 * DPR, W, 16 * DPR);
+    c.fillStyle = 'rgba(230,255,255,.95)'; c.fillRect(0, y0, W, 1.5 * DPR);
+    for (let i = 0; i < 6; i++) { c.fillStyle = rgba(col, .8); c.fillRect(Math.random() * W, y0 + (Math.random() * 8 - 4) * DPR, (8 + Math.random() * 40) * DPR, DPR); }
+  }
+}
+
+function drawCut(t) {
+  if (!cut.on) return;
+  const c = cutCtx, CW = 960 * DPR, CH = 130 * DPR, k = t - cut.t0;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.fillStyle = '#020409'; c.fillRect(0, 0, CW, CH);
+  for (let i = 0; i < 46; i++) {
+    const len = (80 + hash(i) * 260) * DPR, x = CW - ((t * 1700 * DPR + hash(i + 3) * 3000 * DPR) % (CW + len * 2)) + len;
+    c.fillStyle = rgba(cut.col, .12 + hash(i + 7) * .3); c.fillRect(x, hash(i + 1) * CH, len, (1 + hash(i + 2) * 2) * DPR);
+  }
+  const [sx, sy, sw, sh] = CROP[S.style];
+  const zoom = 1 + Math.min(k, 1.4) * .06;
+  const dh = CH * 1.05 * zoom, dw = dh * sw / sh, dx = CW - dw - 50 * DPR, dy = (CH - dh) / 2;
+  const src = [(sx + OFFX) * DPR, (sy + OFFY) * DPR, sw * DPR, sh * DPR];
+  c.globalCompositeOperation = 'lighter'; c.globalAlpha = .55;
+  c.drawImage(tintA, ...src, dx - 6 * DPR, dy, dw, dh); c.drawImage(tintB, ...src, dx + 6 * DPR, dy, dw, dh);
+  c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+  c.drawImage(off, ...src, dx, dy, dw, dh);
+  c.fillStyle = scan; c.fillRect(0, 0, CW, CH);
+  const vg = c.createLinearGradient(dx - 40 * DPR, 0, dx + 120 * DPR, 0);
+  vg.addColorStop(0, 'rgba(2,4,9,1)'); vg.addColorStop(1, 'rgba(2,4,9,0)');
+  c.fillStyle = vg; c.fillRect(dx - 40 * DPR, 0, 160 * DPR, CH);
+}
+
+/* ---------- loop ---------- */
+let last = performance.now();
+function frame(now) {
+  const t = now / 1000, dt = Math.min(.05, (now - last) / 1000); last = now;
+  const up = S.pTarget > S.p;
+  const rate = reduce ? 10 : up ? 1 / .75 : 1 / .6;
+  S.p = up ? Math.min(S.pTarget, S.p + rate * dt) : Math.max(S.pTarget, S.p - rate * dt);
+  if (!reduce) {
+    const mul = GLITCH[S.style];
+    if (S.p > 0 && S.p < 1 && Math.random() < .1) S.glitchUntil = t + .06;
+    else if (S.p >= 1 && Math.random() < .004 * mul) S.glitchUntil = t + .08;
+  }
+  panel.style.setProperty('--p', S.p.toFixed(3));
+  panel.style.visibility = S.p > .001 ? 'visible' : 'hidden';
+
+  // posed values move "on twos": only on 12 fps steps, so motion reads drawn, not tweened
+  const step = Math.floor(t * 12);
+  if (S.state === 'speaking' && t > S.nextGlance) { S.glanceUntil = t + .7; S.nextGlance = t + 4 + Math.random() * 3; }
+  if (step !== S.step) {
+    S.step = step;
+    const pose = poseTarget(t);
+    const rate = S.p < .05 ? 1 : S.state === 'linger' ? .09 : .3;
+    S.turn = lerp(S.turn, pose.turn, rate);
+    if (Math.abs(S.turn - pose.turn) < .01) S.turn = pose.turn;
+    S.deck = lerp(S.deck, pose.deck, rate === 1 ? 1 : .3);
+    if (!S.answered && S.p > .5 && S.turn > -.15) { S.answered = true; S.spreadUntil = t + .7; }
+    S.spread = lerp(S.spread, t < S.spreadUntil ? 1 : S.state === 'confirm' ? .7 : 0, .35);
+  }
+  // slow scorch: burns while the GPU runs hot, re-forms (more slowly) once it cools
+  const heat = S.gpu / 100;
+  S.scorch = clamp(S.scorch + (heat > .55 ? dt * .07 * (heat - .55) / .45 : -dt * .025), 0, 1);
+  const stage5 = Math.floor(S.scorch * 5);
+  if ((S.style === 'icarus' || S.style === 'stripped') && S.p > .9 && !reduce) {
+    if (stage5 > S.burnStage) S.glitchUntil = t + .18;
+    if (S.scorch > .55 && !S.hotCut) { S.hotCut = true; cutIn('RUNNING HOT', EMBER, 1300, 'GPU ' + S.gpu + '% // WINGS FAILING'); S.glitchUntil = t + .25; }
+  }
+  S.burnStage = stage5;
+  if (S.scorch < .2) S.hotCut = false;
+  S.level = lerp(S.level, S.state === 'listening' ? .3 + .7 * Math.abs(Math.sin(t * 7.3) * Math.sin(t * 2.1 + 1)) : 0, .2);
+  S.pulse = lerp(S.pulse, S.mouthT.h / 7.5, .35);
+
+  drawFx(t);
+  drawChar(t, dt);
+  drawCut(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>

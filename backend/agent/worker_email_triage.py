@@ -111,6 +111,9 @@ class EmailTriageWorker(WorkerBase):
         )
 
         try:
+            # Triage isn't urgent: let a live desktop conversation have the model first.
+            from backend.agent.foreground import wait_until_idle
+            await wait_until_idle(label="triage")
             response = await generate(
                 task_type="scoring",
                 messages=[{"role": "user", "text": prompt}],
@@ -402,6 +405,8 @@ class EmailTriageWorker(WorkerBase):
                 "user_id": os.environ.get("DISCORD_OPERATOR_ID", "0"),
                 "message": classification_text,
                 "source_id": source_id,
+                "urgency": urgency,
+                "action_needed": bool(classification.get("action_needed", False)),
             })
             await redis.lpush("icarus:councilor:responses", response_payload)
             logger.info(f"[triage] Queued notification for '{subject[:50]}'")
@@ -417,8 +422,10 @@ class EmailTriageWorker(WorkerBase):
 
         logger.info(f"[triage] Processing message {message_id}")
 
+        from backend.agent.busy import busy
         try:
-            await self._process_message(message_id)
+            async with busy("email"):
+                await self._process_message(message_id)
         except Exception as e:
             logger.error(f"[triage] Unhandled error processing {message_id}: {e}", exc_info=True)
 

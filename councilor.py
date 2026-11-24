@@ -641,11 +641,18 @@ def _dispatch_key(req_type: str, data: dict) -> str:
     return f"{req_type}-{data.get('timestamp', int(time.time()))}-{uuid.uuid4().hex[:4]}"
 
 
+async def _shown_busy(source: str, coro, ttl: float = 600):
+    """Run a request handler as a thought bubble on the desktop avatar (backend/agent/busy.py)."""
+    from backend.agent.busy import busy
+    async with busy(source, ttl=ttl):
+        return await coro
+
+
 def _handle_request(data: dict) -> asyncio.Task:
     """Route one decoded request to its handler and start it concurrently."""
     req_type = data.get("type", "consultation")
     if req_type in ("escalation", "delegation"):
-        coro = process_delegation(data)
+        coro = _shown_busy("subagent", process_delegation(data), ttl=3600)
     elif req_type == "deploy_check":
         coro = process_deploy_check(data)
     elif req_type == "deploy_apply":
@@ -654,8 +661,10 @@ def _handle_request(data: dict) -> asyncio.Task:
         coro = process_subagent_create(data)
     elif req_type == "subagent_stop":
         coro = process_subagent_stop(data)
+    elif req_type == "claude_code":
+        coro = process_claude_code(data)
     else:
-        coro = process_consultation(data)
+        coro = _shown_busy("councilor", process_consultation(data))
     return _dispatch(_dispatch_key(req_type, data), coro)
 
 
@@ -906,6 +915,121 @@ async def process_delegation(data: dict):
         notify_label=f"{label} {'Failed' if envelope.status == STATUS_FAILED else 'Complete'}",
     )
     logger.info(f"[{req.task_id}] {req.kind} {envelope.status} ({len(envelope.summary)} chars summary)")
+
+
+# ── Claude Code tasks (desktop avatar, Phase 4) ──────────────────────────────
+# Requested by L1's run_claude_task tool after the operator confirmed it on the
+# desktop. Runs `claude -p` headless (backend/agent/claude_runner.py): `ask` is
+# read-only in the project, `edit` works in a git worktree on claude/<task_id>,
+# then lands the commit on the checked-out branch (or holds it there, saying why).
+# Same registry, envelope and delivery as
+# a delegated task, so check_task_status and the desktop pop-ups just work.
+
+async def _task_event(task_id: str, text: str, done: bool = False, ok: bool = True, step: bool = True, **meta):
+    """meta (title, project, mode, started) lets the avatar's task badge name the task."""
+    from backend.agent.busy import task_update
+    await task_update(task_id, text, done=done, ok=ok, step=step, ttl=3600, **meta)
+
+
+def restart_hint(project_name: str, files: list[str]) -> list[str]:
+    """Which parts of Icarus must restart to load a change to these files (restart_icarus names)."""
+    if project_name != "icarus":
+        return []
+    parts = set()
+    for f in files:
+        if f.startswith("desktop/"):
+            parts.add("desktop")
+        elif f == "councilor.py":
+            parts.add("councilor")
+        elif f.startswith("backend/") and "/tests/" not in f:
+            parts.update(("api", "councilor"))   # the Councilor imports backend.agent modules too
+    return [p for p in ("api", "councilor", "desktop") if p in parts]
+
+
+async def process_claude_code(data: dict):
+    from types import SimpleNamespace
+    from backend.agent.claude_runner import MODES, parse_projects, parse_workspaces, run_claude, run_workspace
+    from backend.agent.delegation import CompletionEnvelope, STATUS_COMPLETED, STATUS_FAILED, new_task_id
+    from backend.agent.subagent_registry import (
+        KIND_ONESHOT as REG_KIND_ONESHOT, STATUS_RUNNING as REG_STATUS_RUNNING,
+        STATUS_COMPLETED as REG_STATUS_COMPLETED, STATUS_FAILED as REG_STATUS_FAILED,
+    )
+
+    timestamp = int(data.get("timestamp") or time.time())
+    task_id = data.get("task_id") or new_task_id(timestamp)
+    project_name = str(data.get("project") or "").lower()
+    workspace = parse_workspaces().get(project_name)      # a looser kind of project: mode "work", a folder per area
+    area = str(data.get("area") or "").strip()
+    mode = "work" if workspace else (data.get("mode") if data.get("mode") in MODES else "ask")
+    task = str(data.get("task") or "").strip()
+    req = SimpleNamespace(
+        task_id=task_id, timestamp=timestamp, response_type="delegation", kind="claude_code",
+        platform=data.get("platform"), chat_id=data.get("chat_id"), thread_id=f"sub-{task_id}",
+        needs_repo_write=mode == "edit",
+    )
+    where = f"{project_name}/{area}" if workspace else project_name
+    intent = f"[claude {mode} · {where}] {task}"
+    await _registry_call("create(claude)", lambda: _registry().create(
+        task_id=task_id, kind=REG_KIND_ONESHOT, request_type="claude_code", intent=intent,
+        capabilities=["claude_code"], needs_network=True, needs_repo_write=mode == "edit",
+        platform=req.platform, chat_id=req.chat_id, user_id=data.get("user_id"),
+        thread_id=req.thread_id, status=REG_STATUS_RUNNING,
+    ))
+    projects = parse_projects()
+    project = projects.get(project_name)
+    if not task or (project is None and workspace is None):
+        known = list(projects) + list(parse_workspaces())
+        error = "no task given" if not task else f"unknown project {project_name!r} (configured: {', '.join(known) or 'none'})"
+        result = None
+    else:
+        meta = {"title": task.splitlines()[0][:80], "project": where, "mode": mode, "started": time.time()}
+        verb = {"edit": "editing", "work": "working in"}.get(mode, "looking into")
+        await _task_event(task_id, f"Claude: {verb} {where}", step=False, **meta)
+        try:
+            if workspace:
+                result = await run_workspace(task_id=task_id, workspace=workspace, area=area, task=task,
+                                             on_progress=lambda text: _task_event(task_id, text, **meta))
+            else:
+                result = await run_claude(task_id=task_id, project_name=project_name, project=project, task=task, mode=mode,
+                                          on_progress=lambda text: _task_event(task_id, text, **meta))
+        except asyncio.CancelledError:
+            await _task_event(task_id, "Claude task stopped", done=True, ok=False)   # off the avatar's badge now
+            raise
+        error = result.error if not result.ok else None
+    failed = result is None or not result.ok
+    summary = (result.summary if result else "") or ""
+    if result and workspace and result.artifacts.get("folder"):
+        n, art = len(result.files), result.artifacts
+        names = ", ".join(result.files[:5]) + (f" and {n - 5} more" if n > 5 else "")
+        summary += (f"\n\nSaved {n} new file{'s' if n != 1 else ''} in {art['folder']}: {names}." if n
+                    else f"\n\nNo new files were saved in {art['folder']}.")
+        touched = [f"changed {f}" for f in art.get("changed", [])[:5]] + [f"deleted {f}" for f in art.get("removed", [])[:5]]
+        if touched:
+            summary += f"\nHeads up: existing files were touched ({'; '.join(touched)}). It was told not to."
+        elif not art.get("tracked", True):
+            summary += "\nThat folder is too big to check for changes to existing files."
+    elif result and result.landed_on:
+        summary += f"\n\nApplied to {result.landed_on} ({result.diffstat}). Not pushed."
+        parts = restart_hint(project_name, result.files)
+        if parts:
+            summary += (f" Takes effect after restarting: {', '.join(parts)}. Offer to do it; "
+                        f"restart_icarus(parts={parts}) runs it once the conversation ends.")
+    elif result and result.branch:
+        why = f" because {result.hold_reason}" if result.hold_reason else ""
+        summary += (f"\n\nNot applied{why}. The changes are on branch {result.branch} ({result.diffstat or 'no changes'}); "
+                    f"run `git merge {result.branch}` when ready. Worktree: {result.worktree}")
+    envelope = CompletionEnvelope.build(
+        task_id=task_id, kind="claude_code", status=STATUS_FAILED if failed else STATUS_COMPLETED,
+        raw_summary=summary, artifacts=(result.artifacts if result else {}), error=error,
+        elapsed_s=result.elapsed_s if result else 0.0,
+    )
+    await _task_event(task_id, "Claude finished" if not failed else "Claude task failed", done=True, ok=not failed)
+    await _registry_call("set_status(claude)", lambda: _registry().set_status(
+        task_id, REG_STATUS_FAILED if failed else REG_STATUS_COMPLETED,
+        error=error, result=envelope.to_dict(),
+    ))
+    await _deliver_envelope(req, envelope, notify_label=f"Claude Task {'Failed' if failed else 'Complete'}")
+    logger.info(f"[{task_id}] claude {mode} {envelope.status} in {envelope.elapsed_s:.0f}s")
 
 
 async def process_escalation(data: dict):
@@ -1175,6 +1299,8 @@ async def async_main():
         )
         if orphaned:
             logger.warning(f"[registry] {len(orphaned)} task(s) from the previous run marked failed")
+        from backend.agent.busy import clear_tasks
+        await clear_tasks()   # the avatar's task badge: nothing the old process was running is still running
         # Persistent subagents outlive this process: make Docker match the
         # registry now, and keep doing so on a timer (expired grants, crashes).
         await _reconcile_subagents("startup")

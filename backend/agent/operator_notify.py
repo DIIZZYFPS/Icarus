@@ -19,7 +19,9 @@ host venv and inside the worker image alike.
 
 import os
 import json
+import time
 import logging
+import threading
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -89,8 +91,60 @@ def send_discord(message: str, channel_id: str | None = None) -> NotifyResult:
     return result
 
 
+_dm_channel_cache: dict[str, str] = {}
+_dm_lock = threading.Lock()
+
+
+def operator_dm_channel() -> str | None:
+    """The bot's DM channel with DISCORD_OPERATOR_ID (opened once, then cached).
+    Locked so simultaneous alerts don't race to open it; one retry on failure."""
+    token, operator = os.getenv("DISCORD_BOT_TOKEN"), os.getenv("DISCORD_OPERATOR_ID")
+    if not token or not operator or operator == "0":
+        return None
+    with _dm_lock:
+        if operator in _dm_channel_cache:
+            return _dm_channel_cache[operator]
+        for attempt in (1, 2):
+            channel = _open_dm(token, operator)
+            if channel:
+                _dm_channel_cache[operator] = channel
+                return channel
+            if attempt == 1:
+                time.sleep(1)
+    return None
+
+
+def _open_dm(token: str, operator: str) -> str | None:
+    try:
+        req = urllib.request.Request(
+            "https://discord.com/api/v10/users/@me/channels",
+            data=json.dumps({"recipient_id": operator}).encode(),
+            headers={"Authorization": f"Bot {token}", "Content-Type": "application/json", "User-Agent": USER_AGENT},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            channel = json.loads(resp.read().decode() or "{}").get("id")
+    except Exception as e:
+        logger.warning(f"Failed to open the operator DM channel: {e}")
+        return None
+    return str(channel) if channel else None
+
+
+def send_operator_dm(message: str) -> NotifyResult:
+    """DM the operator. Never falls back to the server channel: alerts and
+    reminders are private, so if the DM can't be opened, nothing is sent."""
+    channel = operator_dm_channel()
+    if not channel:
+        logger.warning("Operator DM unavailable (check DISCORD_OPERATOR_ID / bot token); alert not sent")
+        return NotifyResult("discord", None)
+    return send_discord(message, channel)
+
+
 def notify(platform: str | None, chat_id: str | None, message: str) -> NotifyResult:
-    """Send to the originating platform; Telegram is the fallback, as before."""
+    """Send to the originating platform; Telegram is the fallback, as before.
+    Desktop conversations have nothing to write back into, so their messages go to
+    the operator's Discord DM (the desktop avatar announces them separately)."""
     if platform == "discord":
         return send_discord(message, chat_id)
+    if platform == "desktop":
+        return send_operator_dm(message)
     return send_telegram(message, chat_id)

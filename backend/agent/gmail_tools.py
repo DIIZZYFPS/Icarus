@@ -385,6 +385,8 @@ async def gmail_setup_watch(topic_name: str) -> dict | None:
         return result
     except Exception as e:
         logger.error(f"Failed to setup Gmail watch: {e}")
+        from backend.agent.google_auth_health import report_google_auth_failure
+        await report_google_auth_failure("Gmail", e)
         return None
 
 

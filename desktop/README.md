@@ -1,0 +1,120 @@
+# Icarus desktop avatar
+
+Voice and hands for Icarus on the desktop: hold a hotkey, talk, and Icarus answers out loud as the avatar in the bottom-right corner. It can open apps, focus windows, control media and play things on Spotify. Design: `icarus_desktop_avatar.md` in the repo root.
+
+```
+desktop/
+  icarus_desktop/   daemon (Python 3.12 venv): mic, speech-to-text, voice, actions, link to icarus-api
+  renderer/         avatar overlay (system Python: GTK3 + gtk-layer-shell + Cairo), display only
+  bin/icarus-desktop  wrapper used by Hyprland binds and systemd
+  systemd/          user unit
+  tests/            daemon tests
+```
+
+## Setup
+
+1. **Daemon venv** (already created on this machine):
+   ```sh
+   uv venv desktop/.venv --python 3.12
+   uv pip install --python desktop/.venv/bin/python -r desktop/requirements.txt
+   ```
+   The overlay uses the system Python and needs `python-gobject`, `python-cairo` and `gtk-layer-shell` (GTK3) from pacman.
+
+2. **Voice:** download a Piper voice into `desktop/voices/` (ignored by git). The default is `en_US-ryan-high`:
+   ```sh
+   cd desktop/voices
+   for f in en_US-ryan-high.onnx en_US-ryan-high.onnx.json; do
+     curl -LO "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/$f"; done
+   ```
+   For the Kokoro engine, also fetch `kokoro-v1.0.onnx` and `voices-v1.0.bin` from
+   https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0 into the same folder.
+   The speech-to-text model (`small.en`) downloads itself on first start.
+
+3. **Token:** set `DESKTOP_TOKEN` in the repo `.env` to a long random string. Both icarus-api and the daemon read it, and icarus-api refuses the desktop link without it.
+
+4. **Restart icarus-api** so it loads the new route and the token. Use `--no-deps`, or compose also recreates Redis and wipes session state:
+   ```sh
+   docker compose up -d --no-deps icarus-api
+   ```
+
+5. **Hyprland binds** (`~/.config/hypr/hyprland.conf`): hold SUPER+I to talk, SUPER+Escape to cancel.
+   ```
+   bind  = SUPER, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl listen-start
+   bindr = SUPER, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl listen-stop
+   bind  = SUPER, Escape, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl cancel
+   bind  = SUPER SHIFT, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl look-start
+   bindr = SUPER SHIFT, I, exec, ~/Projects/Icarus/desktop/bin/icarus-desktop ctl listen-stop
+   ```
+   SUPER+SHIFT+I works like SUPER+I but also sends a screenshot of the focused window with your question ("what's this error?"). Nothing is captured without that keypress, a scan line sweeps the window so you can see it happen, and the image is never written to disk.
+   If release events ever misbehave, bind `ctl toggle` to a single key instead (tap to start, tap to send).
+
+6. **Run it:**
+   ```sh
+   desktop/bin/icarus-desktop run            # foreground, spawns the overlay
+   # or as a user service:
+   cp desktop/systemd/icarus-desktop.service ~/.config/systemd/user/
+   systemctl --user enable --now icarus-desktop
+   ```
+   The user service needs the Wayland session environment. If it can't open the overlay, add `exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP` to the Hyprland config.
+
+## Conversations
+
+After he answers, the mic reopens for a few seconds with "ANYTHING ELSE?" under the orb. Just keep talking to continue; say "that's all", "no thanks" or "never mind", or stay quiet, and he leaves. Pressing SUPER+I during that window works too.
+
+Talk over him while he's speaking and he stops, drops the rest of that reply, and listens (`DESKTOP_BARGE_IN=1`). It only works while the default output looks like headphones, because the mic must not hear him: names containing "headphone", "headset" or "bluez_output" count, and `DESKTOP_BARGE_IN_SINKS` adds fragments for other devices (find the name with `pactl get-default-sink`). Work already handed to background tasks keeps running.
+
+## Show me
+
+Ask him to explain something visual and he puts it on a board next to the avatar instead of reading it out: code with the lines he's talking about lit up, a table that fills in cell by cell (DP), or a boxes-and-arrows diagram. Say "keep it" to pop the board out to a browser tab that stays after he leaves and follows along live. Try the overlay alone with `python3 desktop/renderer/avatar.py --board-demo table` (or `code`, `graph`).
+
+## Claude workspaces
+
+Besides code projects (`DESKTOP_CLAUDE_PROJECTS`), Claude tasks can run in a workspace: a folder with a sub-folder per area, such as `~/Courses/<course>`. `DESKTOP_CLAUDE_WORKSPACES=courses=~/Courses+canvas` defines one; `+canvas` gives its tasks a read-only `canvas` command that uses `CANVAS_BASE_URL` and `CANVAS_API_TOKEN` from `.env`. Say "grab this assignment and work on it for CS4440" (with the assignment on screen, if you like): Icarus reads the screenshot into the task, Claude works in `~/Courses/CS4440` (matched to an existing folder ignoring case), puts what it makes where it belongs in that folder, and he tells you what it saved when it's done. No confirmation is asked, because nothing there can submit or change anything.
+
+What a workspace task can and can't do: read and write only inside that area's folder, search the web, run `canvas get` / `canvas download`, and run the usual test commands. It gets a minimal environment (none of Icarus's other tokens), no general shell, and `curl`/`env` are refused. Both limits were checked against the real `claude` binary. Claude is told never to overwrite, edit or delete a file that was already in the folder, and that isn't enforced. Instead the folder is compared before and after: new files are listed by name, and any existing file that changed or disappeared is flagged in the notification.
+
+## Trying it without a mic
+
+```sh
+desktop/bin/icarus-desktop say "what's playing right now?"
+desktop/bin/icarus-desktop ctl status
+python3 desktop/renderer/avatar.py --demo     # overlay only, scripted walk through every state
+```
+
+## Settings (repo `.env`)
+
+| Variable | Default | |
+|---|---|---|
+| `DESKTOP_TOKEN` | (required) | shared secret for `/ws/desktop` |
+| `DESKTOP_API_URL` | `ws://127.0.0.1:8000/ws/desktop` | |
+| `DESKTOP_USER_ID` | `operator` | user id for transcripts and memory scoping (icarus-api side) |
+| `DESKTOP_OUTPUT` | compositor's choice | Hyprland output for the overlay, e.g. `DP-2` (`DESKTOP_MONITOR` takes a GDK index instead) |
+| `DESKTOP_WHISPER_MODEL` / `_DEVICE` / `_COMPUTE` | `large-v3-turbo` / `cpu` / `int8` | about 1.7 s per 5 s of speech on CPU; `small.en` is faster but mishears more; `cuda` competes with llama-server for VRAM |
+| `DESKTOP_WHISPER_BEAM` | `5` | 1 is faster, 5 is noticeably more accurate |
+| `DESKTOP_WHISPER_VOCAB` | empty | extra names to recognize (comma-separated), added to a built-in list and your Claude project names |
+| `DESKTOP_PIPER_VOICE` | `desktop/voices/en_US-ryan-high.onnx` | |
+| `DESKTOP_FOLLOWUP_SECONDS` | `8` | after answering, the mic stays open this long for a follow-up ("anything else?"); `0` turns it off |
+| `DESKTOP_END_SILENCE_SECONDS` | `1.5` | quiet after speech that ends a recording |
+| `DESKTOP_BARGE_IN` | off | `1` lets you cut him off by talking, while the output is headphones |
+| `DESKTOP_BARGE_IN_SECONDS` | `0.3` | how long you must keep talking before it counts (a cough or "mm" doesn't) |
+| `DESKTOP_BARGE_IN_SINKS` | empty | extra output-device name fragments that count as headphones, e.g. `ew300` |
+| `DESKTOP_LINGER_SECONDS` | `6` | how long he stays when follow-ups are off |
+| `DESKTOP_TTS_ENGINE` | `piper` | `piper` or `kokoro` (more natural; needs `kokoro-v1.0.onnx` + `voices-v1.0.bin` in `desktop/voices/`) |
+| `DESKTOP_KOKORO_VOICE` | `am_onyx` | e.g. `bm_lewis`, `am_fenrir`; `b*` voices are British |
+| `DESKTOP_VOICE_SPEED` | `1.0` | Base speed; short confirmations go up to 10% faster on top of it |
+| `DESKTOP_VOICE_FX` | `0` | 0 to 1, the "construct" processing (chorus + faint ring mod) |
+| `DESKTOP_VOICE_ROOM` | `1` | 0 to 1, the "machine" room he plays through (body EQ, stereo reflections, faint floor); 0 is dry |
+| `DESKTOP_APP_DENYLIST` | empty | comma-separated app names `open_app` must refuse |
+| `DESKTOP_UNREAD_WINDOW_HOURS` | `6` | unanswered notifications younger than this count as unread |
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | empty | from a free app at developer.spotify.com; without them "play X" opens a Spotify search instead of playing |
+
+## What Icarus can do from here
+
+Typed actions only, never a shell: `open_app` (installed, visible `.desktop` entries only, launched via `hyprctl dispatch exec gtk-launch`), `focus_window`, `media_control`, `now_playing`, `spotify_play`, `show_on_screen`. These tools exist only in desktop-platform turns, and only while the daemon is connected.
+
+## Tests
+
+```sh
+PYTHONPATH=desktop desktop/.venv/bin/python -m unittest discover -s desktop/tests
+docker exec -w /app icarus-api python -m unittest backend.tests.test_desktop
+```

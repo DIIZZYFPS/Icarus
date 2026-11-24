@@ -12,6 +12,7 @@ about.
 """
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,7 +57,14 @@ class ProcessDelegationTests(unittest.IsolatedAsyncioTestCase):
         async def fake_publish_activity(**kw):
             self.activity.append(kw)
 
+        # A throwaway registry: the default path is the live Councilor's database.
+        self.tmp = tempfile.TemporaryDirectory()
+        from backend.agent.subagent_registry import SubagentRegistry
+        self.registry = SubagentRegistry(Path(self.tmp.name) / "councilor.db")
+        await self.registry.init()
+
         self._patches = [
+            mock.patch.object(councilor, "_registry", lambda: self.registry),
             mock.patch.object(councilor, "_get_redis", fake_get_redis),
             mock.patch.object(councilor, "_notify", lambda p, c, m: self.notified.append((p, c, m))),
             mock.patch("backend.agent.activity_repo.publish_activity", fake_publish_activity),
@@ -68,6 +76,8 @@ class ProcessDelegationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         for p in self._patches:
             p.stop()
+        await self.registry.close()
+        self.tmp.cleanup()
 
     def _mailbox(self) -> list[dict]:
         return [json.loads(raw) for raw in self.redis.mailbox]

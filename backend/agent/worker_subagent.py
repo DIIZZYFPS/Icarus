@@ -331,11 +331,13 @@ class PersistentSubagent:
         supervisor = self._supervisor_factory() if self._supervisor_factory else self._supervisor
         if supervisor is not None:
             kwargs["supervisor"] = supervisor
+        from backend.agent.busy import busy
         try:
-            outcome = await loop(
-                initial_prompt=prompt, tools=self.tools, system_instruction=self.system_prompt,
-                max_turns=MAX_TURNS_PER_CYCLE, **kwargs,
-            )
+            async with busy("subagent"):
+                outcome = await loop(
+                    initial_prompt=prompt, tools=self.tools, system_instruction=self.system_prompt,
+                    max_turns=MAX_TURNS_PER_CYCLE, **kwargs,
+                )
         except Exception as e:
             # A failed cycle is still a cycle: record it so the next prompt
             # (and anyone reading state.db) can see what went wrong.

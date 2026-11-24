@@ -15,6 +15,8 @@ Usage:
     with server.patched():
         result = await local_agent_loop(...)
     server.requests  # -> list of request bodies, in order
+
+Requests with "stream": true get the same scripted response as SSE chunks.
 """
 
 import json
@@ -57,6 +59,24 @@ def error_response(status: int = 500, text: str = "boom") -> dict:
     return {"__http_error__": status, "text": text}
 
 
+def _as_sse(response: dict, piece: int = 4) -> str:
+    """Replay a scripted response the way llama-server streams one: content in
+    small deltas, each tool call's name first and its arguments in pieces."""
+    message = response["choices"][0]["message"]
+    chunks = [{"choices": [{"delta": {"reasoning_content": "hmm"}}]}]  # never passed on
+    text = message.get("content") or ""
+    chunks += [{"choices": [{"delta": {"content": text[i:i + piece]}}]} for i in range(0, len(text), piece)]
+    for index, call in enumerate(message.get("tool_calls") or []):
+        fn = call["function"]
+        chunks.append({"choices": [{"delta": {"tool_calls": [
+            {"index": index, "id": call["id"], "type": "function", "function": {"name": fn["name"], "arguments": ""}}]}}]})
+        args = fn["arguments"]
+        chunks += [{"choices": [{"delta": {"tool_calls": [{"index": index, "function": {"arguments": args[i:i + piece]}}]}}]}
+                   for i in range(0, len(args), piece)]
+    chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    return "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+
+
 class ScriptedLlamaServer:
     """`responses` is a list replayed in order — or, with `route`, a dict of
     lists keyed by whatever route(request_body) returns, so concurrent loops
@@ -84,6 +104,9 @@ class ScriptedLlamaServer:
         nxt = queue.pop(0)
         if "__http_error__" in nxt:
             return httpx.Response(nxt["__http_error__"], text=nxt.get("text", ""))
+        if body.get("stream"):
+            return httpx.Response(200, content=_as_sse(nxt).encode(),
+                                  headers={"content-type": "text/event-stream"})
         return httpx.Response(200, json=nxt)
 
     def patched(self):

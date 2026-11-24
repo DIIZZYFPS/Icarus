@@ -11,6 +11,7 @@ from backend.database.connection import init_db
 from backend.routes import webhook
 from backend.routes import dashboard
 from backend.routes import triage
+from backend.routes import desktop
 from backend.agent.heartbeat import run_heartbeat
 from backend.agent.discord_bot import run_discord_bot
 from backend.agent.gmail_watcher import run_gmail_watcher
@@ -18,7 +19,6 @@ from backend.agent.metrics_consumer import run_metrics_consumer
 from backend.agent.activity_consumer import run_activity_consumer
 from backend.agent.calendar_watcher import run_calendar_watcher
 from backend.agent.spam_sweep import run_spam_sweep
-from backend.agent.github_repo_producer import run_repo_producer
 
 # Setup logging
 logging.basicConfig(
@@ -143,7 +143,8 @@ async def lifespan(app: FastAPI):
     activity_task = asyncio.create_task(run_activity_consumer())
     calendar_task = asyncio.create_task(run_calendar_watcher())
     spam_sweep_task = asyncio.create_task(run_spam_sweep())
-    repo_producer_task = asyncio.create_task(run_repo_producer())
+    from backend.agent.desktop_notify import run_announcement_consumer
+    desktop_announce_task = asyncio.create_task(run_announcement_consumer())
 
 
     # Start Gmail watcher if Pub/Sub is configured
@@ -154,13 +155,13 @@ async def lifespan(app: FastAPI):
 
     yield
     heartbeat_task.cancel()
+    desktop_announce_task.cancel()
     discord_task.cancel()
     supervisor_task.cancel()
     metrics_task.cancel()
     activity_task.cancel()
     calendar_task.cancel()
     spam_sweep_task.cancel()
-    repo_producer_task.cancel()
 
     if gmail_task:
         gmail_task.cancel()
@@ -172,6 +173,7 @@ app = FastAPI(title="Project Icarus API", lifespan=lifespan)
 app.include_router(webhook.router)
 app.include_router(dashboard.router)
 app.include_router(triage.router)
+app.include_router(desktop.router)
 
 _DASHBOARD_DIR = Path(__file__).parent / "static" / "dashboard"
 if _DASHBOARD_DIR.exists():

@@ -154,13 +154,14 @@ async def run_gmail_watcher():
 
     # Register initial watch
     _last_history_id = await _register_watch()
-    if not _last_history_id:
-        logger.error("[gmail_watcher] Failed to register watch — will retry in 60s")
-        await asyncio.sleep(60)
+    delay = 60
+    while not _last_history_id:
+        # Usually an expired refresh token (google_auth_health alerts the operator); keep
+        # retrying so the watcher recovers on its own once a new token is in place.
+        logger.error(f"[gmail_watcher] Failed to register watch — retrying in {delay}s")
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 900)
         _last_history_id = await _register_watch()
-        if not _last_history_id:
-            logger.error("[gmail_watcher] Watch registration failed — watcher disabled")
-            return
 
     last_watch_time = time.monotonic()
     logger.info(f"[gmail_watcher] Watcher active, polling Pub/Sub (historyId={_last_history_id})")
