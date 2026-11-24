@@ -120,7 +120,7 @@ class ActionPolicyTests(unittest.IsolatedAsyncioTestCase):
 
 class EndOfSpeechTests(unittest.TestCase):
     def test_ends_after_speech_then_silence_once(self):
-        from icarus_desktop.daemon import EndOfSpeech
+        from icarus_desktop.vad import EndOfSpeech
         vad = EndOfSpeech(1.0)
         t = 0.0
         fired = []
@@ -131,7 +131,7 @@ class EndOfSpeechTests(unittest.TestCase):
         self.assertGreaterEqual(fired.index(True), 8 + 20 + 19)
 
     def test_silence_alone_never_ends(self):
-        from icarus_desktop.daemon import EndOfSpeech
+        from icarus_desktop.vad import EndOfSpeech
         vad = EndOfSpeech(1.0)
         self.assertFalse(any(vad.feed(.005, i * .05) for i in range(100)))
 
@@ -308,6 +308,9 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def task(self, text="Editing app.py", done=False):
+        self.daemon.on_busy({"type": "busy", "items": [], "tasks": [{"id": "sub-1", "text": text, "done": done}]})
+
     async def restart(self, parts):
         await self.daemon.run_action({"type": "action", "id": "r1", "name": "restart_icarus", "args": {"parts": parts}})
         return self.daemon.link.sent[-1]
@@ -317,36 +320,36 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
         reply = await self.restart(["desktop", "api", "councilor"])
         self.assertTrue(reply["ok"])
         self.assertIn("once this conversation ends", reply["result"])
-        self.assertFalse(self.daemon.restart_ready())          # still talking
+        self.assertFalse(self.daemon.restarter.ready())          # still talking
         self.daemon.state = "dormant"
-        self.assertTrue(self.daemon.restart_ready())
-        await self.daemon.do_restart()
+        self.assertTrue(self.daemon.restarter.ready())
+        await self.daemon.restarter.run()
         self.assertEqual([c[2:] for c in self.ran], [("icarus-api", "icarus-email_triage-1"),
                                                      ("--no-block", "restart", "icarus-councilor.service"),
                                                      ("--no-block", "restart", "icarus-desktop.service")])
-        self.assertFalse(self.daemon.pending_restart)
+        self.assertFalse(self.daemon.restarter.pending)
 
     async def test_councilor_waits_for_running_claude_tasks(self):
-        self.daemon.on_task_event({"task_id": "sub-1", "text": "Editing app.py"})
+        self.task()
         reply = await self.restart(["councilor"])
         self.assertIn("running tasks finish", reply["result"])
-        self.assertFalse(self.daemon.restart_ready())
-        self.daemon.on_task_event({"task_id": "sub-1", "text": "Claude finished", "done": True})
-        self.assertTrue(self.daemon.restart_ready())
+        self.assertFalse(self.daemon.restarter.ready())
+        self.task("Claude finished", done=True)
+        self.assertTrue(self.daemon.restarter.ready())
 
     async def test_desktop_alone_doesnt_wait_for_tasks(self):
-        self.daemon.on_task_event({"task_id": "sub-1", "text": "Editing app.py"})
+        self.task()
         await self.restart("desktop")
-        self.assertTrue(self.daemon.restart_ready())
+        self.assertTrue(self.daemon.restarter.ready())
 
     async def test_unknown_parts_are_refused_and_cancel_clears(self):
         reply = await self.restart(["desktop", "rm -rf"])
         self.assertFalse(reply["ok"])
-        self.assertFalse(self.daemon.pending_restart)
+        self.assertFalse(self.daemon.restarter.pending)
         await self.restart(["api"])
         reply = await self.restart(["cancel"])
         self.assertEqual(reply["result"], "Cancelled the pending restart.")
-        self.assertFalse(self.daemon.restart_ready())
+        self.assertFalse(self.daemon.restarter.ready())
 
 
 class BusyBubbleTests(unittest.IsolatedAsyncioTestCase):
@@ -495,6 +498,23 @@ class PopUpTests(unittest.IsolatedAsyncioTestCase):
         await self.daemon.submit("yes, read it")
         self.assertEqual(self.daemon.link.sent[-1]["reply_to"], "desktop-7")
 
+    async def test_speaking_a_popup_sends_a_receipt(self):
+        item = {"id": "desktop-8", "text": "Done.", "received": 0}
+        with mock.patch("icarus_desktop.daemon.asyncio.sleep", new=mock.AsyncMock()):
+            await self.daemon.deliver(item)
+            await self.daemon.speak_task
+        await asyncio.sleep(0)
+        self.assertEqual([m for m in self.daemon.link.sent if m["type"] == "spoken"], [{"type": "spoken", "id": "desktop-8"}])
+
+    async def test_a_resent_popup_is_ignored(self):
+        notify = {"type": "notify", "id": "desktop-9", "text": "Task done."}
+        await self.daemon.on_api_message(notify)
+        await self.daemon.on_api_message(dict(notify))     # icarus-api sends it again after a reconnect
+        self.assertEqual(len(self.daemon.announcements), 1)
+        self.daemon.announcements.clear()                  # spoken meanwhile
+        await self.daemon.on_api_message(dict(notify))
+        self.assertEqual(self.daemon.announcements, [])
+
     async def test_busy_or_fullscreen_holds_the_popup(self):
         self.daemon.state = "speaking"
         self.assertEqual(await self.daemon.suppressed(), "busy")
@@ -589,7 +609,7 @@ class BoardTests(unittest.IsolatedAsyncioTestCase):
         self.events = []
         self.daemon.bus.emit = self.events.append
         self.broadcast = []
-        self.daemon.board_server.broadcast = self.broadcast.append
+        self.daemon.board.server.broadcast = self.broadcast.append
 
     async def test_board_shows_then_beats_are_narrated_in_order(self):
         await self.daemon.run_action({"type": "action", "id": "a1", "name": "show_visual", "args": self.BOARD})
@@ -608,8 +628,8 @@ class BoardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_keep_pops_out_and_survives_him_leaving(self):
         opened = []
-        with mock.patch("icarus_desktop.daemon.write_page", lambda board, port: f"/tmp/{board['id']}.html"), \
-             mock.patch("icarus_desktop.daemon.open_page", opened.append):
+        with mock.patch("icarus_desktop.board.write_page", lambda board, port: f"/tmp/{board['id']}.html"), \
+             mock.patch("icarus_desktop.board.open_page", opened.append):
             await self.daemon.run_action({"type": "action", "id": "a1", "name": "show_visual", "args": self.BOARD})
             await self.daemon.run_action({"type": "action", "id": "a2", "name": "keep_visual", "args": {}})
         self.assertEqual(len(opened), 1)
@@ -637,7 +657,7 @@ class LayoutAndTableTests(unittest.IsolatedAsyncioTestCase):
         d.link, d.tts, d.player = FakeLink(), FakeTTS(), FakePlayer()
         events = []
         d.bus.emit = events.append
-        d.board_server.broadcast = lambda e: None
+        d.board.server.broadcast = lambda e: None
         await d.run_action({"type": "action", "id": "a", "name": "show_visual", "args": {
             "kind": "table", "title": "DP", "rows": 1, "cols": 2, "cells": [["0", ""]],
             "beats": [{"say": "Fill it.", "cells": [[0, 1]], "fill": [[0, 1, "3"]], "arrows": [[0, 0, 0, 1]]}]}})
@@ -738,7 +758,7 @@ class ConfirmTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_claude_progress_shows_as_chips_while_visible(self):
         self.daemon.state = "thinking"
-        await self.daemon.on_api_message({"type": "task_event", "task_id": "sub-1", "text": "Editing app.py"})
+        await self.daemon.on_api_message({"type": "busy", "items": [], "tasks": [{"id": "sub-1", "text": "Editing app.py"}]})
         self.assertIn({"type": "chip", "id": "task-sub-1", "text": "Editing app.py", "done": False}, self.events)
 
 
@@ -753,36 +773,52 @@ class TaskBadgeTests(unittest.IsolatedAsyncioTestCase):
     def badge(self):
         return [e for e in self.events if e["type"] == "tasks"][-1]["items"]
 
-    async def event(self, text, **extra):
-        await self.daemon.on_api_message({"type": "task_event", "task_id": "sub-1", "text": text, **extra})
+    async def work(self, *tasks):
+        await self.daemon.on_api_message({"type": "busy", "items": [], "tasks": list(tasks)})
 
     async def test_badge_shows_title_progress_and_steps_while_dormant(self):
-        meta = {"title": "fix the flaky test", "project": "icarus", "mode": "edit", "started": 1000.0}
-        await self.event("Claude: editing icarus", **meta)
-        await self.event("Reading engine.py", **meta)
-        await self.event("Editing engine.py", **meta)
+        task = {"id": "sub-1", "title": "fix the flaky test", "project": "icarus", "mode": "edit", "started": 1000.0,
+                "text": "Editing engine.py", "steps": 2, "done": False, "ok": True}
+        await self.work(task)
         [item] = self.badge()
         self.assertEqual((item["title"], item["project"], item["mode"]), ("fix the flaky test", "icarus", "edit"))
         self.assertEqual((item["text"], item["steps"], item["started"]), ("Editing engine.py", 2, 1000.0))
-        self.assertNotIn("seen", item)
+        self.assertNotIn("done", item)
         self.assertFalse(any(e["type"] == "chip" for e in self.events))   # chips only while he's on screen
 
-    async def test_done_removes_it(self):
-        await self.event("Reading a.py")
-        await self.event("Claude finished", done=True)
+    async def test_a_finished_task_leaves_the_badge(self):
+        await self.work({"id": "sub-1", "text": "Reading a.py", "started": 1.0})
+        await self.work({"id": "sub-1", "text": "Claude finished", "done": True, "started": 1.0})
         self.assertEqual(self.badge(), [])
+        await self.work()
+        self.assertEqual(self.daemon.task_progress, {})
+
+    async def test_an_unchanged_list_draws_nothing(self):
+        task = {"id": "sub-1", "text": "Reading a.py", "started": 1.0}
+        await self.work(task)
+        self.events.clear()
+        await self.work(dict(task))   # the 5-second resend
+        self.assertEqual(self.events, [])
 
     async def test_snapshot_includes_running_tasks(self):
-        await self.event("Reading a.py", title="t")
+        await self.work({"id": "sub-1", "text": "Reading a.py", "title": "t", "started": 1.0})
         self.assertEqual(next(e for e in self.daemon._snapshot() if e["type"] == "tasks")["items"][0]["title"], "t")
 
-    async def test_quiet_task_cleared_when_registry_says_nothing_runs(self):
-        await self.event("Reading a.py")
-        idle = {"type": "ambient", "heat": .3, "unread": 0, "tasks_running": 0, "recent_task": True}
-        await self.daemon.on_api_message(idle)
-        self.assertEqual(len(self.daemon.task_progress), 1)   # fresh: one bad read mustn't blink it away
-        self.daemon.task_progress["sub-1"]["seen"] -= 120
-        await self.daemon.on_api_message(idle)
+    async def test_each_step_is_a_chip_while_he_is_on_screen(self):
+        self.daemon.state = "thinking"
+        await self.work({"id": "sub-1", "text": "Reading a.py", "started": 1.0})
+        await self.work({"id": "sub-1", "text": "Editing a.py", "started": 1.0})
+        await self.work({"id": "sub-1", "text": "Claude finished", "done": True, "started": 1.0})
+        chips = [(e["text"], e["done"]) for e in self.events if e["type"] == "chip"]
+        self.assertEqual(chips, [("Reading a.py", False), ("Editing a.py", False), ("Claude finished", True)])
+
+    async def test_a_dead_feed_clears_the_badge(self):
+        await self.work({"id": "sub-1", "text": "Reading a.py", "started": 1.0})
+        self.daemon.link = FakeLink()
+        self.daemon.expire_busy()
+        self.assertTrue(self.daemon.task_progress)             # fresh: kept
+        self.daemon.busy_at -= 60
+        self.daemon.expire_busy()
         self.assertEqual(self.badge(), [])
 
 
@@ -846,7 +882,7 @@ class StreamedReplyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_board_beats_come_before_the_closing_line(self):
         turn = await self._turn()
-        self.daemon.board_action("show_visual", {"title": "Loop", "code": "for x in y:\n    pass",
+        self.daemon.board.action("show_visual", {"title": "Loop", "code": "for x in y:\n    pass",
                                                  "beats": [{"say": "First we loop over everything.", "lines": [1]}]})
         await self.daemon.on_api_message({"type": "say", "turn_id": turn, "text": "That's the whole trick."})
         await self.daemon.on_api_message({"type": "reply", "turn_id": turn, "text": "That's the whole trick.", "streamed": True})

@@ -36,15 +36,19 @@ class Recorder:
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task | None = None
         self._buf = bytearray()
+        self._preroll = 0        # bytes; >0 while only the last stretch of audio is kept (see start)
 
     @property
     def active(self) -> bool:
         return self._proc is not None
 
-    async def start(self) -> None:
+    async def start(self, preroll: float = 0.0) -> None:
+        """Open the mic. With `preroll` seconds, only that much trailing audio is kept until
+        keep() turns it into a normal recording, so the start of a sentence isn't lost."""
         if self._proc:
             return
         self._buf = bytearray()
+        self._preroll = int(preroll * MIC_RATE) * 2
         self._proc = await asyncio.create_subprocess_exec(
             "pw-record", "--raw", "--rate", str(MIC_RATE), "--channels", "1", "--format", "s16",
             "--latency", "20ms", "-",
@@ -58,10 +62,17 @@ class Recorder:
             chunk = await proc.stdout.read(1600)  # 50 ms
             if not chunk:
                 return
-            if len(self._buf) < self.max_bytes:
+            if self._preroll:
+                self._buf.extend(chunk)
+                del self._buf[:-self._preroll]
+            elif len(self._buf) < self.max_bytes:
                 self._buf.extend(chunk)
             if self.on_level:
                 self.on_level(rms(chunk))
+
+    def keep(self) -> None:
+        """End pre-roll mode: what's buffered is the start of the recording, and it grows from here."""
+        self._preroll = 0
 
     async def stop(self) -> bytes:
         proc, self._proc = self._proc, None

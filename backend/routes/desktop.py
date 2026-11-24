@@ -4,7 +4,7 @@ desktop.py — /ws/desktop, the link between icarus-api and the host desktop dae
 Protocol (JSON messages, ADR icarus_desktop_avatar.md §5.3):
 
   daemon -> server  hello{token}, utterance{turn_id, text}, action_result{id, ok, result},
-                    cancel{turn_id}, listening, ping
+                    cancel{turn_id}, listening, spoken{id}, ping
   server -> daemon  ready, status{turn_id, text}, say{turn_id, text}, reply{turn_id, text, streamed},
                     error{turn_id?, message}, action{id, name, args},
                     ambient{heat, unread, tasks_running, recent_task}, pong
@@ -144,19 +144,20 @@ BUSY_RESEND_SECONDS = 5.0   # resent even unchanged, so the daemon can tell a st
 
 
 async def _busy_loop(send) -> None:
-    """Background work for the avatar's thought bubbles (backend/agent/busy.py)."""
-    from backend.agent.busy import snapshot
+    """Background work for the avatar: thought bubbles and Claude task progress (backend/agent/busy.py)."""
+    from backend.agent.busy import snapshot, tasks_snapshot
     last, sent_at = None, 0.0
     while True:
         try:
             items = await snapshot()
+            tasks = await tasks_snapshot()
         except Exception as e:
             logger.debug(f"[desktop] busy list unavailable: {e}")
             await asyncio.sleep(BUSY_POLL_SECONDS)
             continue
-        key = [(i["id"], i["done"], i["ok"]) for i in items]
+        key = ([(i["id"], i["done"], i["ok"]) for i in items], [(t["id"], t["text"], t["done"]) for t in tasks])
         if key != last or time.monotonic() - sent_at > BUSY_RESEND_SECONDS:
-            await send({"type": "busy", "items": items})
+            await send({"type": "busy", "items": items, "tasks": tasks})
             last, sent_at = key, time.monotonic()
         await asyncio.sleep(BUSY_POLL_SECONDS)
 
@@ -273,6 +274,9 @@ async def desktop_ws(ws: WebSocket):
     set_active(session)
     turns: dict[str, asyncio.Task] = {}
     await send({"type": "ready"})
+    from backend.agent.desktop_notify import mark_spoken, unspoken
+    for payload in await unspoken():
+        await send(payload)   # pushed to an earlier connection and never spoken
     ambient = asyncio.create_task(_ambient_loop(send))
     busy_watch = asyncio.create_task(_busy_loop(send))
     logger.info("[desktop] daemon connected")
@@ -301,6 +305,8 @@ async def desktop_ws(ws: WebSocket):
                 task = turns.get(str(message.get("turn_id")))
                 if task:
                     task.cancel()
+            elif kind == "spoken":
+                await mark_spoken(str(message.get("id")))
             elif kind == "listening":
                 # The mic is open: free the model slot before the utterance arrives.
                 from backend.agent.foreground import hold

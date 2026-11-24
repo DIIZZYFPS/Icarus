@@ -23,6 +23,12 @@ class FakeHashRedis:
         for f in fields:
             self.h.pop(f, None)
 
+    async def hget(self, key, field):
+        return self.h.get(field)
+
+    async def delete(self, key):
+        self.h.clear()
+
 
 class BusyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -73,6 +79,49 @@ class BusyTests(unittest.IsolatedAsyncioTestCase):
             async with busy_mod.busy("discord"):
                 pass
         self.assertEqual(self.redis.h, {})
+
+
+class TaskProgressTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.redis = FakeHashRedis()
+        for p in (mock.patch.object(busy_mod, "_redis", lambda: self.redis),
+                  mock.patch.object(busy_mod, "_enabled", lambda: True)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def test_steps_accumulate_and_the_kickoff_line_does_not_count(self):
+        meta = {"title": "fix it", "project": "icarus", "mode": "edit", "started": 1000.0}
+        await busy_mod.task_update("sub-1", "Claude: editing icarus", step=False, **meta)
+        await busy_mod.task_update("sub-1", "Reading a.py", **meta)
+        await busy_mod.task_update("sub-1", "Editing a.py")      # no meta: earlier values carry over
+        [task] = await busy_mod.tasks_snapshot()
+        self.assertEqual((task["text"], task["steps"], task["title"], task["started"]), ("Editing a.py", 2, "fix it", 1000.0))
+        self.assertFalse(task["done"])
+        self.assertNotIn("until", task)
+
+    async def test_done_is_listed_briefly_then_pruned(self):
+        await busy_mod.task_update("sub-1", "Reading a.py")
+        await busy_mod.task_update("sub-1", "Claude finished", done=True)
+        [task] = await busy_mod.tasks_snapshot()
+        self.assertTrue(task["done"])
+        self.assertEqual(task["steps"], 1)                     # finishing isn't a step
+        entry = json.loads(self.redis.h["sub-1"])
+        entry["until"] = time.time() - 1
+        self.redis.h["sub-1"] = json.dumps(entry)
+        self.assertEqual(await busy_mod.tasks_snapshot(), [])
+        self.assertEqual(self.redis.h, {})
+
+    async def test_clear_forgets_everything(self):
+        await busy_mod.task_update("sub-1", "Reading a.py")
+        await busy_mod.clear_tasks()
+        self.assertEqual(await busy_mod.tasks_snapshot(), [])
+
+    async def test_redis_down_never_breaks_the_work(self):
+        class Down:
+            async def hget(self, *a):
+                raise ConnectionError("no redis")
+        with mock.patch.object(busy_mod, "_redis", lambda: Down()):
+            await busy_mod.task_update("sub-1", "Reading a.py")
 
 
 class ProcessMessageBusyTests(unittest.IsolatedAsyncioTestCase):

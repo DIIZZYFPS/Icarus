@@ -20,7 +20,7 @@ This is a **new platform adapter**, not a new brain. Discord and Telegram alread
 - **Icarus stays the brain, the avatar is eyes, ears and hands.** All reasoning goes through L1's existing loop. The desktop daemon never decides *what* to do; it only captures audio, renders state, and executes typed actions L1 asks for.
 - **No raw shell, ever.** Desktop actions are a closed set of typed tools (`open_app`, `media_control`, `spotify_play`, …). There is no `run_command` exposed to the desktop surface. A misheard word can at worst open the wrong app.
 - **Confirmation is enforced by the daemon, not the model.** Anything that can change files (a Claude Code edit task) requires a physical confirmation (hotkey) handled in the daemon. L1 cannot skip it by phrasing.
-- **Human review stays the gate on code changes.** Claude Code edit tasks run in a git worktree on a new branch, consistent with `icarus_overhaul.md` §2. Nothing lands on a checked-out branch or merges automatically.
+- **Human review stays the gate on code changes.** Claude Code edit tasks run in a git worktree on a new branch, consistent with `icarus_subagent_delegation.md` §2. Nothing lands on a checked-out branch or merges automatically.
 - **Local first.** Speech-to-text and text-to-speech run on this machine. No audio leaves the host and none is written to disk.
 - **The renderer is swappable.** The daemon and the renderer talk over a small event protocol (§5.3), so the orb/character art and rendering tech can change without touching audio, actions or the Icarus link.
 

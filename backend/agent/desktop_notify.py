@@ -15,6 +15,11 @@ Pop-ups that arrive close together are bundled into one spoken update. Each pop-
 is recorded as a notification on the desktop conversation, with a delivery id the
 daemon sends back with your spoken reply, so "read it" or an answer to a paused
 task resolves exactly like replying to the Discord message does.
+
+A pop-up is kept in Redis from the moment it is pushed until the daemon reports it spoken
+({"type": "spoken", "id"}). If the daemon restarts or reconnects first, the unspoken ones are
+sent again, so a daemon that was down for a moment doesn't swallow them. The daemon ignores
+ids it already holds.
 """
 
 import asyncio
@@ -29,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 ANNOUNCE_LIST = "icarus:desktop:announcements"     # Councilor (host) -> icarus-api
 BUNDLE_SECONDS = float(os.getenv("DESKTOP_ANNOUNCE_BUNDLE_SECONDS", "4"))
+UNSPOKEN_KEY = "icarus:desktop:unspoken"           # pop-ups pushed but not yet spoken: id -> payload
+UNSPOKEN_MAX_AGE = float(os.getenv("DESKTOP_ANNOUNCE_MAX_AGE_HOURS", "3")) * 3600
 RECENT_TASK_SECONDS = 60 * 60
 MESSAGE_CHARS = 1500
 
@@ -109,6 +116,50 @@ def _describe(data: dict) -> str:
     return f"{label}:\n{str(body or '')[:MESSAGE_CHARS]}"
 
 
+async def remember_unspoken(payload: dict) -> None:
+    from backend.database.redis_connection import get_redis_client
+    try:
+        await get_redis_client().hset(UNSPOKEN_KEY, payload["id"], json.dumps({**payload, "pushed": time.time()}))
+    except Exception as e:
+        logger.debug(f"[desktop-notify] couldn't keep {payload['id']} for resending: {e}")
+
+
+async def mark_spoken(delivery_id: str) -> None:
+    from backend.database.redis_connection import get_redis_client
+    try:
+        await get_redis_client().hdel(UNSPOKEN_KEY, delivery_id)
+    except Exception as e:
+        logger.debug(f"[desktop-notify] couldn't mark {delivery_id} spoken: {e}")
+
+
+async def unspoken() -> list[dict]:
+    """Pop-ups the daemon hasn't reported spoken yet, oldest first. Ones past the daemon's own
+    age limit are dropped (it would discard them anyway; Discord has the record)."""
+    from backend.database.redis_connection import get_redis_client
+    try:
+        redis = get_redis_client()
+        raw = await redis.hgetall(UNSPOKEN_KEY)
+        now, items, stale = time.time(), [], []
+        for key, value in (raw or {}).items():
+            key = key.decode() if isinstance(key, bytes) else key
+            try:
+                entry = json.loads(value)
+                fresh = now - float(entry.get("pushed") or 0) < UNSPOKEN_MAX_AGE
+            except (TypeError, ValueError):
+                entry, fresh = None, False
+            if fresh:
+                items.append(entry)
+            else:
+                stale.append(key)
+        if stale:
+            await redis.hdel(UNSPOKEN_KEY, *stale)
+        items.sort(key=lambda e: e.get("pushed") or 0)
+        return [{k: v for k, v in e.items() if k != "pushed"} for e in items]
+    except Exception as e:
+        logger.debug(f"[desktop-notify] unspoken list unavailable: {e}")
+        return []
+
+
 class Announcer:
     def __init__(self):
         self.pending: list[tuple[str, dict]] = []
@@ -177,11 +228,13 @@ class Announcer:
         session = get_active()
         if session is None:
             return
-        await session.push({
+        payload = {
             "type": "notify", "id": delivery_id, "text": text,
             "stamp": {**STAMPS[best], "sub": f"ICARUS // {count} UPDATE{'S' if count > 1 else ''}"},
             "kinds": [data.get("type") for _, data in items],
-        })
+        }
+        await remember_unspoken(payload)
+        await session.push(payload)
         logger.info(f"[desktop-notify] announced {count} item(s) as {delivery_id}")
 
 
@@ -205,29 +258,6 @@ async def link_pause(task_id: str, delivery_id: str) -> None:
 
 
 announcer = Announcer()
-
-
-TASK_EVENTS_LIST = "icarus:desktop:task_events"
-
-
-async def run_task_event_consumer() -> None:
-    """Claude task progress from the Councilor, forwarded to the avatar as live chips."""
-    from backend.agent.desktop_session import get_active
-    from backend.database.redis_connection import get_redis_client
-    redis = get_redis_client()
-    while True:
-        try:
-            item = await redis.blpop(TASK_EVENTS_LIST, timeout=5)
-            if not item:
-                continue
-            session = get_active()
-            if session is not None:
-                await session.push({"type": "task_event", **json.loads(item[1])})
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.debug(f"[desktop-notify] task event skipped: {e}")
-            await asyncio.sleep(1)
 
 
 async def run_announcement_consumer() -> None:

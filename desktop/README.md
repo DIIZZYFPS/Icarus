@@ -61,9 +61,17 @@ desktop/
 
 After he answers, the mic reopens for a few seconds with "ANYTHING ELSE?" under the orb. Just keep talking to continue; say "that's all", "no thanks" or "never mind", or stay quiet, and he leaves. Pressing SUPER+I during that window works too.
 
+Talk over him while he's speaking and he stops, drops the rest of that reply, and listens (`DESKTOP_BARGE_IN=1`). It only works while the default output looks like headphones, because the mic must not hear him: names containing "headphone", "headset" or "bluez_output" count, and `DESKTOP_BARGE_IN_SINKS` adds fragments for other devices (find the name with `pactl get-default-sink`). Work already handed to background tasks keeps running.
+
 ## Show me
 
 Ask him to explain something visual and he puts it on a board next to the avatar instead of reading it out: code with the lines he's talking about lit up, a table that fills in cell by cell (DP), or a boxes-and-arrows diagram. Say "keep it" to pop the board out to a browser tab that stays after he leaves and follows along live. Try the overlay alone with `python3 desktop/renderer/avatar.py --board-demo table` (or `code`, `graph`).
+
+## Claude workspaces
+
+Besides code projects (`DESKTOP_CLAUDE_PROJECTS`), Claude tasks can run in a workspace: a folder with a sub-folder per area, such as `~/Courses/<course>`. `DESKTOP_CLAUDE_WORKSPACES=courses=~/Courses+canvas` defines one; `+canvas` gives its tasks a read-only `canvas` command that uses `CANVAS_BASE_URL` and `CANVAS_API_TOKEN` from `.env`. Say "grab this assignment and work on it for CS4440" (with the assignment on screen, if you like): Icarus reads the screenshot into the task, Claude works in `~/Courses/CS4440` (matched to an existing folder ignoring case), puts what it makes where it belongs in that folder, and he tells you what it saved when it's done. No confirmation is asked, because nothing there can submit or change anything.
+
+What a workspace task can and can't do: read and write only inside that area's folder, search the web, run `canvas get` / `canvas download`, and run the usual test commands. It gets a minimal environment (none of Icarus's other tokens), no general shell, and `curl`/`env` are refused. Both limits were checked against the real `claude` binary. Claude is told never to overwrite, edit or delete a file that was already in the folder, and that isn't enforced. Instead the folder is compared before and after: new files are listed by name, and any existing file that changed or disappeared is flagged in the notification.
 
 ## Trying it without a mic
 
@@ -87,6 +95,9 @@ python3 desktop/renderer/avatar.py --demo     # overlay only, scripted walk thro
 | `DESKTOP_PIPER_VOICE` | `desktop/voices/en_US-ryan-high.onnx` | |
 | `DESKTOP_FOLLOWUP_SECONDS` | `8` | after answering, the mic stays open this long for a follow-up ("anything else?"); `0` turns it off |
 | `DESKTOP_END_SILENCE_SECONDS` | `1.5` | quiet after speech that ends a recording |
+| `DESKTOP_BARGE_IN` | off | `1` lets you cut him off by talking, while the output is headphones |
+| `DESKTOP_BARGE_IN_SECONDS` | `0.3` | how long you must keep talking before it counts (a cough or "mm" doesn't) |
+| `DESKTOP_BARGE_IN_SINKS` | empty | extra output-device name fragments that count as headphones, e.g. `ew300` |
 | `DESKTOP_LINGER_SECONDS` | `6` | how long he stays when follow-ups are off |
 | `DESKTOP_TTS_ENGINE` | `piper` | `piper` or `kokoro` (more natural; needs `kokoro-v1.0.onnx` + `voices-v1.0.bin` in `desktop/voices/`) |
 | `DESKTOP_KOKORO_VOICE` | `am_onyx` | e.g. `bm_lewis`, `am_fenrir`; `b*` voices are British |

@@ -22,7 +22,7 @@ Supervisor is the policy behind that hook, in two layers:
      transient error isn't worth a model round-trip), and a single loop run
      gets at most SUPERVISION_MAX_CONSULTS of them.
 
-Boundary (see icarus_overhaul.md §2): this is only ever passed into loops
+Boundary (see icarus_subagent_delegation.md §2): this is only ever passed into loops
 that run *subagents* — councilor.process_delegation and
 worker_subagent.PersistentSubagent. engine.run_icarus (L1's own loop) never
 gets a supervisor; that's enforced by construction, not configuration.

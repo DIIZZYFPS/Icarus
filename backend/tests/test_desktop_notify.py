@@ -16,8 +16,14 @@ class FakeRedis:
     async def hget(self, key, field):
         return self.hashes.get(key, {}).get(field)
 
-    async def hset(self, key, mapping):
+    async def hset(self, key, field=None, value=None, mapping=None):
+        if mapping is None:
+            mapping = {field: value}
         self.hashes.setdefault(key, {}).update({str(k): str(v) for k, v in mapping.items()})
+
+    async def hdel(self, key, *fields):
+        for f in fields:
+            self.hashes.get(key, {}).pop(f, None)
 
     async def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
@@ -130,6 +136,23 @@ class AnnouncerTests(unittest.IsolatedAsyncioTestCase):
         resolved = await resolve_paused_reply(self.redis, platform="desktop", chat_id="desktop",
                                               text="Yes, private ones too", reply_to_message_id=event["id"])
         self.assertEqual(resolved, ("sub-9", "Yes, private ones too"))
+
+    async def test_a_pushed_popup_is_kept_until_it_is_spoken(self):
+        await desktop_notify.announcer.announce([("complete", {"type": "delegation", "task_id": "sub-8", "message": "done"})])
+        sent = self.pushed[-1]
+        self.assertEqual([p["id"] for p in await desktop_notify.unspoken()], [sent["id"]])   # offered again on reconnect
+        self.assertEqual((await desktop_notify.unspoken())[0]["text"], sent["text"])
+        await desktop_notify.mark_spoken(sent["id"])
+        self.assertEqual(await desktop_notify.unspoken(), [])
+
+    async def test_old_unspoken_popups_are_dropped(self):
+        await desktop_notify.remember_unspoken({"type": "notify", "id": "desktop-old", "text": "old"})
+        await desktop_notify.remember_unspoken({"type": "notify", "id": "desktop-new", "text": "new"})
+        entry = json.loads(self.redis.hashes[desktop_notify.UNSPOKEN_KEY]["desktop-old"])
+        entry["pushed"] = time.time() - desktop_notify.UNSPOKEN_MAX_AGE - 1
+        self.redis.hashes[desktop_notify.UNSPOKEN_KEY]["desktop-old"] = json.dumps(entry)
+        self.assertEqual([p["id"] for p in await desktop_notify.unspoken()], ["desktop-new"])
+        self.assertNotIn("desktop-old", self.redis.hashes[desktop_notify.UNSPOKEN_KEY])
 
     async def test_nothing_happens_without_a_connected_daemon(self):
         desktop_session.clear_active(self.session)

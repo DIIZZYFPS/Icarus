@@ -12,9 +12,12 @@ import html
 import json
 import logging
 import subprocess
+import uuid
 from pathlib import Path
+from typing import Callable
 
 from .config import runtime_dir
+from .speech import sentences
 
 logger = logging.getLogger(__name__)
 
@@ -223,3 +226,61 @@ document.getElementById('copy').addEventListener('click', () => {{
   ws.onclose = () => {{ document.getElementById('live').textContent = 'offline'; setTimeout(connect, 3000); }};
 }})();
 </script></body></html>"""
+
+
+class Board:
+    """The board on screen, if any: shows it, pops it out to the browser, and turns its beats into narration."""
+
+    def __init__(self, emit: Callable[[dict], None], port: int):
+        self.emit = emit
+        self.port = port
+        self.server = BoardServer(port)
+        self.current: dict | None = None
+
+    def action(self, name: str, args: dict) -> tuple[bool, str]:
+        if name == "keep_visual":
+            if not self.current:
+                return False, "Nothing is on screen to keep."
+            self.pop_out()
+            return True, "Opened in his browser; it stays after I leave."
+        content = {k: v for k, v in args.items() if k not in ("beats", "keep_open", "id", "type")}
+        board = {**content, "kind": str(args.get("kind") or "code"), "title": str(args.get("title") or "Example"),
+                 "id": "b" + uuid.uuid4().hex[:8], "code": str(args.get("code") or ""), "language": str(args.get("language") or ""),
+                 "beats": [b for b in (args.get("beats") or []) if isinstance(b, dict)], "narrated": False, "popped": False}
+        self.hide()
+        self.current = board
+        if args.get("keep_open"):
+            self.pop_out()
+            return True, "Opened in his browser."
+        self.emit({"type": "board", **{k: v for k, v in board.items() if k not in ("beats", "narrated", "popped")}})
+        return True, "On screen next to the avatar."
+
+    def pop_out(self):
+        board = self.current
+        if not board or board.get("popped"):
+            return
+        board["popped"] = True
+        path = write_page(board, self.port)
+        open_page(path)
+        self.emit({"type": "board_clear"})
+        logger.info(f"[board] {board['id']} popped out to {path}")
+
+    def hide(self):
+        if self.current and not self.current.get("popped"):
+            self.emit({"type": "board_clear"})
+        self.current = None
+
+    def beats(self) -> list:
+        """The current board's narration beats as (line, focus) items, once per board."""
+        items: list = []
+        board = self.current
+        if board and board["beats"] and not board["narrated"]:
+            board["narrated"] = True
+            total = len(board["beats"])
+            for i, beat in enumerate(board["beats"]):
+                focus = {"type": "board_focus", "id": board["id"], "index": i, "total": total,
+                         "note": beat.get("note") or "",
+                         **{k: beat.get(k) or [] for k in ("lines", "cells", "fill", "arrows", "nodes", "edges")}}
+                for j, line in enumerate(sentences(beat.get("say", ""))):
+                    items.append((line, focus if j == 0 else None))
+        return items

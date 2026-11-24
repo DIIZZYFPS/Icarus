@@ -83,6 +83,9 @@ class Config:
     max_record_seconds: float = 30.0
     end_silence_seconds: float = 1.5     # silence after speech that ends a recording; 0 disables
     action_timeout: float = 12.0
+    barge_in: bool = False               # talking over him cuts him off (only while the output is headphones)
+    barge_in_seconds: float = .3         # how long you must keep talking before it counts
+    barge_in_sinks: tuple[str, ...] = () # extra output-device name fragments that count as headphones
     board_port: int = 47811                      # localhost page sync for popped-out boards
     quiet_hours: tuple[int, int] | None = None   # (start_hour, end_hour): no spoken pop-ups
     announce_max_age: float = 3 * 3600           # held pop-ups older than this are dropped (Discord has them)
@@ -124,6 +127,9 @@ def load_config() -> Config:
         max_record_seconds=_float("DESKTOP_MAX_RECORD_SECONDS", Config.max_record_seconds),
         end_silence_seconds=_float("DESKTOP_END_SILENCE_SECONDS", Config.end_silence_seconds),
         action_timeout=_float("DESKTOP_ACTION_TIMEOUT_SECONDS", Config.action_timeout),
+        barge_in=os.getenv("DESKTOP_BARGE_IN", "").strip().lower() in ("1", "true", "yes", "on"),
+        barge_in_seconds=_float("DESKTOP_BARGE_IN_SECONDS", Config.barge_in_seconds),
+        barge_in_sinks=tuple(x.strip().lower() for x in os.getenv("DESKTOP_BARGE_IN_SINKS", "").split(",") if x.strip()),
         quiet_hours=_hours(os.getenv("DESKTOP_QUIET_HOURS", "")),
         board_port=int(_float("DESKTOP_BOARD_PORT", Config.board_port)),
         announce_max_age=_float("DESKTOP_ANNOUNCE_MAX_AGE_HOURS", 3) * 3600,

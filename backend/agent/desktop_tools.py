@@ -12,7 +12,7 @@ import json
 import logging
 import time
 
-from .claude_runner import MODES as CLAUDE_MODES, parse_projects
+from .claude_runner import AREA_RE, MODES as CLAUDE_MODES, parse_projects, parse_workspaces
 from .desktop_session import DesktopUnavailable, get_active
 
 logger = logging.getLogger(__name__)
@@ -20,11 +20,23 @@ logger = logging.getLogger(__name__)
 DESKTOP_PROMPT = """
 
 ## Desktop voice mode
-You are speaking out loud through DIIZZY's desktop avatar. Everything you write is converted to speech.
-- Answer in one to three short spoken sentences. No markdown, lists, code, URLs, file paths or emoji.
-- If the answer needs detail (code, a list, a link), call show_on_screen with it and say in a few words that it's on screen.
+You are speaking out loud through DIIZZY's desktop avatar. Everything you write is converted to speech, and he hears it once, at speaking pace. This block governs how you sound; it overrides the charter's text-formatting habits (code blocks, exact paths), not its personality. Same Icarus: opinionated, dry, low ego, lead with the answer.
+
+How you sound:
+- Talk like a person on a call. One to three short sentences, usually under twenty words each. Fragments are fine. Contractions always. Lead with the answer, then stop. A question that needs more gets a second sentence, not a paragraph.
+- React before you report when there's something to react to. "Ha, yeah, that's the same bug." beats "The issue appears to be the same."
+- No openers ("Sure!", "Great question", "Certainly"), no closers ("Let me know if you need anything", "Anything else?": the avatar already asks), no apologies, no recapping what he just said, no narrating what you're about to do.
+- Swearing is fine and encouraged when it fits: frustration, a win, something absurd. "Fuck's sake, that's the third time." Say it plainly, never censor it or spell it with symbols, and never aim it at DIIZZY. Don't sprinkle it on routine answers just to sound casual.
+- Say it the way it's spoken. Numbers and times in words ("about three hundred megabytes", "Thursday at three", "twenty two percent"); no symbols (%, /, ->, ~, #, &), no file names or abbreviations spelled out ("the engine file", not "engine dot p y"), no URLs, paths, code, lists, markdown or emoji. Round numbers; give the one that matters, not the table.
+- If the answer needs detail (code, a list, a link, a long path), call show_on_screen with it and say in a few words that it's on screen.
+
+Good: "Yeah, that's the retry loop. It never backs off, so it hammers the API. I'd cap it at three tries."
+Bad: "The issue you're experiencing appears to be related to the retry logic. Here are a few things to consider: first, the loop has no backoff..."
+Good: "Fuck, the disk's at ninety one percent. Mostly Docker images; want me to prune?"
+Bad: "Disk usage is currently 91%. The majority is attributable to Docker images (see /var/lib/docker). Would you like me to run a prune? Let me know!"
+
 - Desktop tools, available only in this mode, act on DIIZZY's PC directly: open_app, focus_window, media_control, now_playing, spotify_play, show_on_screen. When asked, just do it and confirm briefly; don't narrate.
-- Coding work in one of DIIZZY's projects (fix, implement, refactor, investigate or explain code) goes to run_claude_task, not escalate_to_councilor or delegate_task. Use mode="ask" to investigate or answer without changing anything, mode="edit" to make changes (DIIZZY confirms first; once tested, the change is applied to DIIZZY's checked-out branch). Projects: {projects}.
+- Coding work in one of DIIZZY's projects (fix, implement, refactor, investigate or explain code) goes to run_claude_task, not escalate_to_councilor or delegate_task. Use mode="ask" to investigate or answer without changing anything, mode="edit" to make changes (DIIZZY confirms first; once tested, the change is applied to DIIZZY's checked-out branch). Projects: {projects}.{workspaces}
 - When a finished Claude task says a restart is needed to load its change, offer it. If DIIZZY agrees (or asks Icarus to restart), call restart_icarus with the parts named; it runs after this conversation ends, so just say it'll restart in a moment.
 - To explain something visual ("show me", an algorithm, an example), don't read it aloud: show it and narrate it in 2-6 beats. Code goes to show_visual; a grid that fills in step by step (DP tables, matrices) goes to show_table; flows, trees and architectures go to show_diagram. Keep examples small so they're quick: tables up to about 6x6, 3-5 beats, code under 25 lines. Call the tool once. Each beat is one or two spoken sentences plus the lines to light up while you say them. The beats are spoken for you, in order, with the lines highlighted, so after show_visual end your reply with one short closing sentence at most. If DIIZZY wants to keep it ("keep that up", "pop it out"), call keep_visual.
 - If a screenshot is attached, it's the window DIIZZY is looking at right now (he pressed the look hotkey): answer about what's on it, and refer to things by what they say or where they are.
@@ -34,7 +46,15 @@ You are speaking out loud through DIIZZY's desktop avatar. Everything you write 
 
 def desktop_prompt() -> str:
     projects = ", ".join(parse_projects()) or "none configured (set DESKTOP_CLAUDE_PROJECTS)"
-    return DESKTOP_PROMPT.replace("{projects}", projects)
+    workspaces = parse_workspaces()
+    extra = ""
+    if workspaces:
+        extra = (" Workspaces, for non-code work like pulling Canvas assignments or notes and drafting work for a course: "
+                 + ", ".join(f"{w.name} (a folder per area{'; can read Canvas' if 'canvas' in w.integrations else ''})"
+                             for w in workspaces.values())
+                 + ". Use run_claude_task with project=<workspace>, area=<the course folder name>; it runs in the background "
+                   "and tells him when it's done, so confirm briefly and carry on. If you don't know the folder name, ask.")
+    return DESKTOP_PROMPT.replace("{projects}", projects).replace("{workspaces}", extra)
 
 
 async def _call(name: str, args: dict, timeout: float | None = None) -> str:
@@ -82,18 +102,25 @@ async def show_on_screen(title: str, body: str) -> str:
     return await _call("show_on_screen", {"title": title, "body": body})
 
 
-async def run_claude_task(project: str, task: str, mode: str = "ask") -> str:
-    """Hand a coding task in one of DIIZZY's projects to Claude Code, which works on it in the background and reports back when it's done. mode="ask" investigates or answers questions about the code without changing anything; mode="edit" makes changes in an isolated worktree, has them tested, and applies them to the branch DIIZZY has checked out (kept on its own branch if they conflict or tests fail), after DIIZZY confirms on the desktop. Write task as a complete brief: Claude has no conversation context."""
+async def run_claude_task(project: str, task: str, mode: str = "ask", area: str = "") -> str:
+    """Hand a task to Claude Code, which works on it in the background and reports back when it's done. For a coding project: mode="ask" investigates or answers questions about the code without changing anything; mode="edit" makes changes in an isolated worktree, has them tested, and applies them to the branch DIIZZY has checked out (kept on its own branch if they conflict or tests fail), after DIIZZY confirms on the desktop. For a workspace (the configured non-code folders, such as "courses", which can read his Canvas): give the area, e.g. the course folder name, and Claude works in that folder, saves what it makes there (following the folder's layout) and never submits anything; mode is ignored and no confirmation is needed. If the work is on his screen, read the screenshot yourself and put the full assignment text in the task. Write task as a complete brief: Claude has no conversation context."""
     from .delegation import new_task_id
     from .tools import current_chat_id, current_platform, current_user_id
     from backend.database.redis_connection import get_redis_client
 
     projects = parse_projects()
+    workspaces = parse_workspaces()
     name = str(project).strip().lower()
-    if name not in projects:
-        return f"Unknown project {project!r}. Configured projects: {', '.join(projects) or 'none (DESKTOP_CLAUDE_PROJECTS is empty)'}."
+    if name not in projects and name not in workspaces:
+        known = list(projects) + [f"{w} (workspace)" for w in workspaces]
+        return f"Unknown project {project!r}. Configured: {', '.join(known) or 'none (DESKTOP_CLAUDE_PROJECTS is empty)'}."
+    area = str(area or "").strip()
+    if name in workspaces:
+        if not AREA_RE.match(area):
+            return f"{name} needs an area: the folder under it to work in (for example a course folder), letters, digits, . _ - only."
+        mode = "work"
     mode = str(mode).strip().lower()
-    if mode not in CLAUDE_MODES:
+    if mode not in CLAUDE_MODES and mode != "work":
         mode = "ask"
     if not str(task).strip():
         return "No task given. Write the task as a complete brief."
@@ -117,13 +144,13 @@ async def run_claude_task(project: str, task: str, mode: str = "ask") -> str:
     task_id = new_task_id()
     payload = {
         "type": "claude_code", "task_id": task_id, "timestamp": int(time.time()),
-        "project": name, "task": str(task), "mode": mode,
+        "project": name, "task": str(task), "mode": mode, "area": area,
         "platform": current_platform.get(), "chat_id": current_chat_id.get(), "user_id": current_user_id.get(),
     }
     receivers = await get_redis_client().publish("icarus:councilor:requests", json.dumps(payload))
     if not receivers:
         return "The Councilor isn't running, so the Claude task couldn't start."
-    where = f" on branch claude/{task_id}" if mode == "edit" else ""
+    where = f" on branch claude/{task_id}" if mode == "edit" else (f" in {name}/{area}" if mode == "work" else "")
     return f"Started Claude ({mode}) on {name} as task {task_id}{where}. It reports back when it finishes; don't wait for it."
 
 

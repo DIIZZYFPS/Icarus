@@ -167,6 +167,28 @@ class ClaudeRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self._log(repo).split("\n")[:2], ["claude: Fix the greeting", "mine"])
             self.assertEqual((repo / "app.py").read_text(), "print('fixed')\n")
 
+    async def test_cancelling_a_task_stops_claude(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = Path(d, "pid")
+            fake = Path(d, "claude")
+            fake.write_text("#!/bin/sh\necho $$ > %s\necho '{\"type\":\"system\"}'\nexec sleep 60\n" % pidfile)
+            fake.chmod(0o755)
+            project = Path(d, "project")
+            project.mkdir()
+            with mock.patch.dict(os.environ, {"CLAUDE_BIN": str(fake)}):
+                task = asyncio.create_task(claude_runner.run_claude(
+                    task_id="sub-2-abc123", project_name="project", project=project, task="look", mode="ask"))
+                for _ in range(100):
+                    await asyncio.sleep(.05)
+                    if pidfile.exists() and pidfile.read_text().strip():
+                        break
+                pid = int(pidfile.read_text())
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)   # gone, not left running in the background
+
     @unittest.skipUnless(shutil.which("git"), "needs git")
     async def test_uncommitted_work_in_the_same_file_holds_the_commit(self):
         with tempfile.TemporaryDirectory() as d:
